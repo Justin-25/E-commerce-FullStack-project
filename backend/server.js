@@ -6,12 +6,13 @@ const dotenv = require('dotenv');
 dns.setServers(["1.1.1.1", "8.8.8.8"]);
 
 // Connect to the config.env
+dotenv.config({ path: './config.env'});
 
 // Import the local module file
 const app = require('./app');
 
 // PORT SERVER
-const port = 3000;
+const port = process.env.PORT || 3000;
 
 // Connect to the Moongose Atlas Database
 
