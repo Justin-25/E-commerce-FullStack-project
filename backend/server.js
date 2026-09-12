@@ -10,13 +10,32 @@ dotenv.config({ path: './config.env'});
 
 // Import the local module file
 const app = require('./app');
+const { connectRedis } = require('./config/redis');
 
 // PORT SERVER
 const port = process.env.PORT || 3000;
 
 // Connect to the Moongose Atlas Database
+const databaseUrl = process.env.DATABASE_URL.replace(
+  '<PASSWORD>',
+  process.env.DATABASE_PASSWORD
+);
 
-// Start the server.js
-app.listen(port, () => {
-  console.log(`App running on port ${port}...`);
-});
+
+const startServer = async () => {
+  try {
+    await mongoose.connect(databaseUrl);
+      console.log('MongoDB connected successfully!')
+
+    await connectRedis();
+
+    app.listen(port, () => {
+      console.log(`Server running on port ${port}...`);
+    });
+  } catch (error) {
+    console.error('Startup failed:', error);
+    process.exit(1);
+  }
+}
+
+startServer();

@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const validator = require('validator');
+const bcrypt = require('bcrypt');
 
 const userSchema = new mongoose.Schema(
   {
@@ -44,11 +45,31 @@ const userSchema = new mongoose.Schema(
     passwordResetExpires: Date,
     active: {
       type: Boolean,
-      dafault: true,
+      default: true,
       select: false
     }
   }
 );
+
+//Mongoose middleware
+
+// hashed password
+userSchema.pre('save', async function() {
+  if(!this.isModified('password')) {
+    return;
+  }
+
+  this.password = await bcrypt.hash(this.password, 12);
+
+  this.passwordConfirm = undefined;
+});
+
+// Intance method
+
+// compare passwordCandidate on user password
+userSchema.methods.correctPassword= async function(candidatePassword, userPassword) {
+  return await bcrypt.compare(candidatePassword, userPassword);
+};
 
 const User = mongoose.model('User', userSchema);
 
