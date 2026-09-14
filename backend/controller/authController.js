@@ -52,3 +52,33 @@ const createRefreshSession = async (userId) => {
 
   return tokenId;
 }
+
+exports.signup = async (req, res) => {
+  try {
+    const { name, email, password, passwordConfirm } = req.body;
+
+    const user = await User.create({
+      name,
+      email,
+      password,
+      passwordConfirm
+    });
+
+    user.password = undefined;
+    user.active = undefined;
+
+    res.status(201).json({
+      status: 'success',
+      data: {
+        id: user._id,
+        name: user.name,
+        email: user.email
+      }
+    });
+  } catch (error) {
+    res.status(400).json({
+      status: 'fail',
+      message: error.message
+    })
+  }
+}
