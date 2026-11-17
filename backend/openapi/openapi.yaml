@@ -1,0 +1,128 @@
+openapi: 3.1.0
+info:
+  title: Vendora API
+  version: 0.1.0
+  description: |
+    Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
+    Milestone 1 covers the platform basics every module relies on:
+    health checks, the error format, request IDs and rate limiting.
+    Business endpoints will live under /api/v1 (milestone 3 onwards).
+servers:
+  - url: http://localhost:4000
+    description: Local development
+
+paths:
+  /health:
+    get:
+      summary: Liveness — is the process up?
+      description: |
+        Never touches the database or Redis, so it stays fast and cheap for uptime monitors.
+        Not rate-limited (monitors call it often and it has no dependencies).
+      operationId: getHealth
+      tags: [platform]
+      responses:
+        "200":
+          description: The API process is running.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/X-Request-Id" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+              example: { status: ok, uptimeSeconds: 12.4 }
+
+  /ready:
+    get:
+      summary: Readiness — can the API serve traffic?
+      description: |
+        Checks every dependency (Redis now, PostgreSQL from milestone 2) with a short timeout.
+        A dependency that is not configured is reported as "not_configured" and does not fail
+        readiness in development (production refuses to start without them).
+        Failure details are logged on the server only, never returned.
+      operationId: getReady
+      tags: [platform]
+      responses:
+        "200":
+          description: Every configured dependency answered.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+              example: { status: ready, checks: { redis: ok, database: not_configured } }
+        "503":
+          description: At least one configured dependency failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+              example: { status: not_ready, checks: { redis: error, database: ok } }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+components:
+  headers:
+    X-Request-Id:
+      description: |
+        ID of this request, also written to the server logs. A client may send its own
+        (letters, digits, "-" and "_", max 64 chars); anything else is replaced.
+      schema: { type: string, maxLength: 64 }
+
+  schemas:
+    Health:
+      type: object
+      required: [status, uptimeSeconds]
+      properties:
+        status: { type: string, const: ok }
+        uptimeSeconds: { type: number }
+
+    Readiness:
+      type: object
+      required: [status, checks]
+      properties:
+        status: { type: string, enum: [ready, not_ready] }
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [ok, error, not_configured]
+
+    Error:
+      description: |
+        Every error uses this shape. Messages are safe to show to users; stack traces and
+        internal details are never sent (they are logged with the same requestId).
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code:
+              type: string
+              enum: [BAD_REQUEST, INVALID_JSON, VALIDATION_ERROR, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, CONFLICT, PAYLOAD_TOO_LARGE, RATE_LIMITED, INTERNAL_ERROR]
+            message: { type: string }
+            requestId: { type: string }
+            fields:
+              description: Only for VALIDATION_ERROR — which input fields were wrong and why.
+              type: array
+              items:
+                type: object
+                required: [path, message]
+                properties:
+                  path: { type: string, example: "email" }
+                  message: { type: string, example: "Enter a valid email address" }
+      example:
+        error: { code: NOT_FOUND, message: "Route not found", requestId: "5f0c2a1e-8c7d-4b7e-9d1f-2a3b4c5d6e7f" }
+
+  responses:
+    BadRequest:
+      description: Malformed JSON (INVALID_JSON) or invalid input (VALIDATION_ERROR).
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    NotFound:
+      description: Unknown route or resource.
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    PayloadTooLarge:
+      description: JSON body larger than the 10 KB limit.
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    TooManyRequests:
+      description: Rate limit reached. RateLimit-* headers say when to retry.
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    InternalError:
+      description: Unexpected server error — generic message only.
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }

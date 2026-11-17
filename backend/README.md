@@ -1,0 +1,52 @@
+# Vendora API
+
+Backend for Vendora, a multi-vendor marketplace (Philippines, ₱).
+Built with Express 5 + TypeScript, Redis now, and PostgreSQL + Prisma from milestone 2.
+The API contract lives in [`openapi/openapi.yaml`](openapi/openapi.yaml).
+
+## Run it
+
+```bash
+cd backend
+npm install
+cp .env.example .env   # then fill in REDIS_URL (Upstash) and, from milestone 2, DATABASE_URL (Neon)
+npm run dev            # http://localhost:4000/health
+```
+
+| Script | What it does |
+|---|---|
+| `npm run dev` | Start with auto-reload |
+| `npm run check` | Type check + lint + tests (run before every commit) |
+| `npm test` | Tests only (Vitest + Supertest) |
+| `npm run build` / `npm start` | Compile to `dist/` and run the compiled server |
+
+## Structure
+
+```
+src/
+  app.ts                 builds the Express app (no server), so tests use the real app
+  server.ts              starts the server, connects Redis, shuts down gracefully
+  config/env.ts          validates environment variables at startup
+  lib/                   logger, Redis client, error types, safe query parser
+  middleware/            security headers + CORS, rate limit, request IDs, errors
+  modules/health/        GET /health (alive) and GET /ready (dependencies OK)
+tests/                   API and unit tests
+openapi/openapi.yaml     the API contract
+```
+
+## Security checklist: what's in place (milestone 1)
+
+| Checklist item | How it's done |
+|---|---|
+| Rate limiting (brute force, DoS) | `express-rate-limit`, shared in Redis. It counts the real visitor IP behind proxies (`TRUST_PROXY_HOPS`) and groups IPv6 addresses by /56. |
+| Limit body payload | JSON bodies are limited to 10 KB and get a 413 response if larger. |
+| Special HTTP headers | `helmet` (HSTS, nosniff, frame protection…); `X-Powered-By` is removed. |
+| Parameter pollution | Custom query parser: for a repeated key, only the last value counts. |
+| NoSQL/operator injection via query | The same parser never builds nested objects, so `?price[$gt]=0` stays plain text and `__proto__` can't pollute objects. |
+| Don't send error details to clients | One error format. Users only see safe messages; stack traces go to the log under the same request ID. |
+| Avoid evil regular expressions | Only simple, linear patterns are used, such as the request-ID check. |
+| Don't commit secrets | `.env` is git-ignored; config errors name the variable but never print its value. |
+| HTTPS | Production refuses non-https frontend origins; HSTS header is set. |
+| CORS for cookie login | Only the configured frontend origins are allowed, with credentials. |
+
+Coming in milestone 3 (sign-in): bcrypt, httpOnly cookies, refresh-token rotation and revocation, login lockout, CSRF protection, email verification, password reset, 2FA, and confirm-it's-you before sensitive actions.
