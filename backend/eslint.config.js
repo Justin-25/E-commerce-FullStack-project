@@ -3,7 +3,7 @@ import { defineConfig } from "eslint/config";
 import tseslint from "typescript-eslint";
 
 export default defineConfig(
-  { ignores: ["dist/", "coverage/"] },
+  { ignores: ["dist/", "coverage/", "src/generated/"] },
   js.configs.recommended,
   tseslint.configs.recommended,
   {
@@ -12,5 +12,7 @@ export default defineConfig(
       "@typescript-eslint/consistent-type-imports": "error",
       "no-console": "error"
     }
-  }
+  },
+  // command-line scripts may print progress
+  { files: ["prisma/**/*.ts"], rules: { "no-console": "off" } }
 );

@@ -6,6 +6,9 @@ node_modules/
 .env.*
 !.env.example
 
+# generated Prisma client (rebuilt by `npm run db:generate`)
+backend/src/generated/
+
 # build output & reports
 dist/
 build/

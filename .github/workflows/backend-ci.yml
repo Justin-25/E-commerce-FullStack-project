@@ -12,11 +12,26 @@ permissions:
 
 jobs:
   check:
-    name: Typecheck, lint, test, build
+    name: Typecheck, lint, test, migrate, seed, build
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: backend
+    services:
+      # A throwaway real PostgreSQL, only for this run (test credentials, not secrets).
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: vendora
+          POSTGRES_PASSWORD: vendora
+          POSTGRES_DB: vendora_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U vendora -d vendora_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://vendora:vendora@localhost:5432/vendora_ci
+      DIRECT_URL: postgresql://vendora:vendora@localhost:5432/vendora_ci
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -25,7 +40,14 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
       - run: npm ci
+      - run: npm run db:validate
+      - run: npm run db:generate
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
+      # The same migration + demo data on a real PostgreSQL server (seeding twice proves it's repeatable)
+      - run: npm run db:migrate
+      - run: npm run db:seed
+      - run: npm run db:seed
+      - run: npm run db:status
       - run: npm run build

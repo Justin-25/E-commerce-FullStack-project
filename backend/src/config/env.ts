@@ -17,7 +17,8 @@ const schema = z
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
     JSON_BODY_LIMIT: z.string().regex(/^\d{1,4}(kb|mb)$/, "use a size like 10kb").default("10kb"),
-    DATABASE_URL: optional(z.url()),
+    DATABASE_URL: optional(z.url()), // pooled (app)
+    DIRECT_URL: optional(z.url()), // direct (migrations only)
     REDIS_URL: optional(z.url())
   })
   .superRefine((env, ctx) => {
