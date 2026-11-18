@@ -61,9 +61,25 @@ How it works:
 - **Password changes end other sign-ins.** A reset or change revokes every other sign-in chain and sets an "invalid before" time, so passes issued earlier stop working at once. The owner gets a "your password was changed" email.
 - **Emails.** Sent in the background, so response times don't reveal whether an account exists. In development they're printed in the API terminal (look for `DEV OUTBOX`) so you can copy the code or link. A real email provider is added before deploying (milestone 9); production refuses to start with the outbox.
 
-How it's tested:
+## If Redis (Upstash) goes down
+
+Redis commands give up after 1 second instead of waiting, and each part of the API then does what's safest for it:
+
+| Part | While Redis is down |
+|---|---|
+| Browsing, the general rate limit | Keeps working without the limit (logged) |
+| `/ready` | 503 with `"redis": "error"` within ~3 seconds, so monitoring sees the real cause |
+| Sign-in, sign-up, codes, passwords | **503 `SERVICE_UNAVAILABLE`** with `Retry-After: 30`, before touching the database. Brute-force protection is never silently switched off. |
+| Already signed-in shoppers | Keep working: their pass is accepted without the sign-out check (logged) |
+| Refresh, sign-out | Keep working: they only need the database. The known trade-off: a pass signed out during the outage stays valid until it expires (at most 15 minutes), but it can't be renewed. |
+
+Measured with Redis pointed at an unreachable address: before this, every API request failed with a 500 after 25–32 seconds.
+
+## How it's tested
+
 - `tests/auth/*` drive the real routes, service and middleware with a pretend browser that keeps cookies and sends the CSRF token. Redis is faked in memory with a clock the tests can move forward.
 - **On your PC** the database is PGlite (Postgres inside Node): a fresh copy of the real migrations for each test file, with no internet needed. **In CI** (`TEST_DATABASE_URL`) the same tests run on a real PostgreSQL 18 server, each file in its own throwaway schema.
+- `tests/auth/outage.test.ts` and `tests/resilience.test.ts` switch the Redis stand-in off and check the table above, including a real Redis client timing out against an unreachable address.
 - `tests/openapi.test.ts` checks the contract matches the code: every route is documented (and every documented route exists), the error codes match, and no `$ref` is broken.
 - `tests/db/migration.test.ts` checks that every table, index, foreign key and safety rule really exists. CI also migrates and seeds a real PostgreSQL 18 server, the same major version as Neon.
 

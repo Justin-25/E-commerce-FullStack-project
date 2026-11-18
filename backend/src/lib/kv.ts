@@ -1,4 +1,5 @@
 import type { Redis } from "ioredis";
+import { DependencyUnavailableError } from "./errors.js";
 
 /**
  * Short-lived security data with automatic expiry: lockout counters, cooldowns,
@@ -21,29 +22,42 @@ export interface KeyValueStore {
 // INCR + EXPIRE in one atomic step, so a crash between them can't leave a counter that never expires.
 const INCREMENT_SCRIPT = `local n = redis.call('INCR', KEYS[1]) if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end return n`;
 
+/** Every failure (timeout, connection down) comes out as DependencyUnavailableError, so callers can tell it apart from bugs. */
 export class RedisKv implements KeyValueStore {
   constructor(private readonly redis: Redis) {}
 
+  private async run<T>(command: () => Promise<T>): Promise<T> {
+    try {
+      return await command();
+    } catch (err) {
+      throw new DependencyUnavailableError("redis", err);
+    }
+  }
+
   get(key: string) {
-    return this.redis.get(key);
+    return this.run(() => this.redis.get(key));
   }
-  async getMany(keys: string[]) {
-    return keys.length ? this.redis.mget(...keys) : [];
+  getMany(keys: string[]) {
+    return this.run(async () => (keys.length ? this.redis.mget(...keys) : []));
   }
-  async set(key: string, value: string, ttlSeconds: number) {
-    await this.redis.set(key, value, "EX", ttlSeconds);
+  set(key: string, value: string, ttlSeconds: number) {
+    return this.run(async () => {
+      await this.redis.set(key, value, "EX", ttlSeconds);
+    });
   }
-  async setIfAbsent(key: string, value: string, ttlSeconds: number) {
-    return (await this.redis.set(key, value, "EX", ttlSeconds, "NX")) === "OK";
+  setIfAbsent(key: string, value: string, ttlSeconds: number) {
+    return this.run(async () => (await this.redis.set(key, value, "EX", ttlSeconds, "NX")) === "OK");
   }
-  async increment(key: string, ttlSeconds: number) {
-    return Number(await this.redis.eval(INCREMENT_SCRIPT, 1, key, ttlSeconds));
+  increment(key: string, ttlSeconds: number) {
+    return this.run(async () => Number(await this.redis.eval(INCREMENT_SCRIPT, 1, key, ttlSeconds)));
   }
-  async ttl(key: string) {
-    return Math.max(0, await this.redis.ttl(key));
+  ttl(key: string) {
+    return this.run(async () => Math.max(0, await this.redis.ttl(key)));
   }
-  async delete(...keys: string[]) {
-    if (keys.length) await this.redis.del(...keys);
+  delete(...keys: string[]) {
+    return this.run(async () => {
+      if (keys.length) await this.redis.del(...keys);
+    });
   }
 }
 

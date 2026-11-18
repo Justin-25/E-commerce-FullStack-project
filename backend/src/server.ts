@@ -26,7 +26,7 @@ if (!prisma) logger.warn("DATABASE_URL is not set — sign-in and other database
 const kv = redis ? new RedisKv(redis) : new MemoryKv();
 const csrf = createCsrf(config);
 const tokens = new TokenService(config);
-const guards = createAuthGuards({ tokens, kv });
+const guards = createAuthGuards({ tokens, kv, logger });
 
 const routers: Router[] = [];
 let authService: AuthService | null = null;
@@ -40,7 +40,7 @@ if (prisma) {
     isBreached: createHibpCheck({ logger }),
     logger
   });
-  routers.push(authRouter({ service: authService, tokens, csrf, guards, config, ...(redis ? { rateLimitStore: redisRateLimitStore(redis, "rl:auth:") } : {}) }));
+  routers.push(authRouter({ service: authService, tokens, csrf, guards, config, logger, ...(redis ? { rateLimitStore: redisRateLimitStore(redis, "rl:auth:") } : {}) }));
 }
 
 const app = createApp({

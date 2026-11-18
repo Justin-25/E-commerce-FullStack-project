@@ -1,6 +1,6 @@
 import type { ErrorRequestHandler, RequestHandler } from "express";
 import { ZodError } from "zod";
-import { AppError, errorBody, type ErrorCode, type ErrorDetails, type FieldError } from "../lib/errors.js";
+import { AppError, DependencyUnavailableError, errorBody, type ErrorCode, type ErrorDetails, type FieldError } from "../lib/errors.js";
 
 interface BodyParserError {
   type?: string;
@@ -37,6 +37,12 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, next) => {
     code = "VALIDATION_ERROR";
     message = "Some fields are invalid";
     fields = err.issues.map((i) => ({ path: i.path.join("."), message: i.message }));
+  } else if (err instanceof DependencyUnavailableError) {
+    status = 503;
+    code = "SERVICE_UNAVAILABLE";
+    message = "This is briefly unavailable. Please try again in a minute.";
+    details = { retryAfterSeconds: 30 };
+    req.log.error({ dependency: err.dependency, err: err.cause }, "dependency unavailable");
   } else if (isCsrfError(err)) {
     status = 403;
     code = "CSRF_INVALID";
@@ -52,6 +58,7 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, next) => {
   }
 
   if (typeof details?.retryAfterSeconds === "number") res.set("Retry-After", String(details.retryAfterSeconds));
-  if (status >= 500) req.log.error({ err }, "unhandled error");
+  // Only real bugs are "unhandled" (a 503 from a dependency outage is logged above with its cause).
+  if (code === "INTERNAL_ERROR") req.log.error({ err }, "unhandled error");
   res.status(status).json(errorBody(code, message, req.id, { ...(fields ? { fields } : {}), ...(details ? { details } : {}) }));
 };

@@ -10,6 +10,7 @@ export const ERROR_CODES = [
   "PAYLOAD_TOO_LARGE",
   "RATE_LIMITED",
   "INTERNAL_ERROR",
+  "SERVICE_UNAVAILABLE",
   // sign-in (milestone 3)
   "CSRF_INVALID",
   "INVALID_CREDENTIALS",
@@ -48,6 +49,20 @@ export class AppError extends Error {
     this.name = "AppError";
     if (extra.fields) this.fields = extra.fields;
     if (extra.details) this.details = extra.details;
+  }
+}
+
+/**
+ * A service we depend on (Redis) didn't answer in time. The error handler
+ * turns it into 503 SERVICE_UNAVAILABLE with Retry-After and logs the cause.
+ */
+export class DependencyUnavailableError extends Error {
+  constructor(
+    readonly dependency: string,
+    override readonly cause: unknown
+  ) {
+    super(`${dependency} is unavailable`);
+    this.name = "DependencyUnavailableError";
   }
 }
 

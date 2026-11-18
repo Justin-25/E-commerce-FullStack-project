@@ -4,7 +4,7 @@ import { Prisma, type PrismaClient, type SecurityEventType, type User } from "..
 import type { BreachCheck } from "../../lib/breachedPasswords.js";
 import { randomToken, sha256Hex } from "../../lib/crypto.js";
 import type { EmailMessage, EmailSender } from "../../lib/email.js";
-import { AppError } from "../../lib/errors.js";
+import { AppError, DependencyUnavailableError } from "../../lib/errors.js";
 import type { KeyValueStore } from "../../lib/kv.js";
 import type { Logger } from "../../lib/logger.js";
 import { dummyHash, hashPassword, needsRehash, verifyPassword } from "../../lib/password.js";
@@ -240,8 +240,9 @@ export class AuthService {
     }
     if (familyId) await this.revokeFamily(familyId, "logout");
     if (claims) {
-      const secondsLeft = claims.expiresAt - Math.floor(this.now().getTime() / 1000);
-      await this.deps.kv.set(authKeys.deniedAccess(claims.jti), "1", Math.max(1, secondsLeft));
+      const { jti } = claims;
+      const secondsLeft = Math.max(1, claims.expiresAt - Math.floor(this.now().getTime() / 1000));
+      await this.bestEffort("signed-out access pass stays valid up to 15 minutes", () => this.deps.kv.set(authKeys.deniedAccess(jti), "1", secondsLeft));
     }
   }
 
@@ -301,7 +302,7 @@ export class AuthService {
     });
 
     await this.afterPasswordChange(link.user, families, now);
-    await this.lockout.clear(emailKey(link.user.email), client.ipKey);
+    await this.bestEffort("sign-in pause not lifted after the reset", () => this.lockout.clear(emailKey(link.user.email), client.ipKey));
     return session;
   }
 
@@ -397,7 +398,24 @@ export class AuthService {
 
   /** Access passes from these chains are refused until they would have expired anyway. */
   private async markFamiliesRevoked(familyIds: string[]) {
-    await Promise.all(familyIds.map((f) => this.deps.kv.set(authKeys.revokedFamily(f), "1", ACCESS_TTL_SECONDS + 60)));
+    await this.bestEffort("revoked sign-ins not saved; their access passes stay valid up to 15 minutes", () =>
+      Promise.all(familyIds.map((f) => this.deps.kv.set(authKeys.revokedFamily(f), "1", ACCESS_TTL_SECONDS + 60)))
+    );
+  }
+
+  /**
+   * For Redis writes that happen AFTER the database already did the real work
+   * (sign-out, revoked chains, password changed): if Redis is down, don't fail
+   * the request. The sign-ins are already ended in the database, so they can't
+   * be refreshed; only passes already issued keep working, at most 15 minutes. Logged.
+   */
+  private async bestEffort(consequence: string, work: () => Promise<unknown>) {
+    try {
+      await work();
+    } catch (err) {
+      if (!(err instanceof DependencyUnavailableError)) throw err;
+      this.deps.logger?.error({ err: err.cause }, `redis unavailable: ${consequence}`);
+    }
   }
 
   /**
@@ -407,7 +425,7 @@ export class AuthService {
    */
   private async afterPasswordChange(user: User, endedFamilies: string[], changedAt: Date) {
     const changedAtSeconds = Math.floor(changedAt.getTime() / 1000);
-    await this.deps.kv.set(authKeys.invalidBefore(user.id), String(changedAtSeconds), ACCESS_TTL_SECONDS + 60);
+    await this.bestEffort("password-change time not saved; older access passes stay valid up to 15 minutes", () => this.deps.kv.set(authKeys.invalidBefore(user.id), String(changedAtSeconds), ACCESS_TTL_SECONDS + 60));
     await this.markFamiliesRevoked(endedFamilies);
     this.sendEmail(passwordChangedMessage(user.email, user.name, this.deps.config.APP_URL));
   }

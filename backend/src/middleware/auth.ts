@@ -1,7 +1,8 @@
 import type { RequestHandler } from "express";
 import type { Role } from "../generated/prisma/enums.js";
-import { AppError } from "../lib/errors.js";
+import { AppError, DependencyUnavailableError } from "../lib/errors.js";
 import type { KeyValueStore } from "../lib/kv.js";
+import type { Logger } from "../lib/logger.js";
 import { authKeys } from "../modules/auth/keys.js";
 import type { TokenService } from "../modules/auth/tokens.js";
 
@@ -18,19 +19,29 @@ export interface AuthGuards {
  * Checks the access pass on every request without a database query: the JWT
  * signature and expiry, plus ONE Redis round trip for the three ways a pass can
  * be cancelled early (signed out, sign-in chain revoked, password changed).
+ *
+ * If Redis is down, a validly signed pass is still accepted (logged), so
+ * signed-in shoppers can keep browsing and buying during a short outage. The
+ * trade-off: a pass signed out in the last 15 minutes works again until Redis
+ * is back. Refreshing still checks the database, so revoked sign-ins can't renew.
  */
-export function createAuthGuards({ tokens, kv }: { tokens: TokenService; kv: KeyValueStore }): AuthGuards {
+export function createAuthGuards({ tokens, kv, logger }: { tokens: TokenService; kv: KeyValueStore; logger?: Logger }): AuthGuards {
   const authenticate: RequestHandler = async (req, _res, next) => {
     const token: unknown = req.cookies?.[tokens.cookieNames.access];
     if (typeof token !== "string" || token === "") return next();
     const claims = await tokens.verifyAccess(token);
     if (!claims) return next();
-    const [denied, familyRevoked, invalidBefore] = await kv.getMany([
-      authKeys.deniedAccess(claims.jti),
-      authKeys.revokedFamily(claims.familyId),
-      authKeys.invalidBefore(claims.userId)
-    ]);
-    if (denied || familyRevoked || (invalidBefore && claims.issuedAt < Number(invalidBefore))) return next();
+    try {
+      const [denied, familyRevoked, invalidBefore] = await kv.getMany([
+        authKeys.deniedAccess(claims.jti),
+        authKeys.revokedFamily(claims.familyId),
+        authKeys.invalidBefore(claims.userId)
+      ]);
+      if (denied || familyRevoked || (invalidBefore && claims.issuedAt < Number(invalidBefore))) return next();
+    } catch (err) {
+      if (!(err instanceof DependencyUnavailableError)) throw err;
+      logger?.warn({ userId: claims.userId, err: err.cause }, "redis unavailable: access pass accepted without the sign-out check");
+    }
     req.auth = claims;
     next();
   };

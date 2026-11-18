@@ -48,7 +48,11 @@ export function createApp({ config, logger, checks = {}, rateLimitStore, csrf = 
       windowMs: config.RATE_LIMIT_WINDOW_MS,
       limit: config.RATE_LIMIT_MAX,
       ...(rateLimitStore ? { store: rateLimitStore } : {}),
-      skip: (req) => req.path === "/health"
+      skip: (req) => req.path === "/health",
+      // If Redis is down, keep the shop usable without the general limit (logged).
+      // Sign-in has its own stricter limit that refuses instead.
+      onStoreError: "allow",
+      logger
     })
   );
   app.use(cookieParser());

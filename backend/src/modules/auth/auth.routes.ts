@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { ipKeyGenerator, type Store } from "express-rate-limit";
 import type { Config } from "../../config/env.js";
 import { AppError } from "../../lib/errors.js";
+import type { Logger } from "../../lib/logger.js";
 import type { AuthGuards } from "../../middleware/auth.js";
 import type { Csrf } from "../../middleware/csrf.js";
 import { rateLimiter } from "../../middleware/rateLimit.js";
@@ -25,6 +26,7 @@ export interface AuthRouterDeps {
   config: Pick<Config, "AUTH_RATE_LIMIT_MAX">;
   /** Redis store for the stricter auth limit (in-memory when omitted). */
   rateLimitStore?: Store;
+  logger?: Logger;
 }
 
 const clientInfo = (req: Request): ClientInfo => {
@@ -33,10 +35,17 @@ const clientInfo = (req: Request): ClientInfo => {
 };
 
 /** Thin HTTP layer: validate input (allow-lists), call the service, set cookies. */
-export function authRouter({ service, tokens, csrf, guards, config, rateLimitStore }: AuthRouterDeps): Router {
+export function authRouter({ service, tokens, csrf, guards, config, rateLimitStore, logger }: AuthRouterDeps): Router {
   const router = Router();
-  // Stricter per-IP limit on endpoints that guess passwords or send emails.
-  const authLimit = rateLimiter({ windowMs: 15 * 60 * 1000, limit: config.AUTH_RATE_LIMIT_MAX, ...(rateLimitStore ? { store: rateLimitStore } : {}) });
+  // Stricter per-IP limit on endpoints that guess passwords or send emails. If Redis is down it
+  // answers 503 before anything else runs: brute-force protection is never silently switched off.
+  const authLimit = rateLimiter({
+    windowMs: 15 * 60 * 1000,
+    limit: config.AUTH_RATE_LIMIT_MAX,
+    onStoreError: "refuse",
+    ...(rateLimitStore ? { store: rateLimitStore } : {}),
+    ...(logger ? { logger } : {})
+  });
 
   const signIn = (req: Request, res: Response, result: SignInResult) => {
     tokens.setSessionCookies(res, result);

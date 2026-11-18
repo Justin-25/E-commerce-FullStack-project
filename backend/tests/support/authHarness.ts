@@ -1,4 +1,5 @@
 import { Router, type Express } from "express";
+import { pino } from "pino";
 import { expect } from "vitest";
 import { createApp } from "../../src/app.js";
 import { DevOutbox } from "../../src/lib/email.js";
@@ -10,6 +11,7 @@ import { AuthService } from "../../src/modules/auth/auth.service.js";
 import { TokenService } from "../../src/modules/auth/tokens.js";
 import { silentLogger, testConfig } from "../helpers.js";
 import { Browser } from "./browser.js";
+import { FlakyKv, FlakyStore, type RedisSwitch } from "./flaky.js";
 import { createTestDb, type TestDb } from "./testDb.js";
 
 export const AUTH = {
@@ -32,22 +34,27 @@ export const BREACHED_PASSWORDS = ["password123", "iloveyou2024"];
 /**
  * The real sign-in stack (routes, service, guards, CSRF) on a fresh PGlite
  * database, with fakes only at the edges: in-memory Redis (with a clock we can
- * move forward), an email outbox we can read, and an offline breach checker.
+ * move forward and a switch to make it "go down"), an email outbox we can read,
+ * an offline breach checker, and captured warning/error logs.
  */
 export async function createAuthHarness(env: Record<string, string> = {}) {
   const db: TestDb = await createTestDb();
   const clock = { offsetMs: 0 };
-  const kv = new MemoryKv(() => Date.now() + clock.offsetMs);
+  const redis: RedisSwitch = { down: false };
+  const memory = new MemoryKv(() => Date.now() + clock.offsetMs);
+  const kv = new FlakyKv(memory, redis);
   const outbox = new DevOutbox();
   const breached = new Set(BREACHED_PASSWORDS);
+  const logs: { level: number; msg: string }[] = [];
+  const logger = pino({ level: "warn" }, { write: (line: string) => void logs.push(JSON.parse(line)) });
 
   const build = (overrides: Record<string, string> = {}): Express => {
     // High limits by default so tests aren't throttled; rate-limit tests lower them.
     const config = testConfig({ RATE_LIMIT_MAX: "100000", AUTH_RATE_LIMIT_MAX: "100000", ...env, ...overrides });
     const tokens = new TokenService(config);
     const csrf = createCsrf(config);
-    const guards = createAuthGuards({ tokens, kv });
-    const service = new AuthService({ prisma: db.prisma, kv, email: outbox, tokens, config, isBreached: async (p) => breached.has(p) });
+    const guards = createAuthGuards({ tokens, kv, logger });
+    const service = new AuthService({ prisma: db.prisma, kv, email: outbox, tokens, config, isBreached: async (p) => breached.has(p), logger });
     const testRoutes = Router()
       .get("/test/admin-only", ...guards.requireAuth, guards.requireRole("ADMIN"), (_req, res) => {
         res.json({ ok: true });
@@ -55,7 +62,8 @@ export async function createAuthHarness(env: Record<string, string> = {}) {
       .get("/test/whoami", guards.authenticate, (req, res) => {
         res.json({ userId: req.auth?.userId ?? null });
       });
-    return createApp({ config, logger: silentLogger, csrf, routers: [authRouter({ service, tokens, csrf, guards, config }), testRoutes] });
+    const auth = authRouter({ service, tokens, csrf, guards, config, logger, rateLimitStore: new FlakyStore(redis) });
+    return createApp({ config, logger: silentLogger, csrf, routers: [auth, testRoutes] });
   };
 
   const app = build();
@@ -70,7 +78,12 @@ export async function createAuthHarness(env: Record<string, string> = {}) {
   const h = {
     app,
     db,
-    kv,
+    /** The in-memory Redis stand-in (works even while `redis.down`, for setting up tests). */
+    kv: memory,
+    /** Set `redis.down = true` to simulate an outage. */
+    redis,
+    /** Warnings and errors logged by the sign-in code. */
+    logs,
     outbox,
     breached,
     /** Same database and Redis, different settings (e.g. a low rate limit). */

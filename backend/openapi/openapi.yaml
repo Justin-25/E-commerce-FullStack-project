@@ -17,6 +17,9 @@ info:
       `GET /api/v1/auth/csrf` when the app loads. Sign-in, sign-out and email verification
       return a new token, because the old one stops working when you sign in or out.
     - In production the cookies get the `__Host-` / `__Secure-` prefixes and the Secure flag.
+    - If Redis is briefly unavailable, browsing and signed-in use keep working, but sign-in, sign-up,
+      code and password endpoints answer 503 SERVICE_UNAVAILABLE (see Retry-After) instead of
+      running without brute-force protection.
 servers:
   - url: http://localhost:4000
     description: Local development
@@ -113,6 +116,7 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "403": { $ref: "#/components/responses/CsrfInvalid" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /api/v1/auth/verify-email:
     post:
@@ -135,6 +139,7 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "403": { $ref: "#/components/responses/CsrfInvalid" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /api/v1/auth/resend-verification:
     post:
@@ -160,6 +165,7 @@ paths:
               schema: { $ref: "#/components/schemas/VerificationSent" }
         "403": { $ref: "#/components/responses/CsrfInvalid" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /api/v1/auth/login:
     post:
@@ -198,6 +204,7 @@ paths:
           headers:
             Retry-After: { schema: { type: integer }, description: Seconds until sign-in unlocks. }
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /api/v1/auth/refresh:
     post:
@@ -270,6 +277,7 @@ paths:
               schema: { $ref: "#/components/schemas/ResetLinkSent" }
         "403": { $ref: "#/components/responses/CsrfInvalid" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /api/v1/auth/reset-password:
     post:
@@ -294,6 +302,7 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "403": { $ref: "#/components/responses/CsrfInvalid" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /api/v1/auth/change-password:
     post:
@@ -333,6 +342,7 @@ paths:
         "429":
           description: ACCOUNT_LOCKED after 5 wrong current passwords, or RATE_LIMITED.
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /api/v1/auth/me:
     get:
@@ -422,6 +432,7 @@ components:
                 - PAYLOAD_TOO_LARGE
                 - RATE_LIMITED
                 - INTERNAL_ERROR
+                - SERVICE_UNAVAILABLE
                 - CSRF_INVALID
                 - INVALID_CREDENTIALS
                 - ACCOUNT_LOCKED
@@ -538,6 +549,14 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/SignedIn" }
+    ServiceUnavailable:
+      description: |
+        SERVICE_UNAVAILABLE. Redis (sign-in limits and lockouts) did not answer, so sign-in, sign-up,
+        code and password endpoints refuse rather than run without brute-force protection.
+        Retry after the seconds in the Retry-After header.
+      headers:
+        Retry-After: { schema: { type: integer }, description: Seconds to wait before retrying. }
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     CsrfInvalid:
       description: CSRF_INVALID. Missing or wrong X-CSRF-Token, or the request came from another website.
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
