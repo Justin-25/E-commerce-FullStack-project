@@ -73,10 +73,18 @@ describe("error responses", () => {
     expect(res.body.error.code).toBe("PAYLOAD_TOO_LARGE");
   });
 
-  it("accepts a normal JSON body", async () => {
-    const res = await request(buildApp()).post("/api/v1/echo").send({ email: "maria@example.com" });
+  it("accepts a normal JSON body (with a CSRF token)", async () => {
+    const agent = request.agent(buildApp());
+    const { body } = await agent.get("/api/v1/auth/csrf");
+    const res = await agent.post("/api/v1/echo").set("X-CSRF-Token", body.csrfToken).send({ email: "maria@example.com" });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ body: { email: "maria@example.com" } });
+  });
+
+  it("refuses a POST without a CSRF token (403 CSRF_INVALID)", async () => {
+    const res = await request(buildApp()).post("/api/v1/echo").send({ email: "maria@example.com" });
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe("CSRF_INVALID");
   });
 
   it("hides internal error details (no message, no stack)", async () => {

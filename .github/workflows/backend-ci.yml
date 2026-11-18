@@ -33,6 +33,9 @@ jobs:
     env:
       DATABASE_URL: postgresql://vendora:vendora@localhost:5432/vendora_ci
       DIRECT_URL: postgresql://vendora:vendora@localhost:5432/vendora_ci
+      # Database tests run here on real PostgreSQL 18 (each test file gets its own throwaway schema);
+      # on your PC they use PGlite instead.
+      TEST_DATABASE_URL: postgresql://vendora:vendora@localhost:5432/vendora_ci
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

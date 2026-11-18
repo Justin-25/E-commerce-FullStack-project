@@ -176,7 +176,7 @@ model User {
   id                 String     @id @default(uuid(7)) @db.Uuid
   email              String     @unique @db.VarChar(254) // always lowercase (CHECK)
   emailVerifiedAt    DateTime?  @db.Timestamptz(3)
-  passwordHash       String?    @db.VarChar(255) // bcrypt; null for Google-only accounts
+  passwordHash       String?    @db.VarChar(255) // Argon2id (PHC string); null for Google-only accounts
   name               String     @db.VarChar(100)
   phone              String?    @db.VarChar(20)
   role               Role       @default(CUSTOMER)
@@ -235,11 +235,12 @@ model Session {
   userAgent        String?   @db.VarChar(512)
   ipAddress        String?   @db.VarChar(45)
   location         String?   @db.VarChar(100)
+  persistent       Boolean   @default(false) // "Keep me signed in": 30-day cookie; false = ends when the browser closes
   createdAt        DateTime  @default(now()) @db.Timestamptz(3)
   lastUsedAt       DateTime  @default(now()) @db.Timestamptz(3)
-  expiresAt        DateTime  @db.Timestamptz(3)
+  expiresAt        DateTime  @db.Timestamptz(3) // fixed at sign-in; refreshing never extends it
   revokedAt        DateTime? @db.Timestamptz(3)
-  revokedReason    String?   @db.VarChar(50)
+  revokedReason    String?   @db.VarChar(50) // rotated | logout | reuse_detected | password_changed | user_inactive
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -248,7 +249,7 @@ model Session {
   @@map("sessions")
 }
 
-/// Email verification codes, password-reset links and email-change links — stored only as SHA-256 hashes.
+/// Email verification codes, password-reset links and email-change links — stored only as keyed hashes (HMAC-SHA256).
 model AuthToken {
   id        String        @id @default(uuid(7)) @db.Uuid
   userId    String        @db.Uuid

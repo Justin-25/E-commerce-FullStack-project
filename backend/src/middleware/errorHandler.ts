@@ -1,6 +1,6 @@
 import type { ErrorRequestHandler, RequestHandler } from "express";
 import { ZodError } from "zod";
-import { AppError, errorBody, type ErrorCode, type FieldError } from "../lib/errors.js";
+import { AppError, errorBody, type ErrorCode, type ErrorDetails, type FieldError } from "../lib/errors.js";
 
 interface BodyParserError {
   type?: string;
@@ -8,6 +8,9 @@ interface BodyParserError {
 }
 const isBodyParserError = (err: unknown): err is BodyParserError =>
   typeof err === "object" && err !== null && "type" in err && typeof (err as BodyParserError).type === "string";
+
+// csrf-csrf throws an http-errors 403 with this code when the token is missing or wrong.
+const isCsrfError = (err: unknown) => typeof err === "object" && err !== null && (err as { code?: unknown }).code === "EBADCSRFTOKEN";
 
 export const notFound: RequestHandler = (req, res) => {
   res.status(404).json(errorBody("NOT_FOUND", "Route not found", req.id));
@@ -25,14 +28,19 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, next) => {
   let code: ErrorCode = "INTERNAL_ERROR";
   let message = "Something went wrong. Please try again.";
   let fields: FieldError[] | undefined;
+  let details: ErrorDetails | undefined;
 
   if (err instanceof AppError) {
-    ({ status, code, message, fields } = err);
+    ({ status, code, message, fields, details } = err);
   } else if (err instanceof ZodError) {
     status = 400;
     code = "VALIDATION_ERROR";
     message = "Some fields are invalid";
     fields = err.issues.map((i) => ({ path: i.path.join("."), message: i.message }));
+  } else if (isCsrfError(err)) {
+    status = 403;
+    code = "CSRF_INVALID";
+    message = "Your session on this page expired. Refresh the page and try again.";
   } else if (isBodyParserError(err)) {
     if (err.type === "entity.parse.failed") {
       status = 400; code = "INVALID_JSON"; message = "Request body is not valid JSON";
@@ -43,6 +51,7 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, next) => {
     }
   }
 
+  if (typeof details?.retryAfterSeconds === "number") res.set("Retry-After", String(details.retryAfterSeconds));
   if (status >= 500) req.log.error({ err }, "unhandled error");
-  res.status(status).json(errorBody(code, message, req.id, fields));
+  res.status(status).json(errorBody(code, message, req.id, { ...(fields ? { fields } : {}), ...(details ? { details } : {}) }));
 };

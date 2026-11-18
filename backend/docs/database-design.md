@@ -22,7 +22,7 @@ The diagrams use Mermaid: GitHub shows them as pictures, and in VS Code install 
 | **IDs are UUID v7** (random, time-ordered). | IDs can't be guessed (no `/orders/1`, `/orders/2`, …) and new rows still sort by time. Shoppers see readable order numbers like `VD-21458`. These come from a counter that starts at 21000. The numbers are unique and increasing, but may skip a number when an order fails to save, which is normal in Postgres. |
 | **Orders store copies (snapshots)** of the product name, price, photo and delivery address. | A receipt must not change when a seller edits a product later. |
 | **Products are archived, never deleted.** | Old orders and reviews keep working. |
-| **Secrets are only stored hashed or encrypted.** Passwords use bcrypt; reset and refresh tokens are SHA-256 hashes; tax IDs (TIN), payout account numbers and 2FA secrets are encrypted (AES-256-GCM). | A stolen database copy can't be used to log in or read private data (security checklist: "compromised database"). |
+| **Secrets are only stored hashed or encrypted.** Passwords use Argon2id; refresh tokens are SHA-256 hashes; one-time codes and links are keyed hashes (HMAC-SHA256); tax IDs (TIN), payout account numbers and 2FA secrets are encrypted (AES-256-GCM). | A stolen database copy can't be used to log in or read private data (security checklist: "compromised database"). |
 | **Every table has `createdAt`/`updatedAt`; foreign keys and filter columns have indexes.** | Fast lookups. After the first migration, the indexes will be checked in Postgres itself, because in Tooth Fairy one index silently failed to build. |
 
 ---
@@ -41,7 +41,7 @@ erDiagram
     uuid id PK
     string email UK "stored lowercase"
     datetime emailVerifiedAt "null = not verified"
-    string passwordHash "bcrypt; null for Google-only"
+    string passwordHash "Argon2id; null for Google-only"
     string name
     string phone "+63…"
     enum role "CUSTOMER | SELLER | ADMIN"
@@ -61,6 +61,7 @@ erDiagram
     uuid userId FK
     string refreshTokenHash UK "SHA-256"
     uuid familyId "rotation chain: reuse of an old token revokes the chain"
+    bool persistent "keep me signed in: 30 days, else ends with the browser"
     string userAgent
     string ipAddress
     string location "e.g. Manila, PH"

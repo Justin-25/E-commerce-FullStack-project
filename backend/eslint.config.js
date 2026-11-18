@@ -14,5 +14,5 @@ export default defineConfig(
     }
   },
   // command-line scripts may print progress
-  { files: ["prisma/**/*.ts"], rules: { "no-console": "off" } }
+  { files: ["prisma/**/*.ts", "scripts/**/*.ts"], rules: { "no-console": "off" } }
 );

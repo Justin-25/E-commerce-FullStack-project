@@ -1,8 +1,10 @@
+import cookieParser from "cookie-parser";
 import express, { type Express, type Router } from "express";
 import type { Store } from "express-rate-limit";
 import type { Config } from "./config/env.js";
 import type { Logger } from "./lib/logger.js";
 import { createQueryParser } from "./lib/queryParser.js";
+import { createCsrf, originCheck, type Csrf } from "./middleware/csrf.js";
 import { errorHandler, notFound } from "./middleware/errorHandler.js";
 import { rateLimiter } from "./middleware/rateLimit.js";
 import { requestLogger } from "./middleware/requestLogger.js";
@@ -19,7 +21,9 @@ export interface AppOptions {
   checks?: ReadinessChecks;
   /** Shared rate-limit store (Redis in real runs, in-memory when omitted). */
   rateLimitStore?: Store;
-  /** Feature routers, mounted under /api/v1 (auth, products… from milestone 3). */
+  /** CSRF protection; pass the same instance the auth router uses (created from config when omitted). */
+  csrf?: Csrf;
+  /** Feature routers, mounted under /api/v1 (auth, products…). */
   routers?: Router[];
   /** How long each readiness check may take before it counts as down. */
   readinessTimeoutMs?: number;
@@ -28,10 +32,10 @@ export interface AppOptions {
 /**
  * Builds the Express app without starting a server, so tests can exercise the
  * exact same app with fake dependencies. Middleware order matters:
- * request ID/logging → security headers + CORS → rate limit → JSON body (10 KB)
- * → routes → 404 → error handler.
+ * request ID/logging → security headers + CORS → rate limit → cookies → JSON body (10 KB)
+ * → CSRF (Origin check + token, on POST/PUT/PATCH/DELETE) → routes → 404 → error handler.
  */
-export function createApp({ config, logger, checks = {}, rateLimitStore, routers = [], readinessTimeoutMs = 2000 }: AppOptions): Express {
+export function createApp({ config, logger, checks = {}, rateLimitStore, csrf = createCsrf(config), routers = [], readinessTimeoutMs = 2000 }: AppOptions): Express {
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", config.TRUST_PROXY_HOPS);
@@ -47,7 +51,10 @@ export function createApp({ config, logger, checks = {}, rateLimitStore, routers
       skip: (req) => req.path === "/health"
     })
   );
+  app.use(cookieParser());
   app.use(express.json({ limit: config.JSON_BODY_LIMIT, strict: true }));
+  app.use(originCheck(config.CORS_ORIGINS));
+  app.use(csrf.protect);
 
   app.use(healthRouter(checks, readinessTimeoutMs));
   for (const router of routers) app.use("/api/v1", router);

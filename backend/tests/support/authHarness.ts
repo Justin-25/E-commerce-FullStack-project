@@ -1,0 +1,97 @@
+import { Router, type Express } from "express";
+import { expect } from "vitest";
+import { createApp } from "../../src/app.js";
+import { DevOutbox } from "../../src/lib/email.js";
+import { MemoryKv } from "../../src/lib/kv.js";
+import { createAuthGuards } from "../../src/middleware/auth.js";
+import { createCsrf } from "../../src/middleware/csrf.js";
+import { authRouter } from "../../src/modules/auth/auth.routes.js";
+import { AuthService } from "../../src/modules/auth/auth.service.js";
+import { TokenService } from "../../src/modules/auth/tokens.js";
+import { silentLogger, testConfig } from "../helpers.js";
+import { Browser } from "./browser.js";
+import { createTestDb, type TestDb } from "./testDb.js";
+
+export const AUTH = {
+  register: "/api/v1/auth/register",
+  verifyEmail: "/api/v1/auth/verify-email",
+  resend: "/api/v1/auth/resend-verification",
+  login: "/api/v1/auth/login",
+  refresh: "/api/v1/auth/refresh",
+  logout: "/api/v1/auth/logout",
+  me: "/api/v1/auth/me"
+} as const;
+
+export const GOOD_PASSWORD = "correct horse battery staple";
+/** Passwords the fake breach checker treats as leaked. */
+export const BREACHED_PASSWORDS = ["password123", "iloveyou2024"];
+
+/**
+ * The real sign-in stack (routes, service, guards, CSRF) on a fresh PGlite
+ * database, with fakes only at the edges: in-memory Redis (with a clock we can
+ * move forward), an email outbox we can read, and an offline breach checker.
+ */
+export async function createAuthHarness(env: Record<string, string> = {}) {
+  const db: TestDb = await createTestDb();
+  const clock = { offsetMs: 0 };
+  const kv = new MemoryKv(() => Date.now() + clock.offsetMs);
+  const outbox = new DevOutbox();
+  const breached = new Set(BREACHED_PASSWORDS);
+
+  const build = (overrides: Record<string, string> = {}): Express => {
+    // High limits by default so tests aren't throttled; rate-limit tests lower them.
+    const config = testConfig({ RATE_LIMIT_MAX: "100000", AUTH_RATE_LIMIT_MAX: "100000", ...env, ...overrides });
+    const tokens = new TokenService(config);
+    const csrf = createCsrf(config);
+    const guards = createAuthGuards({ tokens, kv });
+    const service = new AuthService({ prisma: db.prisma, kv, email: outbox, tokens, config, isBreached: async (p) => breached.has(p) });
+    const testRoutes = Router()
+      .get("/test/admin-only", ...guards.requireAuth, guards.requireRole("ADMIN"), (_req, res) => {
+        res.json({ ok: true });
+      })
+      .get("/test/whoami", guards.authenticate, (req, res) => {
+        res.json({ userId: req.auth?.userId ?? null });
+      });
+    return createApp({ config, logger: silentLogger, csrf, routers: [authRouter({ service, tokens, csrf, guards, config }), testRoutes] });
+  };
+
+  const app = build();
+
+  /** The 6-digit code in the newest email to this address. */
+  const codeFor = (email: string): string => {
+    const code = /\b(\d{6})\b/.exec(outbox.lastTo(email)?.text ?? "")?.[1];
+    if (!code) throw new Error(`no code emailed to ${email}`);
+    return code;
+  };
+
+  const h = {
+    app,
+    db,
+    kv,
+    outbox,
+    breached,
+    /** Same database and Redis, different settings (e.g. a low rate limit). */
+    buildApp: build,
+    /** Moves the fake Redis clock forward (lockouts, cooldowns). */
+    advance: (seconds: number) => {
+      clock.offsetMs += seconds * 1000;
+    },
+    codeFor,
+    browser: (headers: Record<string, string> = {}) => Browser.open(app, headers),
+
+    /** Full sign-up: register, read the emailed code, verify. Returns the signed-in browser and response. */
+    async signUp({ email, name = "Maria Santos", password = GOOD_PASSWORD, keepSignedIn = false }: { email: string; name?: string; password?: string; keepSignedIn?: boolean }) {
+      const browser = await Browser.open(app);
+      const reg = await browser.post(AUTH.register, { name, email, password });
+      expect(reg.status).toBe(202);
+      const res = await browser.post(AUTH.verifyEmail, { email, code: codeFor(email), keepSignedIn });
+      expect(res.status).toBe(200);
+      return { browser, res, user: res.body.user as { id: string; email: string; role: string } };
+    },
+
+    close: () => db.close()
+  };
+  return h;
+}
+
+export type AuthHarness = Awaited<ReturnType<typeof createAuthHarness>>;

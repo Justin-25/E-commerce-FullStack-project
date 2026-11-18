@@ -1,22 +1,51 @@
+import type { Router } from "express";
 import { createApp } from "./app.js";
 import { loadConfig, loadEnvFile } from "./config/env.js";
+import { createHibpCheck } from "./lib/breachedPasswords.js";
+import { DevOutbox } from "./lib/email.js";
+import { MemoryKv, RedisKv } from "./lib/kv.js";
 import { createLogger } from "./lib/logger.js";
 import { createPrisma } from "./lib/prisma.js";
 import { createRedis } from "./lib/redis.js";
+import { createAuthGuards } from "./middleware/auth.js";
+import { createCsrf } from "./middleware/csrf.js";
 import { redisRateLimitStore } from "./middleware/rateLimit.js";
+import { authRouter } from "./modules/auth/auth.routes.js";
+import { AuthService } from "./modules/auth/auth.service.js";
+import { TokenService } from "./modules/auth/tokens.js";
 
 loadEnvFile();
 const config = loadConfig();
 const logger = createLogger(config);
 
 const redis = config.REDIS_URL ? createRedis(config.REDIS_URL, logger) : null;
-if (!redis) logger.warn("REDIS_URL is not set — rate limits use in-memory counters (fine for local development only)");
+if (!redis) logger.warn("REDIS_URL is not set — rate limits and sign-in lockouts use in-memory counters (fine for local development only)");
 const prisma = config.DATABASE_URL ? createPrisma(config.DATABASE_URL) : null;
-if (!prisma) logger.warn("DATABASE_URL is not set — database features are unavailable");
+if (!prisma) logger.warn("DATABASE_URL is not set — sign-in and other database features are off");
+
+const kv = redis ? new RedisKv(redis) : new MemoryKv();
+const csrf = createCsrf(config);
+const tokens = new TokenService(config);
+const guards = createAuthGuards({ tokens, kv });
+
+const routers: Router[] = [];
+if (prisma) {
+  const service = new AuthService({
+    prisma,
+    kv,
+    email: new DevOutbox(logger), // config refuses this in production; a real provider comes in milestone 9
+    tokens,
+    config,
+    isBreached: createHibpCheck({ logger })
+  });
+  routers.push(authRouter({ service, tokens, csrf, guards, config, ...(redis ? { rateLimitStore: redisRateLimitStore(redis, "rl:auth:") } : {}) }));
+}
 
 const app = createApp({
   config,
   logger,
+  csrf,
+  routers,
   checks: {
     redis: redis ? () => redis.ping() : null,
     database: prisma ? () => prisma.$queryRaw`SELECT 1` : null

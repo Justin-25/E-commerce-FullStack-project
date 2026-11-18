@@ -1,15 +1,29 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.1.0
+  version: 0.2.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
-    Milestone 1 covers the platform basics every module relies on:
-    health checks, the error format, request IDs and rate limiting.
-    Business endpoints will live under /api/v1 (milestone 3 onwards).
+    Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
+    Sign-in (milestone 3a): create account, verify email, sign in/out, stay signed in.
+
+    **How signing in works**
+    - Signing in sets two httpOnly cookies that page JavaScript cannot read:
+      a 15-minute access pass (`vd_at`, a JWT) and a refresh pass (`vd_rt`, random,
+      only sent to `/api/v1/auth`). When an API call answers 401, call `POST /api/v1/auth/refresh`
+      once, then retry the call.
+    - Every POST/PUT/PATCH/DELETE must send the `X-CSRF-Token` header. Get a token from
+      `GET /api/v1/auth/csrf` when the app loads. Sign-in, sign-out and email verification
+      return a new token, because the old one stops working when you sign in or out.
+    - In production the cookies get the `__Host-` / `__Secure-` prefixes and the Secure flag.
 servers:
   - url: http://localhost:4000
     description: Local development
+
+tags:
+  - name: platform
+  - name: auth
+    description: Sign-in and session endpoints (milestone 3a)
 
 paths:
   /health:
@@ -34,7 +48,7 @@ paths:
     get:
       summary: Readiness — can the API serve traffic?
       description: |
-        Checks every dependency (Redis now, PostgreSQL from milestone 2) with a short timeout.
+        Checks every dependency (Redis and PostgreSQL) with a short timeout.
         A dependency that is not configured is reported as "not_configured" and does not fail
         readiness in development (production refuses to start without them).
         Failure details are logged on the server only, never returned.
@@ -55,7 +69,216 @@ paths:
               example: { status: not_ready, checks: { redis: error, database: ok } }
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
+  /api/v1/auth/csrf:
+    get:
+      summary: Get a CSRF token (call once when the app loads)
+      description: Sets the CSRF cookies and returns the token to send in `X-CSRF-Token`.
+      operationId: getCsrfToken
+      tags: [auth]
+      responses:
+        "200":
+          description: A token for this browser.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CsrfToken" }
+
+  /api/v1/auth/register:
+    post:
+      summary: Create a shopper account and email a 6-digit verification code
+      description: |
+        Always answers 202 with the same body, whether or not the email already has an account,
+        so nobody can use this form to find out who shops on Vendora. If the email is already
+        registered and verified, its owner gets a "someone tried to sign up" email instead of a code.
+        If it's registered but not yet verified, the new name and password replace the old ones
+        (whoever proves they own the inbox wins).
+      operationId: register
+      tags: [auth]
+      security: [{ csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterRequest" }
+      responses:
+        "202":
+          description: A code was sent if this email can be verified.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VerificationSent" }
+        "400":
+          description: |
+            VALIDATION_ERROR. Includes passwords shorter than 8 characters and passwords found in
+            known data breaches (field `password`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/auth/verify-email:
+    post:
+      summary: Confirm the email with the 6-digit code, then sign in
+      description: |
+        A code works once, expires after 10 minutes and allows 5 tries. After that, request a new one.
+        Wrong, expired and used-up codes all get the same INVALID_CODE answer.
+      operationId: verifyEmail
+      tags: [auth]
+      security: [{ csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VerifyEmailRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/SignedIn" }
+        "400":
+          description: INVALID_CODE or VALIDATION_ERROR.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/auth/resend-verification:
+    post:
+      summary: Send a new verification code ("Didn't get the code?")
+      description: Always 202. At most one email per minute per address; older codes stop working.
+      operationId: resendVerification
+      tags: [auth]
+      security: [{ csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email, maxLength: 254 }
+      responses:
+        "202":
+          description: A new code was sent if the account exists and still needs verifying.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VerificationSent" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/auth/login:
+    post:
+      summary: Sign in with email and password
+      description: |
+        After 5 wrong passwords for the same account from the same network, sign-in pauses for
+        15 minutes (ACCOUNT_LOCKED), then unlocks by itself. Wrong attempts for emails that have no
+        account are counted the same way, so the answers never reveal whether an account exists.
+        20 failures for one account from anywhere also pause it (protects against attacks from many IPs).
+      operationId: login
+      tags: [auth]
+      security: [{ csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/SignedIn" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: INVALID_CREDENTIALS, with `details.attemptsLeft` before the pause.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error: { code: INVALID_CREDENTIALS, message: "Email or password is incorrect.", requestId: "…", details: { attemptsLeft: 2 } }
+        "403":
+          description: |
+            EMAIL_NOT_VERIFIED (password was right; show the verify screen. A new code is emailed unless one
+            was sent in the last minute) or
+            ACCOUNT_SUSPENDED, or CSRF_INVALID.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429":
+          description: ACCOUNT_LOCKED (`details.retryAfterSeconds` and the Retry-After header say when to try again) or RATE_LIMITED.
+          headers:
+            Retry-After: { schema: { type: integer }, description: Seconds until sign-in unlocks. }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/auth/refresh:
+    post:
+      summary: Swap the refresh pass for new passes (keeps you signed in)
+      description: |
+        Uses the `vd_rt` cookie. Each refresh pass works once. If an old one is used again
+        (a sign it was copied), every device in that sign-in chain is signed out.
+        If two tabs refresh at the same moment, the slower one gets 409 and should just retry its request.
+      operationId: refresh
+      tags: [auth]
+      security: [{ refreshCookie: [], csrfHeader: [] }]
+      responses:
+        "200":
+          description: New cookies are set. The CSRF token stays the same.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "401":
+          description: Not signed in (missing, expired, revoked or reused refresh pass). Cookies are cleared.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "409":
+          description: CONFLICT. Another tab refreshed a moment ago; retry the original request.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/auth/logout:
+    post:
+      summary: Sign out on this device
+      description: Revokes this device's sign-in, makes its access pass unusable at once, and clears the cookies.
+      operationId: logout
+      tags: [auth]
+      security: [{ csrfHeader: [] }]
+      responses:
+        "200":
+          description: Signed out. Use the new CSRF token from now on.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CsrfToken" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+
+  /api/v1/auth/me:
+    get:
+      summary: Who is signed in?
+      operationId: getMe
+      tags: [auth]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200":
+          description: The signed-in user.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "401":
+          description: UNAUTHORIZED. Not signed in, or the access pass expired (call refresh).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
 components:
+  securitySchemes:
+    accessCookie:
+      type: apiKey
+      in: cookie
+      name: vd_at
+      description: 15-minute access pass (JWT, httpOnly). `__Host-vd_at` in production.
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: vd_rt
+      description: Refresh pass (httpOnly, sent only to /api/v1/auth). `__Secure-vd_rt` in production.
+    csrfHeader:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: Required on every POST/PUT/PATCH/DELETE. Get it from GET /api/v1/auth/csrf.
+
   headers:
     X-Request-Id:
       description: |
@@ -95,9 +318,29 @@ components:
           properties:
             code:
               type: string
-              enum: [BAD_REQUEST, INVALID_JSON, VALIDATION_ERROR, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, CONFLICT, PAYLOAD_TOO_LARGE, RATE_LIMITED, INTERNAL_ERROR]
+              enum:
+                - BAD_REQUEST
+                - INVALID_JSON
+                - VALIDATION_ERROR
+                - UNAUTHORIZED
+                - FORBIDDEN
+                - NOT_FOUND
+                - CONFLICT
+                - PAYLOAD_TOO_LARGE
+                - RATE_LIMITED
+                - INTERNAL_ERROR
+                - CSRF_INVALID
+                - INVALID_CREDENTIALS
+                - ACCOUNT_LOCKED
+                - ACCOUNT_SUSPENDED
+                - EMAIL_NOT_VERIFIED
+                - INVALID_CODE
             message: { type: string }
             requestId: { type: string }
+            details:
+              description: Extra facts the screen needs, e.g. attemptsLeft or retryAfterSeconds.
+              type: object
+              additionalProperties: true
             fields:
               description: Only for VALIDATION_ERROR — which input fields were wrong and why.
               type: array
@@ -110,7 +353,77 @@ components:
       example:
         error: { code: NOT_FOUND, message: "Route not found", requestId: "5f0c2a1e-8c7d-4b7e-9d1f-2a3b4c5d6e7f" }
 
+    User:
+      type: object
+      required: [id, email, name, role, emailVerified, twoFactorEnabled, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        name: { type: string }
+        role: { type: string, enum: [CUSTOMER, SELLER, ADMIN] }
+        emailVerified: { type: boolean }
+        twoFactorEnabled: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    CsrfToken:
+      type: object
+      required: [csrfToken]
+      properties:
+        csrfToken: { type: string, description: Send it in the X-CSRF-Token header. }
+
+    SignedIn:
+      type: object
+      required: [user, csrfToken]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        csrfToken: { type: string, description: The new CSRF token for the signed-in browser. }
+
+    RegisterRequest:
+      type: object
+      required: [name, email, password]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100, example: Maria Santos }
+        email: { type: string, format: email, maxLength: 254, example: maria.santos@gmail.com }
+        password: { type: string, minLength: 8, maxLength: 128, description: "At least 8 characters; not in a known data breach." }
+
+    VerifyEmailRequest:
+      type: object
+      required: [email, code]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        code: { type: string, pattern: "^[0-9]{6}$", example: "482913" }
+        keepSignedIn: { type: boolean, default: false }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        password: { type: string, maxLength: 128 }
+        keepSignedIn:
+          type: boolean
+          default: false
+          description: "\"Keep me signed in on this device\": 30 days. Otherwise sign-in ends when the browser closes (at most 1 day)."
+
+    VerificationSent:
+      type: object
+      required: [status, email, codeExpiresInSeconds]
+      properties:
+        status: { type: string, const: verification_sent }
+        email: { type: string, format: email }
+        codeExpiresInSeconds: { type: integer, example: 600 }
+
   responses:
+    SignedIn:
+      description: Signed in. Sets the `vd_at` and `vd_rt` cookies (httpOnly) and returns a new CSRF token.
+      headers:
+        Set-Cookie: { schema: { type: string } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SignedIn" }
+    CsrfInvalid:
+      description: CSRF_INVALID. Missing or wrong X-CSRF-Token, or the request came from another website.
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     BadRequest:
       description: Malformed JSON (INVALID_JSON) or invalid input (VALIDATION_ERROR).
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
