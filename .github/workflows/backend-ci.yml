@@ -19,8 +19,9 @@ jobs:
         working-directory: backend
     services:
       # A throwaway real PostgreSQL, only for this run (test credentials, not secrets).
+      # Same major version as the Neon database (18), so CI tests what we actually run.
       postgres:
-        image: postgres:17
+        image: postgres:18
         env:
           POSTGRES_USER: vendora
           POSTGRES_PASSWORD: vendora

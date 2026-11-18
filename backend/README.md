@@ -37,7 +37,7 @@ Design and reasoning: [`docs/database-design.md`](docs/database-design.md).
 
 How it's tested:
 - `tests/db/migration.test.ts` runs the real migration SQL on PGlite (Postgres inside Node). It checks every table, index, foreign key and safety rule, without needing Neon.
-- CI also migrates and seeds a real PostgreSQL 17 server.
+- CI also migrates and seeds a real PostgreSQL 18 server, the same major version as Neon.
 
 ## Structure
 
