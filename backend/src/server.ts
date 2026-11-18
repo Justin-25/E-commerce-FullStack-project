@@ -29,16 +29,18 @@ const tokens = new TokenService(config);
 const guards = createAuthGuards({ tokens, kv });
 
 const routers: Router[] = [];
+let authService: AuthService | null = null;
 if (prisma) {
-  const service = new AuthService({
+  authService = new AuthService({
     prisma,
     kv,
     email: new DevOutbox(logger), // config refuses this in production; a real provider comes in milestone 9
     tokens,
     config,
-    isBreached: createHibpCheck({ logger })
+    isBreached: createHibpCheck({ logger }),
+    logger
   });
-  routers.push(authRouter({ service, tokens, csrf, guards, config, ...(redis ? { rateLimitStore: redisRateLimitStore(redis, "rl:auth:") } : {}) }));
+  routers.push(authRouter({ service: authService, tokens, csrf, guards, config, ...(redis ? { rateLimitStore: redisRateLimitStore(redis, "rl:auth:") } : {}) }));
 }
 
 const app = createApp({
@@ -57,14 +59,17 @@ const server = app.listen(config.PORT, () => {
   logger.info(`Vendora API listening on http://localhost:${config.PORT} (${config.NODE_ENV})`);
 });
 
-// Graceful shutdown: stop accepting requests, finish in-flight ones, close Redis and the database pool.
+// Graceful shutdown: stop accepting requests, finish in-flight ones and emails being sent,
+// then close Redis and the database pool.
 let stopping = false;
 function shutdown(signal: string): void {
   if (stopping) return;
   stopping = true;
   logger.info({ signal }, "shutting down");
   server.close(() => {
-    void Promise.allSettled([redis?.quit(), prisma?.$disconnect()]).then(() => process.exit(0));
+    void (authService?.drain() ?? Promise.resolve())
+      .then(() => Promise.allSettled([redis?.quit(), prisma?.$disconnect()]))
+      .then(() => process.exit(0));
   });
   setTimeout(() => process.exit(1), 10_000).unref();
 }

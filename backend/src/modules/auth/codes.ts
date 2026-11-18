@@ -1,5 +1,41 @@
-import type { AuthTokenType, PrismaClient } from "../../generated/prisma/client.js";
-import { hmacHex, safeEqualHex, sixDigitCode } from "../../lib/crypto.js";
+import type { AuthToken, AuthTokenType, PrismaClient, User } from "../../generated/prisma/client.js";
+import { hmacHex, randomToken, safeEqualHex, sixDigitCode } from "../../lib/crypto.js";
+
+/**
+ * Single-use links (password reset; later email change). The token is 256
+ * random bits that only ever exists in the email; the database keeps a keyed
+ * hash, so a stolen database copy can't be turned into working links.
+ */
+export class OneTimeLinks {
+  constructor(
+    private readonly prisma: PrismaClient,
+    private readonly hashKey: string,
+    private readonly now: () => Date = () => new Date()
+  ) {}
+
+  private hash(type: AuthTokenType, token: string) {
+    return hmacHex(this.hashKey, `link:${type}:${token}`);
+  }
+
+  /** Creates a new link token. Any older link of the same type stops working. */
+  async issue(userId: string, type: AuthTokenType, ttlSeconds: number): Promise<string> {
+    const token = randomToken(32);
+    await this.prisma.$transaction([
+      this.prisma.authToken.deleteMany({ where: { userId, type } }),
+      this.prisma.authToken.create({
+        data: { userId, type, tokenHash: this.hash(type, token), expiresAt: new Date(this.now().getTime() + ttlSeconds * 1000) }
+      })
+    ]);
+    return token;
+  }
+
+  /** The link's row and user if it exists, is unused and hasn't expired; otherwise null. */
+  async find(type: AuthTokenType, token: string): Promise<(AuthToken & { user: User }) | null> {
+    const record = await this.prisma.authToken.findUnique({ where: { tokenHash: this.hash(type, token) }, include: { user: true } });
+    if (!record || record.type !== type || record.usedAt || record.expiresAt <= this.now()) return null;
+    return record;
+  }
+}
 
 /** Wrong guesses allowed per code before it stops working. */
 export const CODE_MAX_ATTEMPTS = 5;

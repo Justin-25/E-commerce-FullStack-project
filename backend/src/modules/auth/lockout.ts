@@ -40,4 +40,13 @@ export class LoginLockout {
   async recordSuccess(account: string, ipKey: string): Promise<void> {
     await this.kv.delete(authKeys.failures(account, ipKey));
   }
+
+  /**
+   * Lifts the pause after the owner proved who they are with a reset link
+   * (the locked screen offers "Reset password instead"). Clears the
+   * account-wide pause and this network's; other networks keep theirs.
+   */
+  async clear(account: string, ipKey: string): Promise<void> {
+    await this.kv.delete(authKeys.lock(account), authKeys.failures(account), authKeys.lock(account, ipKey), authKeys.failures(account, ipKey));
+  }
 }

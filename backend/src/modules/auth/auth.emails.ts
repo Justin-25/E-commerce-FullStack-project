@@ -17,7 +17,36 @@ export const verifyEmailMessage = (to: string, code: string, minutes: number): E
   ].join("\n")
 });
 
-export const accountExistsMessage = (to: string, name: string, appUrl: string): EmailMessage => ({
+export const passwordResetMessage = (to: string, name: string, link: string, minutes: number): EmailMessage => ({
+  to,
+  kind: "password-reset",
+  subject: "Reset your Vendora password",
+  text: [
+    `Hi ${name},`,
+    "",
+    "We got a request to reset your Vendora password. Choose a new one here:",
+    link,
+    "",
+    `The link expires in ${minutes} minutes and works once.`,
+    "If you didn't ask for this, you can ignore this email. Your password won't change."
+  ].join("\n")
+});
+
+export const passwordChangedMessage = (to: string, name: string, appUrl: string): EmailMessage => ({
+  to,
+  kind: "password-changed",
+  subject: "Your Vendora password was changed",
+  text: [
+    `Hi ${name},`,
+    "",
+    "Your Vendora password was just changed, and every other device was signed out.",
+    "",
+    "If this was you, there's nothing else to do.",
+    `If it wasn't you, reset your password now: ${appUrl}/forgot-password`
+  ].join("\n")
+});
+
+export const accountExistsMessage =(to: string, name: string, appUrl: string): EmailMessage => ({
   to,
   kind: "account-exists",
   subject: "Someone tried to create a Vendora account with your email",

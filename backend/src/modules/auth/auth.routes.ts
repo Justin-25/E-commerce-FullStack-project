@@ -5,7 +5,15 @@ import { AppError } from "../../lib/errors.js";
 import type { AuthGuards } from "../../middleware/auth.js";
 import type { Csrf } from "../../middleware/csrf.js";
 import { rateLimiter } from "../../middleware/rateLimit.js";
-import { loginSchema, registerSchema, resendSchema, verifyEmailSchema } from "./auth.schemas.js";
+import {
+  changePasswordSchema,
+  forgotPasswordSchema,
+  loginSchema,
+  registerSchema,
+  resendSchema,
+  resetPasswordSchema,
+  verifyEmailSchema
+} from "./auth.schemas.js";
 import type { AuthService, ClientInfo, SignInResult } from "./auth.service.js";
 import type { TokenService } from "./tokens.js";
 
@@ -71,6 +79,21 @@ export function authRouter({ service, tokens, csrf, guards, config, rateLimitSto
     await service.logout(req.cookies?.[tokens.cookieNames.refresh], req.auth);
     tokens.clearSessionCookies(res);
     res.json({ csrfToken: csrf.issue(req, res, { rotate: true }) });
+  });
+
+  router.post("/auth/forgot-password", authLimit, async (req, res) => {
+    res.status(202).json(await service.forgotPassword(forgotPasswordSchema.parse(req.body).email));
+  });
+
+  router.post("/auth/reset-password", authLimit, async (req, res) => {
+    signIn(req, res, await service.resetPassword(resetPasswordSchema.parse(req.body), clientInfo(req)));
+  });
+
+  router.post("/auth/change-password", authLimit, ...guards.requireAuth, async (req, res) => {
+    if (!req.auth) throw new AppError(401, "UNAUTHORIZED", "Please sign in to continue.");
+    const result = await service.changePassword(req.auth, changePasswordSchema.parse(req.body), clientInfo(req));
+    tokens.setSessionCookies(res, result); // same browser, same person: the CSRF token stays valid
+    res.json({ user: result.user });
   });
 
   router.get("/auth/me", ...guards.requireAuth, async (req, res) => {

@@ -37,6 +37,22 @@ export const loginSchema = z.object({
   keepSignedIn
 });
 
+export const forgotPasswordSchema = z.object({ email });
+
+export const resetPasswordSchema = z.object({
+  // 32 random bytes in base64url = 43 characters; anything else can't be one of our links.
+  token: z.string({ error: "This reset link is incomplete" }).regex(/^[A-Za-z0-9_-]{43}$/, { error: "This reset link is incomplete" }),
+  password: newPassword,
+  keepSignedIn
+});
+
+export const changePasswordSchema = z.object({
+  currentPassword: z.string({ error: "Enter your current password" }).min(1, { error: "Enter your current password" }).max(128, { error: "That's not your current password." }),
+  newPassword
+});
+
 export type RegisterInput = z.infer<typeof registerSchema>;
+export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
+export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
 export type VerifyEmailInput = z.infer<typeof verifyEmailSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;

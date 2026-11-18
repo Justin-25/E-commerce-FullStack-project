@@ -16,5 +16,7 @@ export const authKeys = {
   lock: (account: string, ipKey?: string) => (ipKey ? `auth:lock:${account}:${ipKey}` : `auth:lock:${account}`),
   verifyCooldown: (account: string) => `auth:cooldown:verify:${account}`,
   codesToday: (account: string) => `auth:codes-today:${account}`,
+  resetCooldown: (account: string) => `auth:cooldown:reset:${account}`,
+  resetsToday: (account: string) => `auth:resets-today:${account}`,
   accountExistsNotice: (account: string) => `auth:cooldown:exists:${account}`
 };

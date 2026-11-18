@@ -1,21 +1,26 @@
-export type ErrorCode =
-  | "BAD_REQUEST"
-  | "INVALID_JSON"
-  | "VALIDATION_ERROR"
-  | "UNAUTHORIZED"
-  | "FORBIDDEN"
-  | "NOT_FOUND"
-  | "CONFLICT"
-  | "PAYLOAD_TOO_LARGE"
-  | "RATE_LIMITED"
-  | "INTERNAL_ERROR"
+/** Every error code the API can return (the contract test checks openapi.yaml lists exactly these). */
+export const ERROR_CODES = [
+  "BAD_REQUEST",
+  "INVALID_JSON",
+  "VALIDATION_ERROR",
+  "UNAUTHORIZED",
+  "FORBIDDEN",
+  "NOT_FOUND",
+  "CONFLICT",
+  "PAYLOAD_TOO_LARGE",
+  "RATE_LIMITED",
+  "INTERNAL_ERROR",
   // sign-in (milestone 3)
-  | "CSRF_INVALID"
-  | "INVALID_CREDENTIALS"
-  | "ACCOUNT_LOCKED"
-  | "ACCOUNT_SUSPENDED"
-  | "EMAIL_NOT_VERIFIED"
-  | "INVALID_CODE";
+  "CSRF_INVALID",
+  "INVALID_CREDENTIALS",
+  "ACCOUNT_LOCKED",
+  "ACCOUNT_SUSPENDED",
+  "EMAIL_NOT_VERIFIED",
+  "INVALID_CODE",
+  "INVALID_LINK"
+] as const;
+
+export type ErrorCode = (typeof ERROR_CODES)[number];
 
 export interface FieldError {
   path: string;

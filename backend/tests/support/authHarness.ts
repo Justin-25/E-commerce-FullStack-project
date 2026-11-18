@@ -19,7 +19,10 @@ export const AUTH = {
   login: "/api/v1/auth/login",
   refresh: "/api/v1/auth/refresh",
   logout: "/api/v1/auth/logout",
-  me: "/api/v1/auth/me"
+  me: "/api/v1/auth/me",
+  forgot: "/api/v1/auth/forgot-password",
+  reset: "/api/v1/auth/reset-password",
+  change: "/api/v1/auth/change-password"
 } as const;
 
 export const GOOD_PASSWORD = "correct horse battery staple";
@@ -77,6 +80,12 @@ export async function createAuthHarness(env: Record<string, string> = {}) {
       clock.offsetMs += seconds * 1000;
     },
     codeFor,
+    /** The token from the newest reset link emailed to this address. */
+    resetTokenFor: (email: string): string => {
+      const token = /\/reset-password#token=([A-Za-z0-9_-]{43})\b/.exec(outbox.lastTo(email)?.text ?? "")?.[1];
+      if (!token) throw new Error(`no reset link emailed to ${email}`);
+      return token;
+    },
     browser: (headers: Record<string, string> = {}) => Browser.open(app, headers),
 
     /** Full sign-up: register, read the emailed code, verify. Returns the signed-in browser and response. */

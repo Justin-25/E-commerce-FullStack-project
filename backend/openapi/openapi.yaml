@@ -6,6 +6,7 @@ info:
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
     Sign-in (milestone 3a): create account, verify email, sign in/out, stay signed in.
+    Passwords (milestone 3b): forgot, reset from an emailed link, change while signed in.
 
     **How signing in works**
     - Signing in sets two httpOnly cookies that page JavaScript cannot read:
@@ -241,6 +242,98 @@ paths:
               schema: { $ref: "#/components/schemas/CsrfToken" }
         "403": { $ref: "#/components/responses/CsrfInvalid" }
 
+  /api/v1/auth/forgot-password:
+    post:
+      summary: Email a password-reset link ("Forgot password?")
+      description: |
+        Always answers 202 with the same body, whether or not the email has an account.
+        The link (`{APP_URL}/reset-password#token=…`) works once and expires after 30 minutes;
+        asking again cancels the older link. At most 1 email a minute and 5 a day per address.
+        The token sits after "#", so browsers never send it to a server or to other websites.
+      operationId: forgotPassword
+      tags: [auth]
+      security: [{ csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email, maxLength: 254 }
+      responses:
+        "202":
+          description: A link was sent if the account exists.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResetLinkSent" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/auth/reset-password:
+    post:
+      summary: Choose a new password from the emailed link, then sign in
+      description: |
+        Every device is signed out and this one is signed in ("You'll be signed out everywhere else").
+        It also verifies the email if it wasn't yet and lifts the 15-minute sign-in pause.
+        A rejected password (too short, breached) doesn't use up the link.
+        The account owner gets a "your password was changed" email.
+      operationId: resetPassword
+      tags: [auth]
+      security: [{ csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResetPasswordRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/SignedIn" }
+        "400":
+          description: INVALID_LINK (expired, used or made-up) or VALIDATION_ERROR (field `password` or `token`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/auth/change-password:
+    post:
+      summary: Change the password while signed in
+      description: |
+        Needs the current password. Wrong ones count toward the same 5-try lockout as sign-in
+        (`details.attemptsLeft`, then ACCOUNT_LOCKED). Every other device is signed out at once;
+        this one stays signed in with new cookies (the CSRF token stays the same).
+        The owner gets a "your password was changed" email.
+      operationId: changePassword
+      tags: [auth]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChangePasswordRequest" }
+      responses:
+        "200":
+          description: Password changed; new cookies are set.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "400":
+          description: |
+            VALIDATION_ERROR: `currentPassword` wrong (with `details.attemptsLeft`), or `newPassword`
+            too short, breached, or the same as the current one.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "429":
+          description: ACCOUNT_LOCKED after 5 wrong current passwords, or RATE_LIMITED.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
   /api/v1/auth/me:
     get:
       summary: Who is signed in?
@@ -335,6 +428,7 @@ components:
                 - ACCOUNT_SUSPENDED
                 - EMAIL_NOT_VERIFIED
                 - INVALID_CODE
+                - INVALID_LINK
             message: { type: string }
             requestId: { type: string }
             details:
@@ -404,6 +498,29 @@ components:
           type: boolean
           default: false
           description: "\"Keep me signed in on this device\": 30 days. Otherwise sign-in ends when the browser closes (at most 1 day)."
+
+    ResetPasswordRequest:
+      type: object
+      required: [token, password]
+      properties:
+        token: { type: string, pattern: "^[A-Za-z0-9_-]{43}$", description: "The part after #token= in the emailed link." }
+        password: { type: string, minLength: 8, maxLength: 128, description: "At least 8 characters; not in a known data breach." }
+        keepSignedIn: { type: boolean, default: false }
+
+    ChangePasswordRequest:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword: { type: string, maxLength: 128 }
+        newPassword: { type: string, minLength: 8, maxLength: 128, description: "Different from the current one; not in a known data breach." }
+
+    ResetLinkSent:
+      type: object
+      required: [status, email, expiresInSeconds]
+      properties:
+        status: { type: string, const: reset_link_sent }
+        email: { type: string, format: email }
+        expiresInSeconds: { type: integer, example: 1800 }
 
     VerificationSent:
       type: object

@@ -38,7 +38,7 @@ npm run db:status    # which migrations are applied
 
 Design and reasoning: [`docs/database-design.md`](docs/database-design.md).
 
-## Sign-in (milestone 3a)
+## Sign-in and passwords (milestone 3a–3b)
 
 | Endpoint | What it does |
 |---|---|
@@ -50,16 +50,21 @@ Design and reasoning: [`docs/database-design.md`](docs/database-design.md).
 | `POST /api/v1/auth/refresh` | Swap the refresh pass for new passes (the frontend calls this after a 401) |
 | `POST /api/v1/auth/logout` | Sign out this device, effective immediately |
 | `GET /api/v1/auth/me` | Who's signed in |
+| `POST /api/v1/auth/forgot-password` | Email a reset link (30 minutes, single use); same answer for unknown emails |
+| `POST /api/v1/auth/reset-password` | New password from the link → every other device signed out, this one signed in |
+| `POST /api/v1/auth/change-password` | Current + new password → other devices signed out, this one stays signed in |
 
 How it works:
 - **Two passes in httpOnly cookies.** A 15-minute access pass (JWT, `vd_at`) and a refresh pass (random, `vd_rt`, sent only to `/api/v1/auth`). Page JavaScript can't read either, so an XSS bug can't steal them.
 - **Refresh-token rotation.** Each refresh pass works once. If an old one is used again, someone copied it, so every device in that sign-in chain is signed out.
 - **Instant sign-out.** Checking an access pass costs no database query: the signature, plus one Redis lookup for "signed out", "chain revoked" or "password changed".
-- **Emails.** In development, emails are printed in the API terminal (look for `DEV OUTBOX`) so you can copy the code. A real email provider is added before deploying (milestone 9); production refuses to start with the outbox.
+- **Password changes end other sign-ins.** A reset or change revokes every other sign-in chain and sets an "invalid before" time, so passes issued earlier stop working at once. The owner gets a "your password was changed" email.
+- **Emails.** Sent in the background, so response times don't reveal whether an account exists. In development they're printed in the API terminal (look for `DEV OUTBOX`) so you can copy the code or link. A real email provider is added before deploying (milestone 9); production refuses to start with the outbox.
 
 How it's tested:
 - `tests/auth/*` drive the real routes, service and middleware with a pretend browser that keeps cookies and sends the CSRF token. Redis is faked in memory with a clock the tests can move forward.
 - **On your PC** the database is PGlite (Postgres inside Node): a fresh copy of the real migrations for each test file, with no internet needed. **In CI** (`TEST_DATABASE_URL`) the same tests run on a real PostgreSQL 18 server, each file in its own throwaway schema.
+- `tests/openapi.test.ts` checks the contract matches the code: every route is documented (and every documented route exists), the error codes match, and no `$ref` is broken.
 - `tests/db/migration.test.ts` checks that every table, index, foreign key and safety rule really exists. CI also migrates and seeds a real PostgreSQL 18 server, the same major version as Neon.
 
 ## Structure
@@ -94,7 +99,9 @@ openapi/openapi.yaml     the API contract
 | CSRF | Three layers: SameSite cookies, an **Origin check**, and a signed double-submit token (`csrf-csrf`, the maintained successor of `csurf`) tied to an id that changes at sign-in and sign-out. |
 | Refresh tokens | Rotation on every use; reuse of an old one signs out the whole chain. Sign-ins end after 30 days ("keep me signed in") or 1 day at most, and refreshing never extends that. |
 | JWT blacklist | Signed-out passes and revoked chains are denied in Redis until they would have expired. |
-| Deny JWTs issued before a password change | A per-user "invalid before" time in Redis (used by password change in 3b). |
+| Deny JWTs issued before a password change | Reset and change set a per-user "invalid before" time in Redis and revoke every other sign-in chain, so older passes stop working at once. |
+| Password reset tokens | 256 random bits, stored only as a keyed hash, 30-minute expiry, single use, a newer link cancels older ones; at most 1 email a minute and 5 a day. The token sits after `#` in the link, so it never reaches server logs or other sites. |
+| Notify on security changes | "Your password was changed" email after every reset or change, with a link to reset if it wasn't them. |
 | Confirm email after sign-up | 6-digit code, 10 minutes, required before the first sign-in. |
 | Account enumeration | Sign-up, sign-in and code endpoints answer the same whether or not the email has an account, and sign-in always runs one Argon2 check so the timing matches too. |
 | Weak passwords | At least 8 characters, and passwords found in known breaches are refused (Have I Been Pwned; only 5 characters of a hash leave the server). |
@@ -106,4 +113,4 @@ openapi/openapi.yaml     the API contract
 | No secrets in git | `.env` is git-ignored; `npm run secrets` writes keys without printing them; config errors name a variable but never its value. |
 | HTTPS | Production requires https origins and `APP_URL`, sets HSTS, and uses `__Host-`/`__Secure-` Secure cookies. |
 
-Coming next: password reset and change (3b); two-step verification, "Confirm it's you", signed-in devices and security activity (3c); Google sign-in (3d).
+Coming next: two-step verification, "Confirm it's you", signed-in devices and security activity (3c); Google sign-in (3d).
