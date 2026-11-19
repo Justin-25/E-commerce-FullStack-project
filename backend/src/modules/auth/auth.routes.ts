@@ -7,15 +7,18 @@ import type { AuthGuards } from "../../middleware/auth.js";
 import type { Csrf } from "../../middleware/csrf.js";
 import { rateLimiter } from "../../middleware/rateLimit.js";
 import {
+  appCodeSchema,
   changePasswordSchema,
   forgotPasswordSchema,
   loginSchema,
   registerSchema,
   resendSchema,
   resetPasswordSchema,
+  twoFactorDisableSchema,
+  twoFactorVerifySchema,
   verifyEmailSchema
 } from "./auth.schemas.js";
-import type { AuthService, ClientInfo, SignInResult } from "./auth.service.js";
+import type { AuthService, ClientInfo, SignInOutcome, SignInResult } from "./auth.service.js";
 import type { TokenService } from "./tokens.js";
 
 export interface AuthRouterDeps {
@@ -34,11 +37,13 @@ const clientInfo = (req: Request): ClientInfo => {
   return { ip, ipKey: ipKeyGenerator(ip, 56), userAgent: req.get("user-agent") };
 };
 
+const notSignedIn = () => new AppError(401, "UNAUTHORIZED", "Please sign in to continue.");
+
 /** Thin HTTP layer: validate input (allow-lists), call the service, set cookies. */
 export function authRouter({ service, tokens, csrf, guards, config, rateLimitStore, logger }: AuthRouterDeps): Router {
   const router = Router();
-  // Stricter per-IP limit on endpoints that guess passwords or send emails. If Redis is down it
-  // answers 503 before anything else runs: brute-force protection is never silently switched off.
+  // Stricter per-IP limit on endpoints that guess passwords or codes, or send emails. If Redis is down
+  // it answers 503 before anything else runs: brute-force protection is never silently switched off.
   const authLimit = rateLimiter({
     windowMs: 15 * 60 * 1000,
     limit: config.AUTH_RATE_LIMIT_MAX,
@@ -47,10 +52,28 @@ export function authRouter({ service, tokens, csrf, guards, config, rateLimitSto
     ...(logger ? { logger } : {})
   });
 
-  const signIn = (req: Request, res: Response, result: SignInResult) => {
-    tokens.setSessionCookies(res, result);
+  const cookie = (req: Request, name: string): string | undefined => {
+    const value: unknown = req.cookies?.[name];
+    return typeof value === "string" && value !== "" ? value : undefined;
+  };
+
+  const signedIn = (req: Request, res: Response, session: SignInResult, extra: Record<string, unknown> = {}) => {
+    tokens.setSessionCookies(res, session);
+    tokens.clearChallengeCookie(res);
     // Signing in changes the CSRF id, so the page needs the new token.
-    res.json({ user: result.user, csrfToken: csrf.issue(req, res, { rotate: true }) });
+    res.json({ status: "signed_in", user: session.user, csrfToken: csrf.issue(req, res, { rotate: true }), ...extra });
+  };
+
+  /** Either signed in, or "one more step": the step lives in a short httpOnly cookie, the page just shows the right screen. */
+  const respond = (req: Request, res: Response, outcome: SignInOutcome) => {
+    if (outcome.kind === "challenge") {
+      const { token, type, expiresInSeconds } = outcome.challenge;
+      tokens.setChallengeCookie(res, token, expiresInSeconds);
+      res.json({ status: type === "two_factor" ? "two_factor_required" : "two_factor_setup_required", expiresInSeconds });
+      return;
+    }
+    if (outcome.trustedDevice) tokens.setTrustedDeviceCookie(res, outcome.trustedDevice.token, outcome.trustedDevice.expiresAt);
+    signedIn(req, res, outcome.session, outcome.backupCodes ? { backupCodes: outcome.backupCodes } : {});
   };
 
   router.get("/auth/csrf", (req, res) => {
@@ -62,7 +85,7 @@ export function authRouter({ service, tokens, csrf, guards, config, rateLimitSto
   });
 
   router.post("/auth/verify-email", authLimit, async (req, res) => {
-    signIn(req, res, await service.verifyEmail(verifyEmailSchema.parse(req.body), clientInfo(req)));
+    signedIn(req, res, await service.verifyEmail(verifyEmailSchema.parse(req.body), clientInfo(req)));
   });
 
   router.post("/auth/resend-verification", authLimit, async (req, res) => {
@@ -70,12 +93,12 @@ export function authRouter({ service, tokens, csrf, guards, config, rateLimitSto
   });
 
   router.post("/auth/login", authLimit, async (req, res) => {
-    signIn(req, res, await service.login(loginSchema.parse(req.body), clientInfo(req)));
+    respond(req, res, await service.login(loginSchema.parse(req.body), clientInfo(req), cookie(req, tokens.cookieNames.trustedDevice)));
   });
 
   router.post("/auth/refresh", async (req, res) => {
     try {
-      const result = await service.refresh(req.cookies?.[tokens.cookieNames.refresh], clientInfo(req));
+      const result = await service.refresh(cookie(req, tokens.cookieNames.refresh), clientInfo(req));
       tokens.setSessionCookies(res, result);
       res.json({ user: result.user });
     } catch (err) {
@@ -85,7 +108,7 @@ export function authRouter({ service, tokens, csrf, guards, config, rateLimitSto
   });
 
   router.post("/auth/logout", guards.authenticate, async (req, res) => {
-    await service.logout(req.cookies?.[tokens.cookieNames.refresh], req.auth);
+    await service.logout(cookie(req, tokens.cookieNames.refresh), req.auth);
     tokens.clearSessionCookies(res);
     res.json({ csrfToken: csrf.issue(req, res, { rotate: true }) });
   });
@@ -95,11 +118,11 @@ export function authRouter({ service, tokens, csrf, guards, config, rateLimitSto
   });
 
   router.post("/auth/reset-password", authLimit, async (req, res) => {
-    signIn(req, res, await service.resetPassword(resetPasswordSchema.parse(req.body), clientInfo(req)));
+    respond(req, res, await service.resetPassword(resetPasswordSchema.parse(req.body), clientInfo(req)));
   });
 
   router.post("/auth/change-password", authLimit, ...guards.requireAuth, async (req, res) => {
-    if (!req.auth) throw new AppError(401, "UNAUTHORIZED", "Please sign in to continue.");
+    if (!req.auth) throw notSignedIn();
     const result = await service.changePassword(req.auth, changePasswordSchema.parse(req.body), clientInfo(req));
     tokens.setSessionCookies(res, result); // same browser, same person: the CSRF token stays valid
     res.json({ user: result.user });
@@ -107,8 +130,54 @@ export function authRouter({ service, tokens, csrf, guards, config, rateLimitSto
 
   router.get("/auth/me", ...guards.requireAuth, async (req, res) => {
     const user = req.auth ? await service.getUser(req.auth.userId) : null;
-    if (!user) throw new AppError(401, "UNAUTHORIZED", "Please sign in to continue.");
+    if (!user) throw notSignedIn();
     res.json({ user });
+  });
+
+  // --- two-step verification (3c) ---
+
+  router.post("/auth/2fa/verify", authLimit, async (req, res) => {
+    const input = twoFactorVerifySchema.parse(req.body);
+    respond(req, res, await service.verifyTwoFactor(cookie(req, tokens.cookieNames.challenge), input, clientInfo(req)));
+  });
+
+  router.get("/auth/2fa", ...guards.requireAuth, async (req, res) => {
+    if (!req.auth) throw notSignedIn();
+    res.json(await service.twoFactorStatus(req.auth.userId));
+  });
+
+  /** Set-up is allowed when signed in, or during sign-in for sellers/admins who must set it up first. */
+  const setupSubject = async (req: Request) => {
+    if (req.auth) return { userId: req.auth.userId };
+    const challengeToken = cookie(req, tokens.cookieNames.challenge);
+    const challenge = await service.findChallenge(challengeToken);
+    if (challenge?.type === "two_factor_setup") return { userId: challenge.userId, challengeToken };
+    throw notSignedIn();
+  };
+
+  router.post("/auth/2fa/setup", authLimit, guards.authenticate, async (req, res) => {
+    const { userId } = await setupSubject(req);
+    res.json(await service.startTwoFactorSetup(userId));
+  });
+
+  router.post("/auth/2fa/enable", authLimit, guards.authenticate, async (req, res) => {
+    const subject = await setupSubject(req);
+    const { code } = appCodeSchema.parse(req.body);
+    const result = await service.enableTwoFactor(subject, code, clientInfo(req));
+    if (result.session) signedIn(req, res, result.session, { backupCodes: result.backupCodes });
+    else res.json({ backupCodes: result.backupCodes });
+  });
+
+  router.post("/auth/2fa/disable", authLimit, ...guards.requireAuth, async (req, res) => {
+    if (!req.auth) throw notSignedIn();
+    await service.disableTwoFactor(req.auth, twoFactorDisableSchema.parse(req.body), clientInfo(req));
+    res.json({ enabled: false });
+  });
+
+  router.post("/auth/2fa/backup-codes", authLimit, ...guards.requireAuth, async (req, res) => {
+    if (!req.auth) throw notSignedIn();
+    const { code } = appCodeSchema.parse(req.body);
+    res.json({ backupCodes: await service.renewBackupCodes(req.auth, code, clientInfo(req)) });
   });
 
   return router;

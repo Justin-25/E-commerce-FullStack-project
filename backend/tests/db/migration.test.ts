@@ -42,9 +42,9 @@ beforeAll(async () => {
 afterAll(async () => db?.close());
 
 describe("migration structure", () => {
-  it("creates all 30 tables", async () => {
+  it("creates all 31 tables (30 from milestone 2 + trusted_devices)", async () => {
     const { n } = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`);
-    expect(n).toBe(30);
+    expect(n).toBe(31);
   });
 
   it("really builds every index the migration declares", async () => {
@@ -58,11 +58,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 44 foreign keys and 24 safety (CHECK) rules", async () => {
+  it("has the 45 foreign keys and 26 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
-    expect(fk.n).toBe(44);
-    expect(chk.n).toBe(24);
+    expect(fk.n).toBe(45);
+    expect(chk.n).toBe(26);
   });
 });
 

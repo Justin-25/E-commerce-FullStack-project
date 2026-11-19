@@ -3,6 +3,7 @@ import { pino } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { createHibpCheck } from "../src/lib/breachedPasswords.js";
 import { hmacHex, safeEqualHex, sixDigitCode } from "../src/lib/crypto.js";
+import { createFieldCipher } from "../src/lib/encryption.js";
 import { MemoryKv } from "../src/lib/kv.js";
 import { hashPassword, needsRehash, verifyPassword } from "../src/lib/password.js";
 
@@ -26,6 +27,28 @@ describe("password hashing (Argon2id)", () => {
   it("flags hashes made with older settings for upgrade", async () => {
     expect(needsRehash(await hashPassword("x".repeat(10)))).toBe(false);
     expect(needsRehash("$argon2id$v=19$m=8192,t=1,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")).toBe(true);
+  });
+});
+
+describe("field encryption (AES-256-GCM) for 2FA secrets", () => {
+  const cipher = createFieldCipher("k".repeat(43));
+
+  it("round-trips, and the same text encrypts differently each time", () => {
+    const a = cipher.encrypt("JBSWY3DPEHPK3PXP", "user-1");
+    const b = cipher.encrypt("JBSWY3DPEHPK3PXP", "user-1");
+    expect(a).toMatch(/^v1\.[\w-]+\.[\w-]+\.[\w-]+$/);
+    expect(a).not.toBe(b); // fresh random nonce
+    expect(a).not.toContain("JBSWY3DP");
+    expect(cipher.decrypt(a, "user-1")).toBe("JBSWY3DPEHPK3PXP");
+  });
+
+  it("refuses a value copied to another account, a tampered value, or a different key", () => {
+    const stored = cipher.encrypt("JBSWY3DPEHPK3PXP", "user-1");
+    expect(() => cipher.decrypt(stored, "user-2")).toThrow();
+    const [v, iv, data, tag] = stored.split(".");
+    const flipped = `${v}.${iv}.${(data ?? "").slice(0, -2)}${(data ?? "").endsWith("AA") ? "BB" : "AA"}.${tag}`;
+    expect(() => cipher.decrypt(flipped, "user-1")).toThrow();
+    expect(() => createFieldCipher("z".repeat(43)).decrypt(stored, "user-1")).toThrow();
   });
 });
 

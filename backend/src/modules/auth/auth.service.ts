@@ -4,16 +4,37 @@ import { Prisma, type PrismaClient, type SecurityEventType, type User } from "..
 import type { BreachCheck } from "../../lib/breachedPasswords.js";
 import { randomToken, sha256Hex } from "../../lib/crypto.js";
 import type { EmailMessage, EmailSender } from "../../lib/email.js";
+import { createFieldCipher, type FieldCipher } from "../../lib/encryption.js";
 import { AppError, DependencyUnavailableError } from "../../lib/errors.js";
 import type { KeyValueStore } from "../../lib/kv.js";
 import type { Logger } from "../../lib/logger.js";
 import { dummyHash, hashPassword, needsRehash, verifyPassword } from "../../lib/password.js";
-import { accountExistsMessage, passwordChangedMessage, passwordResetMessage, verifyEmailMessage } from "./auth.emails.js";
-import type { ChangePasswordInput, LoginInput, RegisterInput, ResetPasswordInput, VerifyEmailInput } from "./auth.schemas.js";
+import {
+  accountExistsMessage,
+  backupCodeUsedMessage,
+  passwordChangedMessage,
+  passwordResetMessage,
+  twoFactorDisabledMessage,
+  twoFactorEnabledMessage,
+  verifyEmailMessage
+} from "./auth.emails.js";
+import type {
+  ChangePasswordInput,
+  LoginInput,
+  RegisterInput,
+  ResetPasswordInput,
+  SecondFactorInput,
+  TwoFactorVerifyInput,
+  VerifyEmailInput
+} from "./auth.schemas.js";
+import { BackupCodes } from "./backupCodes.js";
+import { SignInChallenges, type Challenge, type IssuedChallenge } from "./challenges.js";
 import { OneTimeCodes, OneTimeLinks } from "./codes.js";
 import { authKeys, emailKey } from "./keys.js";
 import { LoginLockout } from "./lockout.js";
 import { ACCESS_TTL_SECONDS, SESSION_TTL_MS, type AccessClaims, type IssuedSession, type TokenService } from "./tokens.js";
+import { TotpCodes } from "./totp.js";
+import { TrustedDevices } from "./trustedDevices.js";
 
 type Db = Prisma.TransactionClient;
 
@@ -51,6 +72,17 @@ export interface SignInResult extends IssuedSession {
   user: PublicUser;
 }
 
+/**
+ * After a correct password: either signed in, or one more step first
+ * (enter the 2FA code / set up 2FA). Routes turn this into cookies + JSON.
+ */
+export type SignInOutcome =
+  | { kind: "signed_in"; session: SignInResult; trustedDevice?: { token: string; expiresAt: Date }; backupCodes?: string[] }
+  | { kind: "challenge"; challenge: IssuedChallenge };
+
+/** Sellers and admins handle money and other people's data, so two-step verification is required for them. */
+export const requiresTwoFactor = (role: User["role"]) => role === "SELLER" || role === "ADMIN";
+
 /** The only user fields that ever leave the API (never the password hash or 2FA secret). */
 export const toPublicUser = (u: User): PublicUser => ({
   id: u.id,
@@ -67,7 +99,7 @@ export interface AuthServiceDeps {
   kv: KeyValueStore;
   email: EmailSender;
   tokens: TokenService;
-  config: Pick<Config, "APP_URL" | "CODE_HASH_SECRET">;
+  config: Pick<Config, "APP_URL" | "CODE_HASH_SECRET" | "DATA_ENCRYPTION_KEY">;
   isBreached: BreachCheck;
   /** For emails that fail to send in the background. */
   logger?: Logger;
@@ -84,11 +116,24 @@ const fieldError = (path: string, message: string, details?: Record<string, numb
 const BREACHED_MESSAGE = "This password has appeared in a data breach. Choose one you don't use anywhere else.";
 const locked = (retryAfterSeconds: number) =>
   new AppError(429, "ACCOUNT_LOCKED", "Too many sign-in attempts. Sign-in is paused for 15 minutes.", { details: { retryAfterSeconds } });
+const challengeExpired = () => new AppError(400, "CHALLENGE_EXPIRED", "Your sign-in timed out. Please sign in again.");
+const wrongSecondFactor = (attemptsLeft: number, usedBackupCode: boolean) =>
+  new AppError(
+    400,
+    "INVALID_CODE",
+    usedBackupCode ? "That backup code isn't right or was already used." : "That code isn't right. Check your authenticator app and try again.",
+    { details: { attemptsLeft } }
+  );
 
 export class AuthService {
   private readonly codes: OneTimeCodes;
   private readonly links: OneTimeLinks;
   private readonly lockout: LoginLockout;
+  private readonly challenges: SignInChallenges;
+  private readonly totp: TotpCodes;
+  private readonly backupCodes: BackupCodes;
+  private readonly trustedDevices: TrustedDevices;
+  private readonly cipher: FieldCipher;
   private readonly now: () => Date;
   private readonly pendingEmails = new Set<Promise<void>>();
 
@@ -97,6 +142,11 @@ export class AuthService {
     this.codes = new OneTimeCodes(deps.prisma, deps.config.CODE_HASH_SECRET, this.now);
     this.links = new OneTimeLinks(deps.prisma, deps.config.CODE_HASH_SECRET, this.now);
     this.lockout = new LoginLockout(deps.kv);
+    this.challenges = new SignInChallenges(deps.kv);
+    this.totp = new TotpCodes(deps.kv, this.now);
+    this.backupCodes = new BackupCodes(deps.prisma, deps.config.CODE_HASH_SECRET, this.now);
+    this.trustedDevices = new TrustedDevices(deps.prisma, this.now);
+    this.cipher = createFieldCipher(deps.config.DATA_ENCRYPTION_KEY);
     void dummyHash(); // prepare it now, so the first sign-in for an unknown email isn't slower than the rest
   }
 
@@ -152,7 +202,8 @@ export class AuthService {
     });
   }
 
-  async login(input: LoginInput, client: ClientInfo): Promise<SignInResult> {
+  /** `trustedDeviceToken`: the "trust this device" cookie, if the browser has one. */
+  async login(input: LoginInput, client: ClientInfo, trustedDeviceToken?: string): Promise<SignInOutcome> {
     const { prisma } = this.deps;
     const account = emailKey(input.email);
     const wait = await this.lockout.secondsLocked(account, client.ipKey);
@@ -184,13 +235,10 @@ export class AuthService {
       });
     }
 
-    const upgradedHash = needsRehash(stored) ? await hashPassword(input.password) : null;
-    const now = this.now();
-    return prisma.$transaction(async (tx) => {
-      const updated = await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: now, ...(upgradedHash ? { passwordHash: upgradedHash } : {}) } });
-      await this.recordEvent(tx, user.id, "LOGIN_OK", client);
-      return this.startSession(tx, updated, input.keepSignedIn, client);
-    });
+    if (needsRehash(stored)) {
+      await prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hashPassword(input.password) } });
+    }
+    return this.completeSignIn(user, input.keepSignedIn, client, trustedDeviceToken);
   }
 
   /**
@@ -276,10 +324,11 @@ export class AuthService {
    * New password from an emailed link. The link works once; every device is
    * signed out and this one is signed in (design: "You'll be signed out
    * everywhere else"). Clicking the link proves inbox ownership, so it also
-   * verifies the email and lifts the sign-in pause.
-   * (3c: people with two-step verification will enter their app code here too.)
+   * verifies the email and lifts the sign-in pause. People with two-step
+   * verification still enter their app code: an email link alone never opens
+   * an account. No device stays trusted.
    */
-  async resetPassword(input: ResetPasswordInput, client: ClientInfo): Promise<SignInResult> {
+  async resetPassword(input: ResetPasswordInput, client: ClientInfo): Promise<SignInOutcome> {
     const { prisma } = this.deps;
     const link = await this.links.find("PASSWORD_RESET", input.token);
     if (!link || link.user.deletedAt) throw invalidLink();
@@ -289,21 +338,22 @@ export class AuthService {
     const passwordHash = await hashPassword(input.password);
     const now = this.now();
 
-    const { session, families } = await prisma.$transaction(async (tx) => {
+    const { user, families } = await prisma.$transaction(async (tx) => {
       const used = await tx.authToken.updateMany({ where: { id: link.id, usedAt: null }, data: { usedAt: now } });
       if (used.count !== 1) throw invalidLink();
       const user = await tx.user.update({
         where: { id: link.userId },
-        data: { passwordHash, passwordChangedAt: now, emailVerifiedAt: link.user.emailVerifiedAt ?? now, lastLoginAt: now }
+        data: { passwordHash, passwordChangedAt: now, emailVerifiedAt: link.user.emailVerifiedAt ?? now }
       });
       const families = await this.revokeAllSessions(tx, user.id, "password_reset");
+      await this.trustedDevices.revokeAll(tx, user.id);
       await this.recordEvent(tx, user.id, "PASSWORD_RESET", client);
-      return { session: await this.startSession(tx, user, input.keepSignedIn, client), families };
+      return { user, families };
     });
 
     await this.afterPasswordChange(link.user, families, now);
     await this.bestEffort("sign-in pause not lifted after the reset", () => this.lockout.clear(emailKey(link.user.email), client.ipKey));
-    return session;
+    return this.completeSignIn(user, input.keepSignedIn, client);
   }
 
   /**
@@ -345,6 +395,7 @@ export class AuthService {
       const updated = await tx.user.update({ where: { id: user.id }, data: { passwordHash, passwordChangedAt: now } });
       // Every sign-in chain ends, including this device's; this device then starts a fresh one.
       const families = await this.revokeAllSessions(tx, user.id, "password_changed");
+      await this.trustedDevices.revokeAll(tx, user.id);
       await this.recordEvent(tx, user.id, "PASSWORD_CHANGED", client);
       return { session: await this.startSession(tx, updated, current?.persistent ?? false, client), families };
     });
@@ -353,12 +404,187 @@ export class AuthService {
     return session;
   }
 
+  // --- two-step verification (3c) --------------------------------------------
+
+  /** The pending "enter your code" / "set up 2FA" step this cookie token belongs to, if any. */
+  findChallenge(token: string | undefined): Promise<Challenge | null> {
+    return this.challenges.find(token);
+  }
+
+  /** "Enter the 6-digit code from the app" (or "Use a backup code instead") after a correct password. */
+  async verifyTwoFactor(challengeToken: string | undefined, input: TwoFactorVerifyInput, client: ClientInfo): Promise<SignInOutcome> {
+    const challenge = await this.challenges.find(challengeToken);
+    if (!challengeToken || !challenge || challenge.type !== "two_factor") throw challengeExpired();
+    const user = await this.deps.prisma.user.findUnique({ where: { id: challenge.userId } });
+    if (!user || user.deletedAt || user.status !== "ACTIVE" || !user.twoFactorEnabledAt) {
+      await this.challenges.remove(challengeToken);
+      throw challengeExpired();
+    }
+    const method = await this.checkSecondFactor(user, input, client, challengeToken);
+    await this.challenges.remove(challengeToken); // each step works once
+
+    const now = this.now();
+    const { session, trustedDevice } = await this.deps.prisma.$transaction(async (tx) => {
+      const updated = await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: now } });
+      await this.recordEvent(tx, user.id, "LOGIN_OK", client);
+      if (method === "backup") await this.recordEvent(tx, user.id, "BACKUP_CODE_USED", client);
+      const trustedDevice = input.trustDevice ? await this.trustedDevices.create(tx, user.id, client) : undefined;
+      return { session: await this.startSession(tx, updated, challenge.keepSignedIn, client), trustedDevice };
+    });
+    if (method === "backup") {
+      const left = await this.backupCodes.countLeft(user.id);
+      this.sendEmail(backupCodeUsedMessage(user.email, user.name, left, this.deps.config.APP_URL));
+    }
+    return { kind: "signed_in", session, ...(trustedDevice ? { trustedDevice } : {}) };
+  }
+
+  /** For Security settings: is 2FA on, is it required for this account, how many backup codes are left. */
+  async twoFactorStatus(userId: string) {
+    const user = await this.activeUser(userId);
+    return {
+      enabled: user.twoFactorEnabledAt !== null,
+      enabledAt: user.twoFactorEnabledAt,
+      required: requiresTwoFactor(user.role),
+      backupCodesLeft: user.twoFactorEnabledAt ? await this.backupCodes.countLeft(user.id) : 0
+    };
+  }
+
+  /** Turning 2FA on, step 1: a new secret (stored encrypted) and the link the frontend draws as a QR code. */
+  async startTwoFactorSetup(userId: string) {
+    const user = await this.activeUser(userId);
+    if (user.twoFactorEnabledAt) throw new AppError(409, "CONFLICT", "Two-step verification is already on.");
+    const { secret, otpauthUri } = this.totp.newSecret(user.email);
+    await this.deps.prisma.user.update({ where: { id: user.id }, data: { twoFactorSecret: this.cipher.encrypt(secret, user.id) } });
+    // Grouped in fours for people who type it in instead of scanning ("ABCD EFGH …").
+    return { otpauthUri, manualKey: secret.replace(/(.{4})(?=.)/g, "$1 ") };
+  }
+
+  /**
+   * Turning 2FA on, step 2: the first code from the app proves it was set up
+   * right. Then 2FA is on and the 10 backup codes are returned (the only time
+   * they're shown). A seller/admin doing this during sign-in is then signed in.
+   */
+  async enableTwoFactor(subject: { userId: string; challengeToken?: string | undefined }, code: string, client: ClientInfo): Promise<{ backupCodes: string[]; session?: SignInResult }> {
+    const user = await this.activeUser(subject.userId);
+    if (user.twoFactorEnabledAt) throw new AppError(409, "CONFLICT", "Two-step verification is already on.");
+    if (!user.twoFactorSecret) throw new AppError(409, "CONFLICT", "Start the setup again to get a new QR code.");
+    let challenge: Challenge | null = null;
+    if (subject.challengeToken) {
+      challenge = await this.challenges.find(subject.challengeToken);
+      if (!challenge || challenge.type !== "two_factor_setup" || challenge.userId !== user.id) throw challengeExpired();
+    }
+    if (!(await this.totp.verify(user.id, this.decryptSecret(user), code))) {
+      if (subject.challengeToken && (await this.challenges.countAttempt(subject.challengeToken)) === 0) throw challengeExpired();
+      throw new AppError(400, "INVALID_CODE", "That code isn't right. Make sure the app shows Vendora and enter its newest code.");
+    }
+
+    const now = this.now();
+    const result = await this.deps.prisma.$transaction(async (tx) => {
+      const updated = await tx.user.update({ where: { id: user.id }, data: { twoFactorEnabledAt: now, ...(challenge ? { lastLoginAt: now } : {}) } });
+      const backupCodes = await this.backupCodes.replace(tx, user.id);
+      await this.recordEvent(tx, user.id, "TWO_FA_ENABLED", client);
+      if (!challenge) return { backupCodes };
+      await this.recordEvent(tx, user.id, "LOGIN_OK", client);
+      return { backupCodes, session: await this.startSession(tx, updated, challenge.keepSignedIn, client) };
+    });
+    if (subject.challengeToken) await this.challenges.remove(subject.challengeToken);
+    this.sendEmail(twoFactorEnabledMessage(user.email, user.name, this.deps.config.APP_URL));
+    return result;
+  }
+
+  /** Shoppers only (it's required for sellers and admins). Needs a current app code or a backup code. */
+  async disableTwoFactor(claims: AccessClaims, input: SecondFactorInput, client: ClientInfo): Promise<void> {
+    const user = await this.activeUser(claims.userId);
+    if (requiresTwoFactor(user.role)) throw new AppError(403, "FORBIDDEN", "Two-step verification is required for seller and admin accounts.");
+    if (!user.twoFactorEnabledAt) throw new AppError(409, "CONFLICT", "Two-step verification is already off.");
+    await this.checkSecondFactor(user, input, client);
+    await this.deps.prisma.$transaction(async (tx) => {
+      await tx.user.update({ where: { id: user.id }, data: { twoFactorSecret: null, twoFactorEnabledAt: null } });
+      await tx.backupCode.deleteMany({ where: { userId: user.id } });
+      await this.trustedDevices.revokeAll(tx, user.id);
+      await this.recordEvent(tx, user.id, "TWO_FA_DISABLED", client);
+    });
+    this.sendEmail(twoFactorDisabledMessage(user.email, user.name, this.deps.config.APP_URL));
+  }
+
+  /** A new set of 10 backup codes (the old ones stop working). Needs a current app code, not a backup code. */
+  async renewBackupCodes(claims: AccessClaims, code: string, client: ClientInfo): Promise<string[]> {
+    const user = await this.activeUser(claims.userId);
+    if (!user.twoFactorEnabledAt) throw new AppError(409, "CONFLICT", "Turn on two-step verification first.");
+    await this.checkSecondFactor(user, { code }, client);
+    return this.deps.prisma.$transaction(async (tx) => {
+      const codes = await this.backupCodes.replace(tx, user.id);
+      await this.recordEvent(tx, user.id, "BACKUP_CODES_RENEWED", client);
+      return codes;
+    });
+  }
+
   /** Waits for emails still being sent (graceful shutdown). */
   async drain(): Promise<void> {
     await Promise.allSettled([...this.pendingEmails]);
   }
 
   // --- helpers --------------------------------------------------------------
+
+  /**
+   * After a correct password (or reset link): signed in now, or one more step.
+   * A trusted device skips the 2FA code; sellers/admins without 2FA must set it up first.
+   */
+  private async completeSignIn(user: User, keepSignedIn: boolean, client: ClientInfo, trustedDeviceToken?: string): Promise<SignInOutcome> {
+    if (user.twoFactorEnabledAt) {
+      if (!(await this.trustedDevices.isTrusted(user.id, trustedDeviceToken))) {
+        return { kind: "challenge", challenge: await this.challenges.create({ userId: user.id, type: "two_factor", keepSignedIn }) };
+      }
+    } else if (requiresTwoFactor(user.role)) {
+      return { kind: "challenge", challenge: await this.challenges.create({ userId: user.id, type: "two_factor_setup", keepSignedIn }) };
+    }
+    const now = this.now();
+    const session = await this.deps.prisma.$transaction(async (tx) => {
+      const updated = await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: now } });
+      await this.recordEvent(tx, user.id, "LOGIN_OK", client);
+      return this.startSession(tx, updated, keepSignedIn, client);
+    });
+    return { kind: "signed_in", session };
+  }
+
+  /**
+   * Checks an app code or a backup code. Wrong codes count toward the same
+   * lockout as passwords, and toward the sign-in step's own 5 tries. Returns which one was used.
+   */
+  private async checkSecondFactor(user: User, input: SecondFactorInput, client: ClientInfo, challengeToken?: string): Promise<"app" | "backup"> {
+    const account = emailKey(user.email);
+    const wait = await this.lockout.secondsLocked(account, client.ipKey);
+    if (wait > 0) throw locked(wait);
+    const ok =
+      input.code !== undefined
+        ? user.twoFactorSecret !== null && (await this.totp.verify(user.id, this.decryptSecret(user), input.code))
+        : input.backupCode !== undefined && (await this.backupCodes.use(user.id, input.backupCode));
+    if (ok) {
+      await this.lockout.recordSuccess(account, client.ipKey);
+      return input.code !== undefined ? "app" : "backup";
+    }
+    const result = await this.lockout.recordFailure(account, client.ipKey);
+    await this.recordEvent(this.deps.prisma, user.id, "LOGIN_FAILED", client);
+    if (result.locked) {
+      await this.recordEvent(this.deps.prisma, user.id, "LOCKED", client);
+      if (challengeToken) await this.challenges.remove(challengeToken);
+      throw locked(result.retryAfterSeconds);
+    }
+    const challengeLeft = challengeToken ? await this.challenges.countAttempt(challengeToken) : Number.POSITIVE_INFINITY;
+    if (challengeLeft === 0) throw challengeExpired();
+    throw wrongSecondFactor(Math.min(result.attemptsLeft, challengeLeft), input.backupCode !== undefined);
+  }
+
+  private decryptSecret(user: User): string {
+    if (!user.twoFactorSecret) throw new Error("this user has no 2FA secret");
+    return this.cipher.decrypt(user.twoFactorSecret, user.id);
+  }
+
+  private async activeUser(userId: string): Promise<User> {
+    const user = await this.deps.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || user.deletedAt || user.status !== "ACTIVE") throw notSignedIn();
+    return user;
+  }
 
   private async startSession(
     tx: Db,

@@ -51,6 +51,23 @@ export const changePasswordSchema = z.object({
   newPassword
 });
 
+// --- two-step verification (3c) ---
+
+const appCode = z.string({ error: "Enter the 6-digit code from the app" }).trim().regex(/^\d{6}$/, { error: "Enter the 6-digit code from the app" });
+const backupCode = z.string().trim().min(10, { error: "Enter a backup code like kq7mz-4hx2p" }).max(20, { error: "Enter a backup code like kq7mz-4hx2p" });
+
+/** Either the app code or a backup code ("Use a backup code instead"), not both. */
+const secondFactor = z
+  .object({ code: appCode.optional(), backupCode: backupCode.optional() })
+  .refine((v) => (v.code === undefined) !== (v.backupCode === undefined), { error: "Enter the 6-digit code from the app", path: ["code"] });
+
+export const twoFactorVerifySchema = secondFactor.and(z.object({ trustDevice: z.boolean().optional().default(false) }));
+export const twoFactorDisableSchema = secondFactor;
+export const appCodeSchema = z.object({ code: appCode });
+
+export type SecondFactorInput = z.infer<typeof secondFactor>;
+export type TwoFactorVerifyInput = z.infer<typeof twoFactorVerifySchema>;
+
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;

@@ -34,7 +34,9 @@ describe("while Redis is down", () => {
       () => anon.post(AUTH.resend, { email: "outage-user@example.com" }),
       () => anon.post(AUTH.forgot, { email: "outage-user@example.com" }),
       () => anon.post(AUTH.reset, { token: "x".repeat(43), password: GOOD_PASSWORD }),
-      () => browser.post(AUTH.change, { currentPassword: GOOD_PASSWORD, newPassword: "another good passphrase" })
+      () => browser.post(AUTH.change, { currentPassword: GOOD_PASSWORD, newPassword: "another good passphrase" }),
+      () => anon.post(AUTH.twoFactorVerify, { code: "123456" }),
+      () => browser.post(AUTH.twoFactorSetup)
     ];
     for (const call of calls) {
       const res = await call();

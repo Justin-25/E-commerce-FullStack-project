@@ -11,7 +11,7 @@
 >
 > The CHECK safety rules are listed at the end of the migration SQL.
 
-PostgreSQL (Neon), accessed with Prisma. **30 tables in 5 areas, plus 2 for the AI assistant in milestone 8.** Short-lived security data (lockouts, rate limits, revoked tokens) lives in Redis, not here.
+PostgreSQL (Neon), accessed with Prisma. **31 tables in 5 areas (30 from milestone 2, plus `trusted_devices` added in milestone 3c), and 2 more for the AI assistant in milestone 8.** Short-lived security data (lockouts, rate limits, revoked tokens) lives in Redis, not here.
 The diagrams use Mermaid: GitHub shows them as pictures, and in VS Code install the "Markdown Preview Mermaid Support" extension to see them.
 
 ## Ground rules
@@ -35,6 +35,7 @@ erDiagram
   users ||--o{ sessions : "is signed in on"
   users ||--o{ auth_tokens : "receives"
   users ||--o{ backup_codes : "has"
+  users ||--o{ trusted_devices : "skips 2FA on"
   users ||--o{ security_events : "history"
   users ||--o{ addresses : "ships to"
   users {
@@ -47,7 +48,8 @@ erDiagram
     enum role "CUSTOMER | SELLER | ADMIN"
     enum status "ACTIVE | SUSPENDED"
     datetime passwordChangedAt "tokens issued before this are refused"
-    string twoFactorSecret "encrypted; null = 2FA off"
+    string twoFactorSecret "AES-256-GCM, bound to the user id"
+    datetime twoFactorEnabledAt "null = 2FA off (secret may be pending set-up)"
     datetime lastLoginAt
   }
   oauth_accounts {
@@ -81,8 +83,15 @@ erDiagram
   backup_codes {
     uuid id PK
     uuid userId FK
-    string codeHash
-    datetime usedAt
+    string codeHash "keyed hash (HMAC); 10 per user"
+    datetime usedAt "single use"
+  }
+  trusted_devices {
+    uuid id PK
+    uuid userId FK
+    string tokenHash UK "SHA-256 of the cookie token"
+    datetime expiresAt "30 days"
+    datetime revokedAt "password change/reset or 2FA off"
   }
   security_events {
     uuid id PK
@@ -108,6 +117,7 @@ erDiagram
 ```
 
 - **Signed-in devices** = `sessions`. "Sign out of all other devices" revokes every other session. A password change revokes all sessions and sets `passwordChangedAt`.
+- **Two-step verification:** the authenticator secret is encrypted; backup codes are keyed hashes; "Trust this device for 30 days" = `trusted_devices` (cookie token hashed), all revoked by a password change/reset or turning 2FA off. Added in migration `20261119090000_two_factor_trusted_devices`.
 - **Lockout counters, rate limits and revoked access tokens** are in Redis with automatic expiry. `security_events` keeps the history shown on the "Recent security activity" screen.
 
 ## 2 · Stores (sellers)
@@ -396,4 +406,6 @@ erDiagram
 | Rate-limit counters | 15 min window |
 | Failed sign-ins per account + per IP → lockout | 15 min |
 | Revoked access-token IDs (after sign-out / password change) | when the token would expire (15 min) |
+| Half-finished sign-ins ("enter your 2FA code" / "set up 2FA") | 5 min / 15 min |
+| Authenticator codes already used (replay protection) | 2 min |
 | Product/category cache (milestone 4) | minutes |

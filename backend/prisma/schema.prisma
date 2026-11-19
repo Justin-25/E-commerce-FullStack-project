@@ -48,6 +48,7 @@ enum SecurityEventType {
   TWO_FA_ENABLED
   TWO_FA_DISABLED
   BACKUP_CODE_USED
+  BACKUP_CODES_RENEWED
   SESSION_REVOKED
   TOKEN_REUSE_DETECTED
 }
@@ -193,6 +194,7 @@ model User {
   sessions          Session[]
   authTokens        AuthToken[]
   backupCodes       BackupCode[]
+  trustedDevices    TrustedDevice[]
   securityEvents    SecurityEvent[]
   addresses         Address[]
   store             Store?          @relation("StoreOwner")
@@ -278,6 +280,26 @@ model BackupCode {
 
   @@index([userId])
   @@map("backup_codes")
+}
+
+/// "Trust this device for 30 days" after two-step verification. The browser keeps a random token
+/// in an httpOnly cookie; only its SHA-256 hash is stored. Password changes, resets and turning 2FA
+/// off revoke them all.
+model TrustedDevice {
+  id         String    @id @default(uuid(7)) @db.Uuid
+  userId     String    @db.Uuid
+  tokenHash  String    @unique @db.VarChar(64)
+  userAgent  String?   @db.VarChar(512)
+  ipAddress  String?   @db.VarChar(45)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+  lastUsedAt DateTime  @default(now()) @db.Timestamptz(3)
+  expiresAt  DateTime  @db.Timestamptz(3)
+  revokedAt  DateTime? @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@map("trusted_devices")
 }
 
 model SecurityEvent {

@@ -18,5 +18,10 @@ export const authKeys = {
   codesToday: (account: string) => `auth:codes-today:${account}`,
   resetCooldown: (account: string) => `auth:cooldown:reset:${account}`,
   resetsToday: (account: string) => `auth:resets-today:${account}`,
+  /** A pending "enter your code" step after a correct password (keyed by the hash of the cookie token). */
+  challenge: (tokenHash: string) => `auth:challenge:${tokenHash}`,
+  challengeAttempts: (tokenHash: string) => `auth:challenge-attempts:${tokenHash}`,
+  /** An authenticator code that was already used (codes can't be replayed within their window). */
+  totpUsed: (userId: string, counter: number) => `auth:totp-used:${userId}:${counter}`,
   accountExistsNotice: (account: string) => `auth:cooldown:exists:${account}`
 };

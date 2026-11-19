@@ -40,7 +40,7 @@ export interface IssuedSession {
  * can't make the browser send them.
  */
 export class TokenService {
-  readonly cookieNames: { access: string; refresh: string };
+  readonly cookieNames: { access: string; refresh: string; challenge: string; trustedDevice: string };
   private readonly key: Uint8Array;
   private readonly secure: boolean;
 
@@ -48,7 +48,9 @@ export class TokenService {
     this.key = new Uint8Array(Buffer.from(config.ACCESS_TOKEN_SECRET, "base64url"));
     this.secure = config.NODE_ENV === "production";
     // __Host- / __Secure- prefixes make browsers refuse these cookies unless they're Secure and set by us.
-    this.cookieNames = this.secure ? { access: "__Host-vd_at", refresh: "__Secure-vd_rt" } : { access: "vd_at", refresh: "vd_rt" };
+    this.cookieNames = this.secure
+      ? { access: "__Host-vd_at", refresh: "__Secure-vd_rt", challenge: "__Secure-vd_2fa", trustedDevice: "__Secure-vd_td" }
+      : { access: "vd_at", refresh: "vd_rt", challenge: "vd_2fa", trustedDevice: "vd_td" };
   }
 
   signAccess(input: { userId: string; sessionId: string; familyId: string; role: Role }): Promise<string> {
@@ -90,6 +92,20 @@ export class TokenService {
       path: REFRESH_COOKIE_PATH,
       ...(session.persistent ? { expires: session.expiresAt } : {})
     });
+  }
+
+  /** The half-finished sign-in ("enter your code"): a few minutes, sent only to /api/v1/auth. */
+  setChallengeCookie(res: Response, token: string, ttlSeconds: number): void {
+    res.cookie(this.cookieNames.challenge, token, { httpOnly: true, secure: this.secure, sameSite: "strict", path: REFRESH_COOKIE_PATH, maxAge: ttlSeconds * 1000 });
+  }
+
+  clearChallengeCookie(res: Response): void {
+    res.clearCookie(this.cookieNames.challenge, { httpOnly: true, secure: this.secure, sameSite: "strict", path: REFRESH_COOKIE_PATH });
+  }
+
+  /** "Trust this device for 30 days": only ever sent to /api/v1/auth. */
+  setTrustedDeviceCookie(res: Response, token: string, expiresAt: Date): void {
+    res.cookie(this.cookieNames.trustedDevice, token, { httpOnly: true, secure: this.secure, sameSite: "strict", path: REFRESH_COOKIE_PATH, expires: expiresAt });
   }
 
   clearSessionCookies(res: Response): void {

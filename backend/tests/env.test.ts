@@ -31,6 +31,7 @@ describe("loadConfig", () => {
     expect(() => loadConfig({})).toThrow(/ACCESS_TOKEN_SECRET: is missing \(run "npm run secrets"/);
     expect(() => loadConfig({})).toThrow(/CSRF_SECRET/);
     expect(() => loadConfig({})).toThrow(/CODE_HASH_SECRET/);
+    expect(() => loadConfig({})).toThrow(/DATA_ENCRYPTION_KEY/);
   });
 
   it("refuses short or reused secret keys", () => {

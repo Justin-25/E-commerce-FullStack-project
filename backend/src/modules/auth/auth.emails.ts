@@ -46,7 +46,47 @@ export const passwordChangedMessage = (to: string, name: string, appUrl: string)
   ].join("\n")
 });
 
-export const accountExistsMessage =(to: string, name: string, appUrl: string): EmailMessage => ({
+export const twoFactorEnabledMessage = (to: string, name: string, appUrl: string): EmailMessage => ({
+  to,
+  kind: "two-factor-enabled",
+  subject: "Two-step verification is on",
+  text: [
+    `Hi ${name},`,
+    "",
+    "Two-step verification was just turned on for your Vendora account. From now on you'll enter a code from your authenticator app when you sign in.",
+    "",
+    `If this wasn't you, reset your password now (${appUrl}/forgot-password) and contact Vendora support.`
+  ].join("\n")
+});
+
+export const twoFactorDisabledMessage = (to: string, name: string, appUrl: string): EmailMessage => ({
+  to,
+  kind: "two-factor-disabled",
+  subject: "Two-step verification was turned off",
+  text: [
+    `Hi ${name},`,
+    "",
+    "Two-step verification was just turned off for your Vendora account, and no device is trusted anymore.",
+    "",
+    `If this wasn't you, reset your password now (${appUrl}/forgot-password) and contact Vendora support.`
+  ].join("\n")
+});
+
+export const backupCodeUsedMessage = (to: string, name: string, left: number, appUrl: string): EmailMessage => ({
+  to,
+  kind: "backup-code-used",
+  subject: "A backup code was used to sign in",
+  text: [
+    `Hi ${name},`,
+    "",
+    `A backup code was just used to sign in to your Vendora account. You have ${left} left.`,
+    ...(left <= 3 ? ["Get new codes in Security settings before you run out."] : []),
+    "",
+    `If this wasn't you, reset your password now (${appUrl}/forgot-password) and contact Vendora support.`
+  ].join("\n")
+});
+
+export const accountExistsMessage = (to: string, name: string, appUrl: string): EmailMessage => ({
   to,
   kind: "account-exists",
   subject: "Someone tried to create a Vendora account with your email",

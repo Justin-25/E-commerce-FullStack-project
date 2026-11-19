@@ -10,7 +10,7 @@ const secret = () =>
     .string({ error: 'is missing (run "npm run secrets" to create it in .env)' })
     .regex(/^[A-Za-z0-9_-]{43,}$/, 'must be at least 32 random bytes in base64url (run "npm run secrets")');
 
-export const SECRET_KEYS = ["ACCESS_TOKEN_SECRET", "CSRF_SECRET", "CODE_HASH_SECRET"] as const;
+export const SECRET_KEYS = ["ACCESS_TOKEN_SECRET", "CSRF_SECRET", "CODE_HASH_SECRET", "DATA_ENCRYPTION_KEY"] as const;
 
 const schema = z
   .object({
@@ -35,6 +35,7 @@ const schema = z
     ACCESS_TOKEN_SECRET: secret(), // signs the 15-minute access pass (JWT)
     CSRF_SECRET: secret(), // signs CSRF tokens
     CODE_HASH_SECRET: secret(), // keyed hash for one-time codes, so a stolen database can't reveal them
+    DATA_ENCRYPTION_KEY: secret(), // encrypts 2FA secrets (later: tax IDs, payout account numbers) in the database
     /** Stricter per-IP limit for sign-in, sign-up and code endpoints (per 15 minutes). */
     AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(30),
     /** "outbox" prints emails in the API terminal (development only). A real provider comes in milestone 9. */

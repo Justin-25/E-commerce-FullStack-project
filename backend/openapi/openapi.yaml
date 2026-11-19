@@ -7,6 +7,7 @@ info:
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
     Sign-in (milestone 3a): create account, verify email, sign in/out, stay signed in.
     Passwords (milestone 3b): forgot, reset from an emailed link, change while signed in.
+    Two-step verification (milestone 3c): authenticator app, backup codes, trusted devices.
 
     **How signing in works**
     - Signing in sets two httpOnly cookies that page JavaScript cannot read:
@@ -184,7 +185,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/LoginRequest" }
       responses:
-        "200": { $ref: "#/components/responses/SignedIn" }
+        "200": { $ref: "#/components/responses/SignInStep" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401":
           description: INVALID_CREDENTIALS, with `details.attemptsLeft` before the pause.
@@ -296,7 +297,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/ResetPasswordRequest" }
       responses:
-        "200": { $ref: "#/components/responses/SignedIn" }
+        "200": { $ref: "#/components/responses/SignInStep" }
         "400":
           description: INVALID_LINK (expired, used or made-up) or VALIDATION_ERROR (field `password` or `token`).
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
@@ -344,6 +345,184 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
+  /api/v1/auth/2fa/verify:
+    post:
+      summary: Finish signing in with the authenticator code (or a backup code)
+      description: |
+        After sign-in or a password reset answered `two_factor_required`. That step lives in the httpOnly
+        `vd_2fa` cookie for 5 minutes and allows 5 tries; wrong codes also count toward the account's
+        sign-in lockout. Send either `code` (6 digits) or `backupCode`. A code can't be used twice.
+        With `trustDevice`, this browser skips the code for 30 days (httpOnly `vd_td` cookie).
+      operationId: verifyTwoFactor
+      tags: [auth]
+      security: [{ challengeCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TwoFactorVerifyRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/SignedIn" }
+        "400":
+          description: INVALID_CODE (with `details.attemptsLeft`), CHALLENGE_EXPIRED (sign in again) or VALIDATION_ERROR.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "429":
+          description: ACCOUNT_LOCKED (too many wrong codes or passwords) or RATE_LIMITED.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/v1/auth/2fa:
+    get:
+      summary: Two-step verification status (Security settings)
+      operationId: getTwoFactorStatus
+      tags: [auth]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200":
+          description: Whether it's on, whether this account must have it, and how many backup codes are left.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TwoFactorStatus" }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/auth/2fa/setup:
+    post:
+      summary: Start turning on two-step verification
+      description: |
+        Signed in, or during sign-in for sellers and admins who got `two_factor_setup_required`.
+        Returns the `otpauth://` link to show as a QR code (draw it in the browser; never send it to a
+        QR web service, it contains the secret) and the key to type in by hand. Nothing changes until
+        `/2fa/enable` succeeds; starting again replaces the pending secret.
+      operationId: startTwoFactorSetup
+      tags: [auth]
+      security: [{ accessCookie: [], csrfHeader: [] }, { challengeCookie: [], csrfHeader: [] }]
+      responses:
+        "200":
+          description: The link for the QR code and the manual key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TwoFactorSetup" }
+        "401":
+          description: UNAUTHORIZED. Not signed in and no set-up step in progress.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "409":
+          description: CONFLICT. Two-step verification is already on.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/v1/auth/2fa/enable:
+    post:
+      summary: Confirm the first code from the app; turns two-step verification on
+      description: |
+        Returns 10 backup codes, shown only this once (only hashes are stored). During a seller/admin
+        sign-in this also signs in, so the response is SignedIn plus `backupCodes`.
+        The owner gets a "two-step verification is on" email.
+      operationId: enableTwoFactor
+      tags: [auth]
+      security: [{ accessCookie: [], csrfHeader: [] }, { challengeCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppCodeRequest" }
+      responses:
+        "200":
+          description: On. Signed-in users get `{ backupCodes }`; the sign-in set-up step gets SignedIn + `backupCodes`.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: "#/components/schemas/BackupCodes" }
+                  - { $ref: "#/components/schemas/SignedIn" }
+        "400":
+          description: INVALID_CODE, CHALLENGE_EXPIRED or VALIDATION_ERROR.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401":
+          description: UNAUTHORIZED. Not signed in and no set-up step in progress.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "409":
+          description: CONFLICT. Already on, or set-up wasn't started.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/v1/auth/2fa/disable:
+    post:
+      summary: Turn two-step verification off (shoppers only)
+      description: |
+        Needs a current app code or a backup code; wrong ones count toward the lockout. Backup codes are
+        deleted and no device stays trusted. Sellers and admins get 403: it's required for them.
+        The owner gets a "two-step verification was turned off" email.
+      operationId: disableTwoFactor
+      tags: [auth]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SecondFactorRequest" }
+      responses:
+        "200":
+          description: Off.
+          content:
+            application/json:
+              schema: { type: object, required: [enabled], properties: { enabled: { type: boolean, const: false } } }
+        "400":
+          description: INVALID_CODE (with `details.attemptsLeft`) or VALIDATION_ERROR.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403":
+          description: FORBIDDEN (required for sellers and admins) or CSRF_INVALID.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: CONFLICT. Already off.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429":
+          description: ACCOUNT_LOCKED or RATE_LIMITED.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/v1/auth/2fa/backup-codes:
+    post:
+      summary: Get a new set of 10 backup codes (the old ones stop working)
+      description: Needs a current app code (not a backup code). Old codes can't be shown again; only hashes are stored.
+      operationId: renewBackupCodes
+      tags: [auth]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppCodeRequest" }
+      responses:
+        "200":
+          description: The new codes, shown only this once.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupCodes" }
+        "400":
+          description: INVALID_CODE or VALIDATION_ERROR.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "409":
+          description: CONFLICT. Two-step verification is off.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429":
+          description: ACCOUNT_LOCKED or RATE_LIMITED.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
   /api/v1/auth/me:
     get:
       summary: Who is signed in?
@@ -376,6 +555,16 @@ components:
       in: cookie
       name: vd_rt
       description: Refresh pass (httpOnly, sent only to /api/v1/auth). `__Secure-vd_rt` in production.
+    challengeCookie:
+      type: apiKey
+      in: cookie
+      name: vd_2fa
+      description: The "enter your code" / "set up 2FA" step after a correct password (httpOnly, minutes, /api/v1/auth only). `__Secure-vd_2fa` in production.
+    trustedDeviceCookie:
+      type: apiKey
+      in: cookie
+      name: vd_td
+      description: '"Trust this device for 30 days" (httpOnly, /api/v1/auth only). `__Secure-vd_td` in production.'
     csrfHeader:
       type: apiKey
       in: header
@@ -440,6 +629,7 @@ components:
                 - EMAIL_NOT_VERIFIED
                 - INVALID_CODE
                 - INVALID_LINK
+                - CHALLENGE_EXPIRED
             message: { type: string }
             requestId: { type: string }
             details:
@@ -480,8 +670,61 @@ components:
       type: object
       required: [user, csrfToken]
       properties:
+        status: { type: string, const: signed_in }
         user: { $ref: "#/components/schemas/User" }
         csrfToken: { type: string, description: The new CSRF token for the signed-in browser. }
+
+    TwoFactorStep:
+      description: The password was right; one more step before signing in. The step is kept in the vd_2fa cookie.
+      type: object
+      required: [status, expiresInSeconds]
+      properties:
+        status:
+          type: string
+          enum: [two_factor_required, two_factor_setup_required]
+          description: "two_factor_required: show 'Enter the 6-digit code'. two_factor_setup_required: sellers/admins must set up 2FA first."
+        expiresInSeconds: { type: integer, example: 300 }
+
+    TwoFactorVerifyRequest:
+      type: object
+      properties:
+        code: { type: string, pattern: "^[0-9]{6}$", description: "From the authenticator app. Send this OR backupCode." }
+        backupCode: { type: string, example: kq7mz-4hx2p }
+        trustDevice: { type: boolean, default: false, description: "Trust this device for 30 days" }
+
+    SecondFactorRequest:
+      type: object
+      properties:
+        code: { type: string, pattern: "^[0-9]{6}$" }
+        backupCode: { type: string, example: kq7mz-4hx2p }
+
+    AppCodeRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, pattern: "^[0-9]{6}$" }
+
+    TwoFactorStatus:
+      type: object
+      required: [enabled, enabledAt, required, backupCodesLeft]
+      properties:
+        enabled: { type: boolean }
+        enabledAt: { type: [string, "null"], format: date-time }
+        required: { type: boolean, description: True for sellers and admins. }
+        backupCodesLeft: { type: integer, example: 7 }
+
+    TwoFactorSetup:
+      type: object
+      required: [otpauthUri, manualKey]
+      properties:
+        otpauthUri: { type: string, example: "otpauth://totp/Vendora:maria%40example.com?issuer=Vendora&secret=…" }
+        manualKey: { type: string, example: "JBSW Y3DP EHPK 3PXP …" }
+
+    BackupCodes:
+      type: object
+      required: [backupCodes]
+      properties:
+        backupCodes: { type: array, minItems: 10, maxItems: 10, items: { type: string, example: kq7mz-4hx2p } }
 
     RegisterRequest:
       type: object
@@ -557,6 +800,14 @@ components:
       headers:
         Retry-After: { schema: { type: integer }, description: Seconds to wait before retrying. }
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    SignInStep:
+      description: Signed in (cookies set), or one more step first (2FA code or set-up; vd_2fa cookie set).
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - { $ref: "#/components/schemas/SignedIn" }
+              - { $ref: "#/components/schemas/TwoFactorStep" }
     CsrfInvalid:
       description: CSRF_INVALID. Missing or wrong X-CSRF-Token, or the request came from another website.
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }

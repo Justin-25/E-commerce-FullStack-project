@@ -1,4 +1,5 @@
 import { Router, type Express } from "express";
+import { Secret, TOTP } from "otpauth";
 import { pino } from "pino";
 import { expect } from "vitest";
 import { createApp } from "../../src/app.js";
@@ -7,6 +8,7 @@ import { MemoryKv } from "../../src/lib/kv.js";
 import { createAuthGuards } from "../../src/middleware/auth.js";
 import { createCsrf } from "../../src/middleware/csrf.js";
 import { authRouter } from "../../src/modules/auth/auth.routes.js";
+import { authKeys } from "../../src/modules/auth/keys.js";
 import { AuthService } from "../../src/modules/auth/auth.service.js";
 import { TokenService } from "../../src/modules/auth/tokens.js";
 import { silentLogger, testConfig } from "../helpers.js";
@@ -24,8 +26,18 @@ export const AUTH = {
   me: "/api/v1/auth/me",
   forgot: "/api/v1/auth/forgot-password",
   reset: "/api/v1/auth/reset-password",
-  change: "/api/v1/auth/change-password"
+  change: "/api/v1/auth/change-password",
+  twoFactor: "/api/v1/auth/2fa",
+  twoFactorVerify: "/api/v1/auth/2fa/verify",
+  twoFactorSetup: "/api/v1/auth/2fa/setup",
+  twoFactorEnable: "/api/v1/auth/2fa/enable",
+  twoFactorDisable: "/api/v1/auth/2fa/disable",
+  backupCodes: "/api/v1/auth/2fa/backup-codes"
 } as const;
+
+/** What the phone's authenticator app would show right now for this key (±1 window to pick another code). */
+export const totpCode = (manualKey: string, windowOffset = 0): string =>
+  TOTP.generate({ secret: Secret.fromBase32(manualKey.replace(/\s/g, "")), timestamp: Date.now() + windowOffset * 30_000 });
 
 export const GOOD_PASSWORD = "correct horse battery staple";
 /** Passwords the fake breach checker treats as leaked. */
@@ -100,6 +112,22 @@ export async function createAuthHarness(env: Record<string, string> = {}) {
       return token;
     },
     browser: (headers: Record<string, string> = {}) => Browser.open(app, headers),
+
+    /** Forget which app codes this user already used, so a test can sign in again within the same 30 seconds. */
+    allowCodeReuse: async (userId: string) => {
+      const counter = Math.floor(Date.now() / 30_000);
+      await memory.delete(...[-2, -1, 0, 1, 2].map((d) => authKeys.totpUsed(userId, counter + d)));
+    },
+
+    /** Turns 2FA on for the signed-in browser, like a person scanning the QR code. */
+    async enableTwoFactor(browser: Browser) {
+      const setup = await browser.post(AUTH.twoFactorSetup);
+      expect(setup.status).toBe(200);
+      const manualKey = String(setup.body.manualKey);
+      const res = await browser.post(AUTH.twoFactorEnable, { code: totpCode(manualKey) });
+      expect(res.status).toBe(200);
+      return { manualKey, otpauthUri: String(setup.body.otpauthUri), backupCodes: res.body.backupCodes as string[] };
+    },
 
     /** Full sign-up: register, read the emailed code, verify. Returns the signed-in browser and response. */
     async signUp({ email, name = "Maria Santos", password = GOOD_PASSWORD, keepSignedIn = false }: { email: string; name?: string; password?: string; keepSignedIn?: boolean }) {

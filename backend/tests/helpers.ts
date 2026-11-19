@@ -11,7 +11,8 @@ export const silentLogger = pino({ level: "silent" });
 export const TEST_SECRETS = {
   ACCESS_TOKEN_SECRET: "test_access_token_secret_0123456789_abcdefghijklmn",
   CSRF_SECRET: "test_csrf_secret_0123456789_abcdefghijklmnopqrstuvwxyz",
-  CODE_HASH_SECRET: "test_code_hash_secret_0123456789_abcdefghijklmnopqrst"
+  CODE_HASH_SECRET: "test_code_hash_secret_0123456789_abcdefghijklmnopqrst",
+  DATA_ENCRYPTION_KEY: "test_data_encryption_key_0123456789_abcdefghijklmn"
 };
 
 export function testConfig(env: Record<string, string> = {}) {
