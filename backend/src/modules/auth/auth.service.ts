@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { Config } from "../../config/env.js";
-import { Prisma, type PrismaClient, type SecurityEventType, type User } from "../../generated/prisma/client.js";
+import { Prisma, type PrismaClient, type User } from "../../generated/prisma/client.js";
 import type { BreachCheck } from "../../lib/breachedPasswords.js";
 import { randomToken, sha256Hex } from "../../lib/crypto.js";
-import type { EmailMessage, EmailSender } from "../../lib/email.js";
+import { BackgroundMailer } from "../../lib/backgroundMailer.js";
+import type { EmailSender } from "../../lib/email.js";
 import { createFieldCipher, type FieldCipher } from "../../lib/encryption.js";
-import { AppError, DependencyUnavailableError } from "../../lib/errors.js";
+import { AppError } from "../../lib/errors.js";
 import type { KeyValueStore } from "../../lib/kv.js";
 import type { Logger } from "../../lib/logger.js";
 import { dummyHash, hashPassword, needsRehash, verifyPassword } from "../../lib/password.js";
@@ -27,11 +28,17 @@ import type {
   TwoFactorVerifyInput,
   VerifyEmailInput
 } from "./auth.schemas.js";
+
+export type { ClientInfo } from "./events.js";
+import { BREACHED_MESSAGE, challengeExpired, fieldError, invalidCode, invalidLink, locked, notSignedIn, refreshConflict, suspended } from "./authErrors.js";
 import { BackupCodes } from "./backupCodes.js";
 import { SignInChallenges, type Challenge, type IssuedChallenge } from "./challenges.js";
 import { OneTimeCodes, OneTimeLinks } from "./codes.js";
+import { recordSecurityEvent, type ClientInfo } from "./events.js";
 import { authKeys, emailKey } from "./keys.js";
 import { LoginLockout } from "./lockout.js";
+import { SecondFactorCheck } from "./secondFactor.js";
+import { bestEffort, SessionRevoker } from "./sessionRevoker.js";
 import { ACCESS_TTL_SECONDS, SESSION_TTL_MS, type AccessClaims, type IssuedSession, type TokenService } from "./tokens.js";
 import { TotpCodes } from "./totp.js";
 import { TrustedDevices } from "./trustedDevices.js";
@@ -50,13 +57,6 @@ export const REFRESH_GRACE_MS = 10_000;
 export const RESET_LINK_TTL_SECONDS = 30 * 60;
 const RESET_COOLDOWN_SECONDS = 60;
 const MAX_RESETS_PER_DAY = 5;
-
-export interface ClientInfo {
-  ip: string;
-  /** The IP grouped for counting (IPv6 by /56), so one person can't dodge limits by rotating addresses. */
-  ipKey: string;
-  userAgent?: string | undefined;
-}
 
 export interface PublicUser {
   id: string;
@@ -106,25 +106,6 @@ export interface AuthServiceDeps {
   now?: () => Date;
 }
 
-const invalidCode = () => new AppError(400, "INVALID_CODE", "That code isn't right or has expired. Check the latest email or request a new code.");
-const notSignedIn = () => new AppError(401, "UNAUTHORIZED", "Please sign in to continue.");
-const suspended = () => new AppError(403, "ACCOUNT_SUSPENDED", "This account is suspended. Contact Vendora support for help.");
-const refreshConflict = () => new AppError(409, "CONFLICT", "You were just signed in again in another tab. Please retry.");
-const invalidLink = () => new AppError(400, "INVALID_LINK", "This reset link has expired or was already used. Request a new one.");
-const fieldError = (path: string, message: string, details?: Record<string, number>) =>
-  new AppError(400, "VALIDATION_ERROR", "Some fields are invalid", { fields: [{ path, message }], ...(details ? { details } : {}) });
-const BREACHED_MESSAGE = "This password has appeared in a data breach. Choose one you don't use anywhere else.";
-const locked = (retryAfterSeconds: number) =>
-  new AppError(429, "ACCOUNT_LOCKED", "Too many sign-in attempts. Sign-in is paused for 15 minutes.", { details: { retryAfterSeconds } });
-const challengeExpired = () => new AppError(400, "CHALLENGE_EXPIRED", "Your sign-in timed out. Please sign in again.");
-const wrongSecondFactor = (attemptsLeft: number, usedBackupCode: boolean) =>
-  new AppError(
-    400,
-    "INVALID_CODE",
-    usedBackupCode ? "That backup code isn't right or was already used." : "That code isn't right. Check your authenticator app and try again.",
-    { details: { attemptsLeft } }
-  );
-
 export class AuthService {
   private readonly codes: OneTimeCodes;
   private readonly links: OneTimeLinks;
@@ -134,8 +115,10 @@ export class AuthService {
   private readonly backupCodes: BackupCodes;
   private readonly trustedDevices: TrustedDevices;
   private readonly cipher: FieldCipher;
+  private readonly secondFactor: SecondFactorCheck;
+  private readonly revoker: SessionRevoker;
+  private readonly mailer: BackgroundMailer;
   private readonly now: () => Date;
-  private readonly pendingEmails = new Set<Promise<void>>();
 
   constructor(private readonly deps: AuthServiceDeps) {
     this.now = deps.now ?? (() => new Date());
@@ -147,6 +130,16 @@ export class AuthService {
     this.backupCodes = new BackupCodes(deps.prisma, deps.config.CODE_HASH_SECRET, this.now);
     this.trustedDevices = new TrustedDevices(deps.prisma, this.now);
     this.cipher = createFieldCipher(deps.config.DATA_ENCRYPTION_KEY);
+    this.secondFactor = new SecondFactorCheck({
+      prisma: deps.prisma,
+      lockout: this.lockout,
+      totp: this.totp,
+      backupCodes: this.backupCodes,
+      challenges: this.challenges,
+      cipher: this.cipher
+    });
+    this.revoker = new SessionRevoker(deps.prisma, deps.kv, deps.logger, this.now);
+    this.mailer = new BackgroundMailer(deps.email, deps.logger);
     void dummyHash(); // prepare it now, so the first sign-in for an unknown email isn't slower than the rest
   }
 
@@ -172,7 +165,7 @@ export class AuthService {
       const updated = await prisma.user.update({ where: { id: existing.id }, data: { name: input.name, passwordHash } });
       await this.sendVerificationCode(updated, { force: false });
     } else if (await kv.setIfAbsent(authKeys.accountExistsNotice(emailKey(input.email)), "1", ACCOUNT_EXISTS_NOTICE_SECONDS)) {
-      this.sendEmail(accountExistsMessage(existing.email, existing.name, config.APP_URL));
+      this.mailer.send(accountExistsMessage(existing.email, existing.name, config.APP_URL));
     }
     return this.verificationSent(input.email);
   }
@@ -188,7 +181,7 @@ export class AuthService {
     const { prisma } = this.deps;
     const user = await prisma.user.findUnique({ where: { email: input.email } });
     if (!user || user.emailVerifiedAt || user.deletedAt) throw invalidCode();
-    const codeId = await this.codes.check(user.id, "EMAIL_VERIFY", input.code);
+    const codeId = (await this.codes.check(user.id, "EMAIL_VERIFY", input.code))?.id;
     if (!codeId) throw invalidCode();
     if (user.status !== "ACTIVE") throw suspended();
 
@@ -197,7 +190,7 @@ export class AuthService {
       const used = await tx.authToken.updateMany({ where: { id: codeId, usedAt: null }, data: { usedAt: now } });
       if (used.count !== 1) throw invalidCode(); // used by a parallel request a moment ago
       const verified = await tx.user.update({ where: { id: user.id }, data: { emailVerifiedAt: now, lastLoginAt: now } });
-      await this.recordEvent(tx, user.id, "LOGIN_OK", client);
+      await recordSecurityEvent(tx, user.id, "LOGIN_OK", client);
       return this.startSession(tx, verified, input.keepSignedIn, client);
     });
   }
@@ -217,8 +210,8 @@ export class AuthService {
     if (!user || !stored || !passwordOk) {
       const result = await this.lockout.recordFailure(account, client.ipKey);
       if (user && !user.deletedAt) {
-        await this.recordEvent(prisma, user.id, "LOGIN_FAILED", client);
-        if (result.locked) await this.recordEvent(prisma, user.id, "LOCKED", client);
+        await recordSecurityEvent(prisma, user.id, "LOGIN_FAILED", client);
+        if (result.locked) await recordSecurityEvent(prisma, user.id, "LOCKED", client);
       }
       if (result.locked) throw locked(result.retryAfterSeconds);
       throw new AppError(401, "INVALID_CREDENTIALS", "Email or password is incorrect.", { details: { attemptsLeft: result.attemptsLeft } });
@@ -256,15 +249,15 @@ export class AuthService {
     if (session.revokedAt) {
       if (session.revokedReason === "rotated") {
         if (now.getTime() - session.revokedAt.getTime() < REFRESH_GRACE_MS) throw refreshConflict();
-        await this.revokeFamily(session.familyId, "reuse_detected");
-        await this.recordEvent(prisma, session.userId, "TOKEN_REUSE_DETECTED", client);
+        await this.revoker.revokeFamily(session.familyId, "reuse_detected");
+        await recordSecurityEvent(prisma, session.userId, "TOKEN_REUSE_DETECTED", client);
       }
       throw notSignedIn();
     }
     if (session.expiresAt <= now) throw notSignedIn();
     const { user } = session;
     if (user.status !== "ACTIVE" || user.deletedAt) {
-      await this.revokeFamily(session.familyId, "user_inactive");
+      await this.revoker.revokeFamily(session.familyId, "user_inactive");
       throw notSignedIn();
     }
 
@@ -286,11 +279,11 @@ export class AuthService {
       const session = await this.deps.prisma.session.findUnique({ where: { refreshTokenHash: sha256Hex(refreshToken) }, select: { familyId: true } });
       if (session) familyId = session.familyId;
     }
-    if (familyId) await this.revokeFamily(familyId, "logout");
+    if (familyId) await this.revoker.revokeFamily(familyId, "logout");
     if (claims) {
       const { jti } = claims;
       const secondsLeft = Math.max(1, claims.expiresAt - Math.floor(this.now().getTime() / 1000));
-      await this.bestEffort("signed-out access pass stays valid up to 15 minutes", () => this.deps.kv.set(authKeys.deniedAccess(jti), "1", secondsLeft));
+      await bestEffort(this.deps.logger, "signed-out access pass stays valid up to 15 minutes", () => this.deps.kv.set(authKeys.deniedAccess(jti), "1", secondsLeft));
     }
   }
 
@@ -314,7 +307,7 @@ export class AuthService {
       if (allowed) {
         const token = await this.links.issue(user.id, "PASSWORD_RESET", RESET_LINK_TTL_SECONDS);
         // The token goes after "#": browsers never send that part to a server or to other sites.
-        this.sendEmail(passwordResetMessage(user.email, user.name, `${config.APP_URL}/reset-password#token=${token}`, RESET_LINK_TTL_SECONDS / 60));
+        this.mailer.send(passwordResetMessage(user.email, user.name, `${config.APP_URL}/reset-password#token=${token}`, RESET_LINK_TTL_SECONDS / 60));
       }
     }
     return { status: "reset_link_sent" as const, email, expiresInSeconds: RESET_LINK_TTL_SECONDS };
@@ -345,14 +338,14 @@ export class AuthService {
         where: { id: link.userId },
         data: { passwordHash, passwordChangedAt: now, emailVerifiedAt: link.user.emailVerifiedAt ?? now }
       });
-      const families = await this.revokeAllSessions(tx, user.id, "password_reset");
+      const families = await this.revoker.revokeAllSessions(tx, user.id, "password_reset");
       await this.trustedDevices.revokeAll(tx, user.id);
-      await this.recordEvent(tx, user.id, "PASSWORD_RESET", client);
+      await recordSecurityEvent(tx, user.id, "PASSWORD_RESET", client);
       return { user, families };
     });
 
     await this.afterPasswordChange(link.user, families, now);
-    await this.bestEffort("sign-in pause not lifted after the reset", () => this.lockout.clear(emailKey(link.user.email), client.ipKey));
+    await bestEffort(this.deps.logger, "sign-in pause not lifted after the reset", () => this.lockout.clear(emailKey(link.user.email), client.ipKey));
     return this.completeSignIn(user, input.keepSignedIn, client);
   }
 
@@ -374,9 +367,9 @@ export class AuthService {
     if (wait > 0) throw locked(wait);
     if (!(await verifyPassword(input.currentPassword, user.passwordHash))) {
       const result = await this.lockout.recordFailure(account, client.ipKey);
-      await this.recordEvent(prisma, user.id, "LOGIN_FAILED", client);
+      await recordSecurityEvent(prisma, user.id, "LOGIN_FAILED", client);
       if (result.locked) {
-        await this.recordEvent(prisma, user.id, "LOCKED", client);
+        await recordSecurityEvent(prisma, user.id, "LOCKED", client);
         throw locked(result.retryAfterSeconds);
       }
       throw fieldError("currentPassword", "That's not your current password.", { attemptsLeft: result.attemptsLeft });
@@ -394,9 +387,9 @@ export class AuthService {
     const { session, families } = await prisma.$transaction(async (tx) => {
       const updated = await tx.user.update({ where: { id: user.id }, data: { passwordHash, passwordChangedAt: now } });
       // Every sign-in chain ends, including this device's; this device then starts a fresh one.
-      const families = await this.revokeAllSessions(tx, user.id, "password_changed");
+      const families = await this.revoker.revokeAllSessions(tx, user.id, "password_changed");
       await this.trustedDevices.revokeAll(tx, user.id);
-      await this.recordEvent(tx, user.id, "PASSWORD_CHANGED", client);
+      await recordSecurityEvent(tx, user.id, "PASSWORD_CHANGED", client);
       return { session: await this.startSession(tx, updated, current?.persistent ?? false, client), families };
     });
 
@@ -420,20 +413,20 @@ export class AuthService {
       await this.challenges.remove(challengeToken);
       throw challengeExpired();
     }
-    const method = await this.checkSecondFactor(user, input, client, challengeToken);
+    const method = await this.secondFactor.check(user, input, client, challengeToken);
     await this.challenges.remove(challengeToken); // each step works once
 
     const now = this.now();
     const { session, trustedDevice } = await this.deps.prisma.$transaction(async (tx) => {
       const updated = await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: now } });
-      await this.recordEvent(tx, user.id, "LOGIN_OK", client);
-      if (method === "backup") await this.recordEvent(tx, user.id, "BACKUP_CODE_USED", client);
+      await recordSecurityEvent(tx, user.id, "LOGIN_OK", client);
+      if (method === "backup") await recordSecurityEvent(tx, user.id, "BACKUP_CODE_USED", client);
       const trustedDevice = input.trustDevice ? await this.trustedDevices.create(tx, user.id, client) : undefined;
       return { session: await this.startSession(tx, updated, challenge.keepSignedIn, client), trustedDevice };
     });
     if (method === "backup") {
       const left = await this.backupCodes.countLeft(user.id);
-      this.sendEmail(backupCodeUsedMessage(user.email, user.name, left, this.deps.config.APP_URL));
+      this.mailer.send(backupCodeUsedMessage(user.email, user.name, left, this.deps.config.APP_URL));
     }
     return { kind: "signed_in", session, ...(trustedDevice ? { trustedDevice } : {}) };
   }
@@ -473,7 +466,7 @@ export class AuthService {
       challenge = await this.challenges.find(subject.challengeToken);
       if (!challenge || challenge.type !== "two_factor_setup" || challenge.userId !== user.id) throw challengeExpired();
     }
-    if (!(await this.totp.verify(user.id, this.decryptSecret(user), code))) {
+    if (!(await this.totp.verify(user.id, this.secondFactor.decryptSecret(user), code))) {
       if (subject.challengeToken && (await this.challenges.countAttempt(subject.challengeToken)) === 0) throw challengeExpired();
       throw new AppError(400, "INVALID_CODE", "That code isn't right. Make sure the app shows Vendora and enter its newest code.");
     }
@@ -482,13 +475,13 @@ export class AuthService {
     const result = await this.deps.prisma.$transaction(async (tx) => {
       const updated = await tx.user.update({ where: { id: user.id }, data: { twoFactorEnabledAt: now, ...(challenge ? { lastLoginAt: now } : {}) } });
       const backupCodes = await this.backupCodes.replace(tx, user.id);
-      await this.recordEvent(tx, user.id, "TWO_FA_ENABLED", client);
+      await recordSecurityEvent(tx, user.id, "TWO_FA_ENABLED", client);
       if (!challenge) return { backupCodes };
-      await this.recordEvent(tx, user.id, "LOGIN_OK", client);
+      await recordSecurityEvent(tx, user.id, "LOGIN_OK", client);
       return { backupCodes, session: await this.startSession(tx, updated, challenge.keepSignedIn, client) };
     });
     if (subject.challengeToken) await this.challenges.remove(subject.challengeToken);
-    this.sendEmail(twoFactorEnabledMessage(user.email, user.name, this.deps.config.APP_URL));
+    this.mailer.send(twoFactorEnabledMessage(user.email, user.name, this.deps.config.APP_URL));
     return result;
   }
 
@@ -497,31 +490,31 @@ export class AuthService {
     const user = await this.activeUser(claims.userId);
     if (requiresTwoFactor(user.role)) throw new AppError(403, "FORBIDDEN", "Two-step verification is required for seller and admin accounts.");
     if (!user.twoFactorEnabledAt) throw new AppError(409, "CONFLICT", "Two-step verification is already off.");
-    await this.checkSecondFactor(user, input, client);
+    await this.secondFactor.check(user, input, client);
     await this.deps.prisma.$transaction(async (tx) => {
       await tx.user.update({ where: { id: user.id }, data: { twoFactorSecret: null, twoFactorEnabledAt: null } });
       await tx.backupCode.deleteMany({ where: { userId: user.id } });
       await this.trustedDevices.revokeAll(tx, user.id);
-      await this.recordEvent(tx, user.id, "TWO_FA_DISABLED", client);
+      await recordSecurityEvent(tx, user.id, "TWO_FA_DISABLED", client);
     });
-    this.sendEmail(twoFactorDisabledMessage(user.email, user.name, this.deps.config.APP_URL));
+    this.mailer.send(twoFactorDisabledMessage(user.email, user.name, this.deps.config.APP_URL));
   }
 
   /** A new set of 10 backup codes (the old ones stop working). Needs a current app code, not a backup code. */
   async renewBackupCodes(claims: AccessClaims, code: string, client: ClientInfo): Promise<string[]> {
     const user = await this.activeUser(claims.userId);
     if (!user.twoFactorEnabledAt) throw new AppError(409, "CONFLICT", "Turn on two-step verification first.");
-    await this.checkSecondFactor(user, { code }, client);
+    await this.secondFactor.check(user, { code }, client);
     return this.deps.prisma.$transaction(async (tx) => {
       const codes = await this.backupCodes.replace(tx, user.id);
-      await this.recordEvent(tx, user.id, "BACKUP_CODES_RENEWED", client);
+      await recordSecurityEvent(tx, user.id, "BACKUP_CODES_RENEWED", client);
       return codes;
     });
   }
 
   /** Waits for emails still being sent (graceful shutdown). */
   async drain(): Promise<void> {
-    await Promise.allSettled([...this.pendingEmails]);
+    await this.mailer.drain();
   }
 
   // --- helpers --------------------------------------------------------------
@@ -541,43 +534,10 @@ export class AuthService {
     const now = this.now();
     const session = await this.deps.prisma.$transaction(async (tx) => {
       const updated = await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: now } });
-      await this.recordEvent(tx, user.id, "LOGIN_OK", client);
+      await recordSecurityEvent(tx, user.id, "LOGIN_OK", client);
       return this.startSession(tx, updated, keepSignedIn, client);
     });
     return { kind: "signed_in", session };
-  }
-
-  /**
-   * Checks an app code or a backup code. Wrong codes count toward the same
-   * lockout as passwords, and toward the sign-in step's own 5 tries. Returns which one was used.
-   */
-  private async checkSecondFactor(user: User, input: SecondFactorInput, client: ClientInfo, challengeToken?: string): Promise<"app" | "backup"> {
-    const account = emailKey(user.email);
-    const wait = await this.lockout.secondsLocked(account, client.ipKey);
-    if (wait > 0) throw locked(wait);
-    const ok =
-      input.code !== undefined
-        ? user.twoFactorSecret !== null && (await this.totp.verify(user.id, this.decryptSecret(user), input.code))
-        : input.backupCode !== undefined && (await this.backupCodes.use(user.id, input.backupCode));
-    if (ok) {
-      await this.lockout.recordSuccess(account, client.ipKey);
-      return input.code !== undefined ? "app" : "backup";
-    }
-    const result = await this.lockout.recordFailure(account, client.ipKey);
-    await this.recordEvent(this.deps.prisma, user.id, "LOGIN_FAILED", client);
-    if (result.locked) {
-      await this.recordEvent(this.deps.prisma, user.id, "LOCKED", client);
-      if (challengeToken) await this.challenges.remove(challengeToken);
-      throw locked(result.retryAfterSeconds);
-    }
-    const challengeLeft = challengeToken ? await this.challenges.countAttempt(challengeToken) : Number.POSITIVE_INFINITY;
-    if (challengeLeft === 0) throw challengeExpired();
-    throw wrongSecondFactor(Math.min(result.attemptsLeft, challengeLeft), input.backupCode !== undefined);
-  }
-
-  private decryptSecret(user: User): string {
-    if (!user.twoFactorSecret) throw new Error("this user has no 2FA secret");
-    return this.cipher.decrypt(user.twoFactorSecret, user.id);
   }
 
   private async activeUser(userId: string): Promise<User> {
@@ -602,46 +562,13 @@ export class AuthService {
         familyId: chain?.familyId ?? randomUUID(),
         userAgent: client.userAgent?.slice(0, 512) ?? null,
         ipAddress: client.ip.slice(0, 45),
+        location: client.location?.slice(0, 100) ?? null,
         persistent,
         expiresAt: chain?.expiresAt ?? new Date(this.now().getTime() + lifetime)
       }
     });
     const accessToken = await this.deps.tokens.signAccess({ userId: user.id, sessionId: session.id, familyId: session.familyId, role: user.role });
     return { user: toPublicUser(user), accessToken, refreshToken, persistent, expiresAt: session.expiresAt };
-  }
-
-  private async revokeFamily(familyId: string, reason: string) {
-    await this.deps.prisma.session.updateMany({ where: { familyId, revokedAt: null }, data: { revokedAt: this.now(), revokedReason: reason } });
-    await this.markFamiliesRevoked([familyId]);
-  }
-
-  /** Ends every active sign-in of a user (inside a transaction). Returns the chains it ended. */
-  private async revokeAllSessions(tx: Db, userId: string, reason: string): Promise<string[]> {
-    const active = await tx.session.findMany({ where: { userId, revokedAt: null }, select: { familyId: true }, distinct: ["familyId"] });
-    await tx.session.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: this.now(), revokedReason: reason } });
-    return active.map((s) => s.familyId);
-  }
-
-  /** Access passes from these chains are refused until they would have expired anyway. */
-  private async markFamiliesRevoked(familyIds: string[]) {
-    await this.bestEffort("revoked sign-ins not saved; their access passes stay valid up to 15 minutes", () =>
-      Promise.all(familyIds.map((f) => this.deps.kv.set(authKeys.revokedFamily(f), "1", ACCESS_TTL_SECONDS + 60)))
-    );
-  }
-
-  /**
-   * For Redis writes that happen AFTER the database already did the real work
-   * (sign-out, revoked chains, password changed): if Redis is down, don't fail
-   * the request. The sign-ins are already ended in the database, so they can't
-   * be refreshed; only passes already issued keep working, at most 15 minutes. Logged.
-   */
-  private async bestEffort(consequence: string, work: () => Promise<unknown>) {
-    try {
-      await work();
-    } catch (err) {
-      if (!(err instanceof DependencyUnavailableError)) throw err;
-      this.deps.logger?.error({ err: err.cause }, `redis unavailable: ${consequence}`);
-    }
   }
 
   /**
@@ -651,21 +578,9 @@ export class AuthService {
    */
   private async afterPasswordChange(user: User, endedFamilies: string[], changedAt: Date) {
     const changedAtSeconds = Math.floor(changedAt.getTime() / 1000);
-    await this.bestEffort("password-change time not saved; older access passes stay valid up to 15 minutes", () => this.deps.kv.set(authKeys.invalidBefore(user.id), String(changedAtSeconds), ACCESS_TTL_SECONDS + 60));
-    await this.markFamiliesRevoked(endedFamilies);
-    this.sendEmail(passwordChangedMessage(user.email, user.name, this.deps.config.APP_URL));
-  }
-
-  /**
-   * Sends without making the request wait, so response times don't reveal
-   * whether an email went out (i.e. whether the account exists). Failures are logged.
-   */
-  private sendEmail(message: EmailMessage) {
-    const sending: Promise<void> = this.deps.email
-      .send(message)
-      .catch((err: unknown) => this.deps.logger?.error({ err, kind: message.kind }, "email could not be sent"))
-      .finally(() => this.pendingEmails.delete(sending));
-    this.pendingEmails.add(sending);
+    await bestEffort(this.deps.logger, "password-change time not saved; older access passes stay valid up to 15 minutes", () => this.deps.kv.set(authKeys.invalidBefore(user.id), String(changedAtSeconds), ACCESS_TTL_SECONDS + 60));
+    await this.revoker.markFamiliesRevoked(endedFamilies);
+    this.mailer.send(passwordChangedMessage(user.email, user.name, this.deps.config.APP_URL));
   }
 
   private async sendVerificationCode(user: User, { force }: { force: boolean }) {
@@ -676,13 +591,7 @@ export class AuthService {
     else if (!(await kv.setIfAbsent(cooldown, "1", VERIFY_RESEND_COOLDOWN_SECONDS))) return; // one email per minute
     if ((await kv.increment(authKeys.codesToday(account), 24 * 60 * 60)) > MAX_CODES_PER_DAY) return;
     const code = await this.codes.issue(user.id, "EMAIL_VERIFY", VERIFY_CODE_TTL_SECONDS);
-    this.sendEmail(verifyEmailMessage(user.email, code, VERIFY_CODE_TTL_SECONDS / 60));
-  }
-
-  private recordEvent(db: Db, userId: string, type: SecurityEventType, client: ClientInfo) {
-    return db.securityEvent.create({
-      data: { userId, type, ipAddress: client.ip.slice(0, 45), userAgent: client.userAgent?.slice(0, 512) ?? null }
-    });
+    this.mailer.send(verifyEmailMessage(user.email, code, VERIFY_CODE_TTL_SECONDS / 60));
   }
 
   private verificationSent(email: string) {

@@ -66,6 +66,26 @@ export const twoFactorDisableSchema = secondFactor;
 export const appCodeSchema = z.object({ code: appCode });
 
 export type SecondFactorInput = z.infer<typeof secondFactor>;
+
+// --- account security (3d) ---
+
+/** "Confirm it's you": the app code, the password, or the emailed code, depending on the account. */
+export const confirmSchema = z
+  .object({
+    code: z.string().trim().regex(/^\d{6}$/, { error: "Enter the 6-digit code" }).optional(),
+    password: z.string().min(1, { error: "Enter your password" }).max(128, { error: "That's not your password." }).optional()
+  })
+  .refine((v) => (v.code === undefined) !== (v.password === undefined), { error: "Enter your password or the 6-digit code", path: ["code"] });
+
+export const changeEmailSchema = z.object({ newEmail: email });
+export const emailCodeSchema = z.object({ code: z.string({ error: "Enter the 6-digit code" }).trim().regex(/^\d{6}$/, { error: "Enter the 6-digit code" }) });
+export const sessionIdSchema = z.object({ id: z.uuid({ error: "Unknown device" }) });
+export const activityQuerySchema = z.object({
+  before: z.uuid({ error: "Invalid cursor" }).optional(),
+  limit: z.coerce.number().int().min(1).max(50).default(20)
+});
+
+export type ConfirmInput = z.infer<typeof confirmSchema>;
 export type TwoFactorVerifyInput = z.infer<typeof twoFactorVerifySchema>;
 
 export type RegisterInput = z.infer<typeof registerSchema>;

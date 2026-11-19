@@ -86,6 +86,46 @@ export const backupCodeUsedMessage = (to: string, name: string, left: number, ap
   ].join("\n")
 });
 
+export const confirmCodeMessage = (to: string, code: string, minutes: number): EmailMessage => ({
+  to,
+  kind: "confirm-code",
+  subject: "Your Vendora confirmation code",
+  text: [
+    "Hi,",
+    "",
+    `Your code to confirm it's you is ${code}. It expires in ${minutes} minutes.`,
+    "We ask for this before sensitive changes to your account.",
+    "",
+    "If you didn't ask for it, someone may be using your account. Sign out of all other devices in Security settings."
+  ].join("\n")
+});
+
+export const emailChangeCodeMessage = (to: string, code: string, minutes: number): EmailMessage => ({
+  to,
+  kind: "email-change-code",
+  subject: "Confirm your new Vendora email address",
+  text: [
+    "Hi,",
+    "",
+    `Your code to use this address for your Vendora account is ${code}. It expires in ${minutes} minutes.`,
+    "",
+    "If you didn't ask for this, you can ignore this email."
+  ].join("\n")
+});
+
+export const emailChangedNoticeMessage = (to: string, name: string, newEmailMasked: string): EmailMessage => ({
+  to,
+  kind: "email-changed",
+  subject: "Your Vendora email address was changed",
+  text: [
+    `Hi ${name},`,
+    "",
+    `The email address for your Vendora account was just changed to ${newEmailMasked}. We'll send account emails there from now on.`,
+    "",
+    "If this wasn't you, contact Vendora support right away by replying to this email."
+  ].join("\n")
+});
+
 export const accountExistsMessage = (to: string, name: string, appUrl: string): EmailMessage => ({
   to,
   kind: "account-exists",

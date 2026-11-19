@@ -23,5 +23,11 @@ export const authKeys = {
   challengeAttempts: (tokenHash: string) => `auth:challenge-attempts:${tokenHash}`,
   /** An authenticator code that was already used (codes can't be replayed within their window). */
   totpUsed: (userId: string, counter: number) => `auth:totp-used:${userId}:${counter}`,
+  /** "Confirm it's you" done on this sign-in chain (device), for 10 minutes. */
+  confirmed: (familyId: string) => `auth:confirmed:${familyId}`,
+  confirmCooldown: (userId: string) => `auth:cooldown:confirm:${userId}`,
+  emailChangeCooldown: (userId: string) => `auth:cooldown:email-change:${userId}`,
+  /** Emails with codes sent to a signed-in user today ("Confirm it's you", change email). */
+  accountCodesToday: (userId: string) => `auth:account-codes-today:${userId}`,
   accountExistsNotice: (account: string) => `auth:cooldown:exists:${account}`
 };

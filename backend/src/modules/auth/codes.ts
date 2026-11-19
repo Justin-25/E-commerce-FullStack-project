@@ -57,23 +57,29 @@ export class OneTimeCodes {
     return hmacHex(this.hashKey, `${type}:${userId}:${code}`);
   }
 
-  /** Creates a new code. Any older code of the same type stops working. */
-  async issue(userId: string, type: AuthTokenType, ttlSeconds: number): Promise<string> {
+  /** Creates a new code. Any older code of the same type stops working. `newEmail`: for "change email". */
+  async issue(userId: string, type: AuthTokenType, ttlSeconds: number, extra: { newEmail?: string } = {}): Promise<string> {
     const code = sixDigitCode();
     await this.prisma.$transaction([
       this.prisma.authToken.deleteMany({ where: { userId, type } }),
       this.prisma.authToken.create({
-        data: { userId, type, tokenHash: this.hash(userId, type, code), expiresAt: new Date(this.now().getTime() + ttlSeconds * 1000) }
+        data: {
+          userId,
+          type,
+          tokenHash: this.hash(userId, type, code),
+          newEmail: extra.newEmail ?? null,
+          expiresAt: new Date(this.now().getTime() + ttlSeconds * 1000)
+        }
       })
     ]);
     return code;
   }
 
   /**
-   * Counts one attempt, then checks the code. Returns the code's row id if it's
+   * Counts one attempt, then checks the code. Returns the code's row if it's
    * right (the caller marks it used inside its own transaction), otherwise null.
    */
-  async check(userId: string, type: AuthTokenType, code: string): Promise<string | null> {
+  async check(userId: string, type: AuthTokenType, code: string): Promise<AuthToken | null> {
     const token = await this.prisma.authToken.findFirst({
       where: { userId, type, usedAt: null, expiresAt: { gt: this.now() } },
       orderBy: { createdAt: "desc" }
@@ -85,6 +91,6 @@ export class OneTimeCodes {
       data: { attempts: { increment: 1 } }
     });
     if (counted.count === 0) return null;
-    return safeEqualHex(token.tokenHash, this.hash(userId, type, code)) ? token.id : null;
+    return safeEqualHex(token.tokenHash, this.hash(userId, type, code)) ? token : null;
   }
 }

@@ -39,7 +39,12 @@ const schema = z
     /** Stricter per-IP limit for sign-in, sign-up and code endpoints (per 15 minutes). */
     AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(30),
     /** "outbox" prints emails in the API terminal (development only). A real provider comes in milestone 9. */
-    EMAIL_PROVIDER: z.enum(["outbox"]).default("outbox")
+    EMAIL_PROVIDER: z.enum(["outbox"]).default("outbox"),
+    /**
+     * Which hosting provider's location headers to trust for "Manila, PH" in the device and activity lists.
+     * Only set this when the API really runs behind that provider; otherwise visitors could fake the headers.
+     */
+    GEO_HEADERS: z.enum(["none", "vercel", "cloudflare"]).default("none")
   })
   .superRefine((env, ctx) => {
     if (new Set(SECRET_KEYS.map((k) => env[k])).size !== SECRET_KEYS.length) {

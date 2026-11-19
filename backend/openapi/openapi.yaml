@@ -8,6 +8,7 @@ info:
     Sign-in (milestone 3a): create account, verify email, sign in/out, stay signed in.
     Passwords (milestone 3b): forgot, reset from an emailed link, change while signed in.
     Two-step verification (milestone 3c): authenticator app, backup codes, trusted devices.
+    Account security (milestone 3d): "Confirm it's you", signed-in devices, security activity, change email.
 
     **How signing in works**
     - Signing in sets two httpOnly cookies that page JavaScript cannot read:
@@ -29,6 +30,8 @@ tags:
   - name: platform
   - name: auth
     description: Sign-in and session endpoints (milestone 3a)
+  - name: security
+    description: Security settings (milestone 3d)
 
 paths:
   /health:
@@ -523,6 +526,260 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
+  /api/v1/auth/security:
+    get:
+      summary: Everything the Security settings page shows at the top
+      operationId: getSecurityOverview
+      tags: [security]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200":
+          description: Email, password, two-step verification, and which proof "Confirm it's you" will ask for.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SecurityOverview" }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/auth/confirm:
+    get:
+      summary: Which proof "Confirm it's you" needs, and whether it was done recently
+      operationId: getConfirmStatus
+      tags: [security]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200":
+          description: The method to show in the modal, and seconds left if already confirmed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfirmStatus" }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    post:
+      summary: Confirm it's you (before sensitive changes)
+      description: |
+        Send `code` (authenticator app, or the emailed code for accounts without a password) or `password`,
+        whichever GET /auth/confirm says. Wrong ones count toward the sign-in lockout. Success lasts
+        10 minutes, on this device only. Sensitive actions answer 403 REAUTH_REQUIRED until then.
+      operationId: confirmItsYou
+      tags: [security]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConfirmRequest" }
+      responses:
+        "200":
+          description: Confirmed for 10 minutes on this device.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [confirmed, expiresInSeconds]
+                properties:
+                  confirmed: { type: boolean, const: true }
+                  expiresInSeconds: { type: integer, example: 600 }
+        "400":
+          description: INVALID_CODE or VALIDATION_ERROR (a wrong password is a field error on `password` with `details.attemptsLeft`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "429":
+          description: ACCOUNT_LOCKED or RATE_LIMITED.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/v1/auth/confirm/send-code:
+    post:
+      summary: Email the 6-digit "Confirm it's you" code (accounts without a password)
+      description: At most one email a minute and ten account emails a day; within the minute the earlier code still works.
+      operationId: sendConfirmCode
+      tags: [security]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "202":
+          description: The code was sent (or one sent less than a minute ago still works).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CodeSent" }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "409":
+          description: CONFLICT. This account confirms with its password or authenticator app instead.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/v1/auth/sessions:
+    get:
+      summary: Where you're signed in
+      description: One entry per device, this device first. "Last active" is accurate to about 15 minutes (the access pass lifetime).
+      operationId: listSessions
+      tags: [security]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200":
+          description: Active sign-ins.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessions]
+                properties:
+                  sessions: { type: array, items: { $ref: "#/components/schemas/DeviceSession" } }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/auth/sessions/sign-out-others:
+    post:
+      summary: Sign out of all other devices
+      description: |
+        Every other sign-in ends immediately (including passes already issued) and no other browser stays
+        trusted for two-step verification. This device stays signed in. No "Confirm it's you" needed: it's a
+        protective action.
+      operationId: signOutOtherDevices
+      tags: [security]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "200":
+          description: How many devices were signed out.
+          content:
+            application/json:
+              schema: { type: object, required: [signedOut], properties: { signedOut: { type: integer, example: 2 } } }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+
+  /api/v1/auth/sessions/{id}/sign-out:
+    post:
+      summary: Sign out one device
+      description: Takes effect immediately. On this device's own row it's a normal sign-out (cookies cleared, new CSRF token).
+      operationId: signOutDevice
+      tags: [security]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid }, description: The device id from GET /auth/sessions. }
+      responses:
+        "200":
+          description: Signed out.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [signedOut, current]
+                properties:
+                  signedOut: { type: boolean, const: true }
+                  current: { type: boolean, description: True if it was this device. }
+                  csrfToken: { type: string, description: Only when current is true. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404":
+          description: NOT_FOUND. That device isn't signed in (or isn't yours).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/auth/activity:
+    get:
+      summary: Recent security activity
+      description: |
+        Newest first. Single failed sign-ins are left out; a sign-in pause appears as LOCKED
+        ("5 failed sign-in attempts — sign-in paused 15 min"). For older entries pass `before` = the last id.
+      operationId: listSecurityActivity
+      tags: [security]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: before, in: query, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+      responses:
+        "200":
+          description: A page of events.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events, nextCursor]
+                properties:
+                  events: { type: array, items: { $ref: "#/components/schemas/SecurityEvent" } }
+                  nextCursor: { type: [string, "null"], format: uuid }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/auth/email/change:
+    post:
+      summary: Change email address, step 1 (needs "Confirm it's you")
+      description: Emails a 6-digit code to the NEW address to prove it's yours. At most one code a minute per address.
+      operationId: startEmailChange
+      tags: [security]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChangeEmailRequest" }
+      responses:
+        "202":
+          description: Code sent to the new address.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VerificationSent" }
+        "400":
+          description: VALIDATION_ERROR on `newEmail` (invalid, your current address, or used by another account).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403":
+          description: REAUTH_REQUIRED (open "Confirm it's you", then retry) or CSRF_INVALID.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/v1/auth/email/change/confirm:
+    post:
+      summary: Change email address, step 2 (the code from the new inbox)
+      description: |
+        The address changes and counts as verified. Reset links and codes sent to the old address stop
+        working, and the old address gets a "your email was changed" notice.
+      operationId: confirmEmailChange
+      tags: [security]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppCodeRequest" }
+      responses:
+        "200":
+          description: Changed.
+          content:
+            application/json:
+              schema: { type: object, required: [user], properties: { user: { $ref: "#/components/schemas/User" } } }
+        "400":
+          description: INVALID_CODE or VALIDATION_ERROR.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "409":
+          description: CONFLICT. Another account started using that address meanwhile.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
   /api/v1/auth/me:
     get:
       summary: Who is signed in?
@@ -630,6 +887,7 @@ components:
                 - INVALID_CODE
                 - INVALID_LINK
                 - CHALLENGE_EXPIRED
+                - REAUTH_REQUIRED
             message: { type: string }
             requestId: { type: string }
             details:
@@ -725,6 +983,72 @@ components:
       required: [backupCodes]
       properties:
         backupCodes: { type: array, minItems: 10, maxItems: 10, items: { type: string, example: kq7mz-4hx2p } }
+
+    SecurityOverview:
+      type: object
+      required: [email, emailVerified, hasPassword, passwordChangedAt, accountCreatedAt, twoFactor, confirmMethod]
+      properties:
+        email: { type: string, format: email }
+        emailVerified: { type: boolean }
+        hasPassword: { type: boolean, description: False for Google-only accounts. }
+        passwordChangedAt: { type: [string, "null"], format: date-time, description: "null = never changed (show accountCreatedAt)." }
+        accountCreatedAt: { type: string, format: date-time }
+        twoFactor: { $ref: "#/components/schemas/TwoFactorStatus" }
+        confirmMethod: { type: string, enum: [app, password, email] }
+
+    ConfirmStatus:
+      type: object
+      required: [method, confirmed, expiresInSeconds]
+      properties:
+        method: { type: string, enum: [app, password, email], description: "app: authenticator code; password; email: send-code first." }
+        confirmed: { type: boolean }
+        expiresInSeconds: { type: integer, description: Seconds left of the last confirmation (0 if none). }
+
+    ConfirmRequest:
+      type: object
+      description: Send code OR password.
+      properties:
+        code: { type: string, pattern: "^[0-9]{6}$" }
+        password: { type: string, maxLength: 128 }
+
+    CodeSent:
+      type: object
+      required: [status, email, expiresInSeconds]
+      properties:
+        status: { type: string, const: code_sent }
+        email: { type: string, description: "Masked, e.g. maria.s•••@gmail.com" }
+        expiresInSeconds: { type: integer, example: 600 }
+
+    DeviceSession:
+      type: object
+      required: [id, device, deviceType, location, signedInAt, lastActiveAt, current]
+      properties:
+        id: { type: string, format: uuid }
+        device: { type: string, example: Chrome on Windows }
+        deviceType: { type: string, enum: [desktop, mobile, tablet, unknown] }
+        location: { type: [string, "null"], example: "Manila, PH", description: From the hosting provider's location headers; null locally. }
+        signedInAt: { type: string, format: date-time }
+        lastActiveAt: { type: string, format: date-time }
+        current: { type: boolean, description: '"This device"' }
+
+    SecurityEvent:
+      type: object
+      required: [id, type, device, deviceType, location, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        type:
+          type: string
+          enum: [LOGIN_OK, LOCKED, LOGOUT_ALL, PASSWORD_CHANGED, PASSWORD_RESET, EMAIL_CHANGED, TWO_FA_ENABLED, TWO_FA_DISABLED, BACKUP_CODE_USED, BACKUP_CODES_RENEWED, SESSION_REVOKED, TOKEN_REUSE_DETECTED]
+        device: { type: string, example: Safari on iPhone }
+        deviceType: { type: string, enum: [desktop, mobile, tablet, unknown] }
+        location: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+
+    ChangeEmailRequest:
+      type: object
+      required: [newEmail]
+      properties:
+        newEmail: { type: string, format: email, maxLength: 254 }
 
     RegisterRequest:
       type: object

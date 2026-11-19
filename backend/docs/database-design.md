@@ -74,7 +74,7 @@ erDiagram
   auth_tokens {
     uuid id PK
     uuid userId FK
-    enum type "EMAIL_VERIFY | PASSWORD_RESET | EMAIL_CHANGE"
+    enum type "EMAIL_VERIFY | PASSWORD_RESET | EMAIL_CHANGE | REAUTH"
     string tokenHash UK "SHA-256"
     int attempts "max 5 wrong codes"
     datetime expiresAt "10 min code / 30 min link"
@@ -116,7 +116,7 @@ erDiagram
   }
 ```
 
-- **Signed-in devices** = `sessions`. "Sign out of all other devices" revokes every other session. A password change revokes all sessions and sets `passwordChangedAt`.
+- **Signed-in devices** = `sessions` (one chain per device; `location` from the hosting provider's headers). "Sign out of all other devices" revokes every other session and their 2FA trust. A password change revokes all sessions and sets `passwordChangedAt`.
 - **Two-step verification:** the authenticator secret is encrypted; backup codes are keyed hashes; "Trust this device for 30 days" = `trusted_devices` (cookie token hashed), all revoked by a password change/reset or turning 2FA off. Added in migration `20261119090000_two_factor_trusted_devices`.
 - **Lockout counters, rate limits and revoked access tokens** are in Redis with automatic expiry. `security_events` keeps the history shown on the "Recent security activity" screen.
 
@@ -408,4 +408,5 @@ erDiagram
 | Revoked access-token IDs (after sign-out / password change) | when the token would expire (15 min) |
 | Half-finished sign-ins ("enter your 2FA code" / "set up 2FA") | 5 min / 15 min |
 | Authenticator codes already used (replay protection) | 2 min |
+| "Confirm it's you" done on a sign-in chain (device) | 10 min |
 | Product/category cache (milestone 4) | minutes |

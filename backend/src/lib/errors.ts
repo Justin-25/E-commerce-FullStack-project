@@ -19,7 +19,8 @@ export const ERROR_CODES = [
   "EMAIL_NOT_VERIFIED",
   "INVALID_CODE",
   "INVALID_LINK",
-  "CHALLENGE_EXPIRED"
+  "CHALLENGE_EXPIRED",
+  "REAUTH_REQUIRED"
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

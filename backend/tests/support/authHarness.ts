@@ -10,6 +10,7 @@ import { createCsrf } from "../../src/middleware/csrf.js";
 import { authRouter } from "../../src/modules/auth/auth.routes.js";
 import { authKeys } from "../../src/modules/auth/keys.js";
 import { AuthService } from "../../src/modules/auth/auth.service.js";
+import { SecurityService } from "../../src/modules/auth/security.service.js";
 import { TokenService } from "../../src/modules/auth/tokens.js";
 import { silentLogger, testConfig } from "../helpers.js";
 import { Browser } from "./browser.js";
@@ -32,7 +33,16 @@ export const AUTH = {
   twoFactorSetup: "/api/v1/auth/2fa/setup",
   twoFactorEnable: "/api/v1/auth/2fa/enable",
   twoFactorDisable: "/api/v1/auth/2fa/disable",
-  backupCodes: "/api/v1/auth/2fa/backup-codes"
+  backupCodes: "/api/v1/auth/2fa/backup-codes",
+  security: "/api/v1/auth/security",
+  confirm: "/api/v1/auth/confirm",
+  confirmSendCode: "/api/v1/auth/confirm/send-code",
+  sessions: "/api/v1/auth/sessions",
+  signOutOthers: "/api/v1/auth/sessions/sign-out-others",
+  signOutDevice: (id: string) => `/api/v1/auth/sessions/${id}/sign-out`,
+  activity: "/api/v1/auth/activity",
+  emailChange: "/api/v1/auth/email/change",
+  emailChangeConfirm: "/api/v1/auth/email/change/confirm"
 } as const;
 
 /** What the phone's authenticator app would show right now for this key (±1 window to pick another code). */
@@ -74,7 +84,8 @@ export async function createAuthHarness(env: Record<string, string> = {}) {
       .get("/test/whoami", guards.authenticate, (req, res) => {
         res.json({ userId: req.auth?.userId ?? null });
       });
-    const auth = authRouter({ service, tokens, csrf, guards, config, logger, rateLimitStore: new FlakyStore(redis) });
+    const security = new SecurityService({ prisma: db.prisma, kv, email: outbox, config, logger });
+    const auth = authRouter({ service, security, tokens, csrf, guards, config, logger, rateLimitStore: new FlakyStore(redis) });
     return createApp({ config, logger: silentLogger, csrf, routers: [auth, testRoutes] });
   };
 

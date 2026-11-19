@@ -39,4 +39,12 @@ export class TrustedDevices {
   revokeAll(tx: Prisma.TransactionClient, userId: string) {
     return tx.trustedDevice.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: this.now() } });
   }
+
+  /** "Sign out of all other devices": every other browser stops being trusted; this one (its cookie token) stays. */
+  revokeAllExcept(tx: Prisma.TransactionClient, userId: string, keepToken: string | undefined) {
+    return tx.trustedDevice.updateMany({
+      where: { userId, revokedAt: null, ...(keepToken ? { tokenHash: { not: sha256Hex(keepToken) } } : {}) },
+      data: { revokedAt: this.now() }
+    });
+  }
 }

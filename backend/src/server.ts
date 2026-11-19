@@ -12,6 +12,7 @@ import { createCsrf } from "./middleware/csrf.js";
 import { redisRateLimitStore } from "./middleware/rateLimit.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { AuthService } from "./modules/auth/auth.service.js";
+import { SecurityService } from "./modules/auth/security.service.js";
 import { TokenService } from "./modules/auth/tokens.js";
 
 loadEnvFile();
@@ -29,18 +30,15 @@ const tokens = new TokenService(config);
 const guards = createAuthGuards({ tokens, kv, logger });
 
 const routers: Router[] = [];
-let authService: AuthService | null = null;
+const services: { drain(): Promise<void> }[] = [];
 if (prisma) {
-  authService = new AuthService({
-    prisma,
-    kv,
-    email: new DevOutbox(logger), // config refuses this in production; a real provider comes in milestone 9
-    tokens,
-    config,
-    isBreached: createHibpCheck({ logger }),
-    logger
-  });
-  routers.push(authRouter({ service: authService, tokens, csrf, guards, config, logger, ...(redis ? { rateLimitStore: redisRateLimitStore(redis, "rl:auth:") } : {}) }));
+  const email = new DevOutbox(logger); // config refuses this in production; a real provider comes in milestone 9
+  const authService = new AuthService({ prisma, kv, email, tokens, config, isBreached: createHibpCheck({ logger }), logger });
+  const security = new SecurityService({ prisma, kv, email, config, logger });
+  services.push(authService, security);
+  routers.push(
+    authRouter({ service: authService, security, tokens, csrf, guards, config, logger, ...(redis ? { rateLimitStore: redisRateLimitStore(redis, "rl:auth:") } : {}) })
+  );
 }
 
 const app = createApp({
@@ -67,7 +65,7 @@ function shutdown(signal: string): void {
   stopping = true;
   logger.info({ signal }, "shutting down");
   server.close(() => {
-    void (authService?.drain() ?? Promise.resolve())
+    void Promise.allSettled(services.map((s) => s.drain()))
       .then(() => Promise.allSettled([redis?.quit(), prisma?.$disconnect()]))
       .then(() => process.exit(0));
   });

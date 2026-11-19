@@ -2,46 +2,55 @@ import { Router, type Request, type Response } from "express";
 import { ipKeyGenerator, type Store } from "express-rate-limit";
 import type { Config } from "../../config/env.js";
 import { AppError } from "../../lib/errors.js";
+import { locationFrom } from "../../lib/location.js";
 import type { Logger } from "../../lib/logger.js";
 import type { AuthGuards } from "../../middleware/auth.js";
 import type { Csrf } from "../../middleware/csrf.js";
 import { rateLimiter } from "../../middleware/rateLimit.js";
 import {
+  activityQuerySchema,
   appCodeSchema,
+  changeEmailSchema,
   changePasswordSchema,
+  confirmSchema,
+  emailCodeSchema,
   forgotPasswordSchema,
   loginSchema,
   registerSchema,
   resendSchema,
   resetPasswordSchema,
+  sessionIdSchema,
   twoFactorDisableSchema,
   twoFactorVerifySchema,
   verifyEmailSchema
 } from "./auth.schemas.js";
 import type { AuthService, ClientInfo, SignInOutcome, SignInResult } from "./auth.service.js";
+import type { SecurityService } from "./security.service.js";
 import type { TokenService } from "./tokens.js";
 
 export interface AuthRouterDeps {
   service: AuthService;
+  /** Security settings: "Confirm it's you", devices, activity, change email (3d). */
+  security: SecurityService;
   tokens: TokenService;
   csrf: Csrf;
   guards: AuthGuards;
-  config: Pick<Config, "AUTH_RATE_LIMIT_MAX">;
+  config: Pick<Config, "AUTH_RATE_LIMIT_MAX" | "GEO_HEADERS">;
   /** Redis store for the stricter auth limit (in-memory when omitted). */
   rateLimitStore?: Store;
   logger?: Logger;
 }
 
-const clientInfo = (req: Request): ClientInfo => {
-  const ip = req.ip ?? "unknown";
-  return { ip, ipKey: ipKeyGenerator(ip, 56), userAgent: req.get("user-agent") };
-};
-
 const notSignedIn = () => new AppError(401, "UNAUTHORIZED", "Please sign in to continue.");
 
 /** Thin HTTP layer: validate input (allow-lists), call the service, set cookies. */
-export function authRouter({ service, tokens, csrf, guards, config, rateLimitStore, logger }: AuthRouterDeps): Router {
+export function authRouter({ service, security, tokens, csrf, guards, config, rateLimitStore, logger }: AuthRouterDeps): Router {
   const router = Router();
+
+  const clientInfo = (req: Request): ClientInfo => {
+    const ip = req.ip ?? "unknown";
+    return { ip, ipKey: ipKeyGenerator(ip, 56), userAgent: req.get("user-agent"), location: locationFrom(req, config.GEO_HEADERS) };
+  };
   // Stricter per-IP limit on endpoints that guess passwords or codes, or send emails. If Redis is down
   // it answers 503 before anything else runs: brute-force protection is never silently switched off.
   const authLimit = rateLimiter({
@@ -178,6 +187,61 @@ export function authRouter({ service, tokens, csrf, guards, config, rateLimitSto
     if (!req.auth) throw notSignedIn();
     const { code } = appCodeSchema.parse(req.body);
     res.json({ backupCodes: await service.renewBackupCodes(req.auth, code, clientInfo(req)) });
+  });
+
+  // --- account security (3d) ---
+
+  const claimsOf = (req: Request) => {
+    if (!req.auth) throw notSignedIn();
+    return req.auth;
+  };
+
+  router.get("/auth/security", ...guards.requireAuth, async (req, res) => {
+    res.json(await security.overview(claimsOf(req).userId));
+  });
+
+  router.get("/auth/confirm", ...guards.requireAuth, async (req, res) => {
+    res.json(await security.confirmStatus(claimsOf(req)));
+  });
+
+  router.post("/auth/confirm/send-code", authLimit, ...guards.requireAuth, async (req, res) => {
+    res.status(202).json(await security.sendConfirmCode(claimsOf(req)));
+  });
+
+  router.post("/auth/confirm", authLimit, ...guards.requireAuth, async (req, res) => {
+    res.json(await security.confirm(claimsOf(req), confirmSchema.parse(req.body), clientInfo(req)));
+  });
+
+  router.get("/auth/sessions", ...guards.requireAuth, async (req, res) => {
+    res.json({ sessions: await security.listSessions(claimsOf(req)) });
+  });
+
+  router.post("/auth/sessions/sign-out-others", ...guards.requireAuth, async (req, res) => {
+    res.json(await security.signOutOthers(claimsOf(req), cookie(req, tokens.cookieNames.trustedDevice), clientInfo(req)));
+  });
+
+  router.post("/auth/sessions/:id/sign-out", ...guards.requireAuth, async (req, res) => {
+    const { id } = sessionIdSchema.parse(req.params);
+    const { current } = await security.signOutSession(claimsOf(req), id, clientInfo(req));
+    if (!current) {
+      res.json({ signedOut: true, current: false });
+      return;
+    }
+    // "Sign out" on this device's own row is a normal sign-out.
+    tokens.clearSessionCookies(res);
+    res.json({ signedOut: true, current: true, csrfToken: csrf.issue(req, res, { rotate: true }) });
+  });
+
+  router.get("/auth/activity", ...guards.requireAuth, async (req, res) => {
+    res.json(await security.activity(claimsOf(req).userId, activityQuerySchema.parse(req.query)));
+  });
+
+  router.post("/auth/email/change", authLimit, ...guards.requireAuth, async (req, res) => {
+    res.status(202).json(await security.startEmailChange(claimsOf(req), changeEmailSchema.parse(req.body).newEmail));
+  });
+
+  router.post("/auth/email/change/confirm", authLimit, ...guards.requireAuth, async (req, res) => {
+    res.json({ user: await security.confirmEmailChange(claimsOf(req), emailCodeSchema.parse(req.body).code, clientInfo(req)) });
   });
 
   return router;

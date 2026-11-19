@@ -38,7 +38,7 @@ npm run db:status    # which migrations are applied
 
 Design and reasoning: [`docs/database-design.md`](docs/database-design.md).
 
-## Sign-in, passwords and two-step verification (milestone 3a–3c)
+## Sign-in and account security (milestone 3a–3d)
 
 | Endpoint | What it does |
 |---|---|
@@ -59,12 +59,20 @@ Design and reasoning: [`docs/database-design.md`](docs/database-design.md).
 | `POST /api/v1/auth/2fa/enable` | First app code → it's on; returns 10 backup codes (shown once) |
 | `POST /api/v1/auth/2fa/disable` | Shoppers only; needs an app or backup code |
 | `POST /api/v1/auth/2fa/backup-codes` | A new set of 10 backup codes (needs an app code) |
+| `GET /api/v1/auth/security` | The Security page summary: email, password last changed, 2FA, which "Confirm it's you" proof |
+| `GET` / `POST /api/v1/auth/confirm` | "Confirm it's you": app code, password or emailed code (`/confirm/send-code`); lasts 10 min on this device |
+| `GET /api/v1/auth/sessions` | Where you're signed in ("Chrome on Windows · Manila, PH · this device") |
+| `POST /api/v1/auth/sessions/{id}/sign-out` · `/sessions/sign-out-others` | Sign out one device, or all others, immediately |
+| `GET /api/v1/auth/activity` | Recent security activity, newest first, page by page |
+| `POST /api/v1/auth/email/change` · `/email/change/confirm` | Change email: after "Confirm it's you", a code to the new address; the old one is told |
 
 How it works:
 - **Two passes in httpOnly cookies.** A 15-minute access pass (JWT, `vd_at`) and a refresh pass (random, `vd_rt`, sent only to `/api/v1/auth`). Page JavaScript can't read either, so an XSS bug can't steal them.
 - **Refresh-token rotation.** Each refresh pass works once. If an old one is used again, someone copied it, so every device in that sign-in chain is signed out.
 - **Instant sign-out.** Checking an access pass costs no database query: the signature, plus one Redis lookup for "signed out", "chain revoked" or "password changed".
 - **Two-step verification.** After a correct password (or a reset link), people with 2FA get `two_factor_required` and a 5-minute httpOnly step cookie; no session exists until the authenticator code (or a backup code) is right. Codes can't be replayed, wrong ones count toward the lockout, and "Trust this device for 30 days" skips the code on that browser only. Sellers and admins must have it: without it they get `two_factor_setup_required` and set it up before getting in. If someone loses their phone and backup codes, support resets it after checking who they are (admin screen in milestone 7).
+- **"Confirm it's you" before sensitive changes.** The strongest proof the account has: the authenticator code if 2FA is on, else the password, else a code by email (accounts without a password). It lasts 10 minutes and only on the sign-in where it was done, so a stolen session can't borrow it. Sensitive endpoints answer `REAUTH_REQUIRED` until then.
+- **Devices and activity.** Each sign-in chain is one device, named from its User-Agent with a small built-in reader. The location comes from the hosting provider's headers (`GEO_HEADERS`), none locally. "Sign out of all other devices" also ends their 2FA trust.
 - **Password changes end other sign-ins.** A reset or change revokes every other sign-in chain and sets an "invalid before" time, so passes issued earlier stop working at once. The owner gets a "your password was changed" email.
 - **Emails.** Sent in the background, so response times don't reveal whether an account exists. In development they're printed in the API terminal (look for `DEV OUTBOX`) so you can copy the code or link. A real email provider is added before deploying (milestone 9); production refuses to start with the outbox.
 
@@ -125,6 +133,7 @@ openapi/openapi.yaml     the API contract
 | Deny JWTs issued before a password change | Reset and change set a per-user "invalid before" time in Redis and revoke every other sign-in chain, so older passes stop working at once. |
 | Password reset tokens | 256 random bits, stored only as a keyed hash, 30-minute expiry, single use, a newer link cancels older ones; at most 1 email a minute and 5 a day. The token sits after `#` in the link, so it never reaches server logs or other sites. |
 | Notify on security changes | Emails after a password reset or change, turning 2FA on or off, and every backup-code sign-in, each with a way out if it wasn't them. |
+| Re-authenticate before high-value actions | "Confirm it's you" (app code → password → email code), 10 minutes, per device; changing the email needs it, plus a code from the new inbox. |
 | Two-factor authentication | Authenticator app (TOTP, `otpauth`) + 10 single-use backup codes; required for sellers and admins; also asked after a password reset; replay-proof; wrong codes count toward the lockout. |
 | Encrypt sensitive data | The 2FA secret is encrypted with AES-256-GCM (`DATA_ENCRYPTION_KEY`), bound to its user, so a copy pasted into another account fails to decrypt. Backup codes are keyed hashes. |
 | Confirm email after sign-up | 6-digit code, 10 minutes, required before the first sign-in. |
@@ -138,4 +147,4 @@ openapi/openapi.yaml     the API contract
 | No secrets in git | `.env` is git-ignored; `npm run secrets` writes keys without printing them; config errors name a variable but never its value. |
 | HTTPS | Production requires https origins and `APP_URL`, sets HSTS, and uses `__Host-`/`__Secure-` Secure cookies. |
 
-Coming next: "Confirm it's you", signed-in devices and security activity (3d); Google sign-in (3e).
+Coming next: Google sign-in (3e). "Delete account" comes once orders exist (it must keep order records).

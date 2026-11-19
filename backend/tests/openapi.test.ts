@@ -14,6 +14,7 @@ import { createAuthGuards } from "../src/middleware/auth.js";
 import { createCsrf } from "../src/middleware/csrf.js";
 import { authRouter } from "../src/modules/auth/auth.routes.js";
 import type { AuthService } from "../src/modules/auth/auth.service.js";
+import type { SecurityService } from "../src/modules/auth/security.service.js";
 import { TokenService } from "../src/modules/auth/tokens.js";
 import { testConfig } from "./helpers.js";
 
@@ -24,7 +25,10 @@ const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete"]);
 /** "METHOD /path" for every route registered on an Express router, mounted at `prefix`. */
 function routesOf(router: Router, prefix: string): string[] {
   const stack = (router as unknown as { stack: Array<{ route?: { path: string; methods: Record<string, boolean> } }> }).stack;
-  return stack.flatMap((layer) => (layer.route ? Object.keys(layer.route.methods).map((m) => `${m.toUpperCase()} ${prefix}${layer.route?.path}`) : []));
+  return stack.flatMap((layer) =>
+    // Express writes path parameters as ":id", OpenAPI as "{id}".
+    layer.route ? Object.keys(layer.route.methods).map((m) => `${m.toUpperCase()} ${prefix}${layer.route?.path.replace(/:(\w+)/g, "{$1}")}`) : []
+  );
 }
 
 function documented(prefix: string): string[] {
@@ -39,6 +43,7 @@ describe("openapi.yaml", () => {
     const tokens = new TokenService(config);
     const router = authRouter({
       service: {} as AuthService, // never called: we only list the routes
+      security: {} as SecurityService,
       tokens,
       csrf: createCsrf(config),
       guards: createAuthGuards({ tokens, kv: new MemoryKv() }),
