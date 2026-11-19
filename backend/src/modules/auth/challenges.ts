@@ -7,12 +7,18 @@ import { authKeys } from "./keys.js";
  * - "two_factor": enter the authenticator (or backup) code
  * - "two_factor_setup": sellers and admins without 2FA must set it up first
  */
-export type ChallengeType = "two_factor" | "two_factor_setup";
+export type ChallengeType = "two_factor" | "two_factor_setup" | "google_link";
 
 export interface Challenge {
   userId: string;
   type: ChallengeType;
   keepSignedIn: boolean;
+  /**
+   * A Google account waiting to be connected once this person proves they own
+   * the Vendora account (password, then 2FA if on). "google_link" step: design
+   * "Sign in with your password to connect Google".
+   */
+  linkGoogle?: { sub: string; email: string };
 }
 
 export interface IssuedChallenge {
@@ -23,7 +29,7 @@ export interface IssuedChallenge {
 }
 
 /** Design: "Enter the 6-digit code" has 5 minutes; setting up an app (scan, type the code) gets 15. */
-export const CHALLENGE_TTL_SECONDS: Record<ChallengeType, number> = { two_factor: 5 * 60, two_factor_setup: 15 * 60 };
+export const CHALLENGE_TTL_SECONDS: Record<ChallengeType, number> = { two_factor: 5 * 60, two_factor_setup: 15 * 60, google_link: 10 * 60 };
 export const CHALLENGE_MAX_ATTEMPTS = 5;
 
 /**

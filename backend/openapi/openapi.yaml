@@ -9,6 +9,7 @@ info:
     Passwords (milestone 3b): forgot, reset from an emailed link, change while signed in.
     Two-step verification (milestone 3c): authenticator app, backup codes, trusted devices.
     Account security (milestone 3d): "Confirm it's you", signed-in devices, security activity, change email.
+    Google sign-in (milestone 3e): "Continue with Google" (authorization code + PKCE), connect and disconnect.
 
     **How signing in works**
     - Signing in sets two httpOnly cookies that page JavaScript cannot read:
@@ -32,6 +33,8 @@ tags:
     description: Sign-in and session endpoints (milestone 3a)
   - name: security
     description: Security settings (milestone 3d)
+  - name: google
+    description: Google sign-in (milestone 3e)
 
 paths:
   /health:
@@ -780,6 +783,127 @@ paths:
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
+  /api/v1/auth/google:
+    get:
+      summary: Is "Continue with Google" available?
+      description: False when the server has no Google client configured; the page then hides the button.
+      operationId: getGoogleSignIn
+      tags: [google]
+      responses:
+        "200":
+          description: Whether the button should be shown.
+          content:
+            application/json:
+              schema: { type: object, required: [enabled], properties: { enabled: { type: boolean } } }
+
+  /api/v1/auth/google/start:
+    get:
+      summary: '"Continue with Google": a page load (not fetch) that redirects to Google'
+      description: |
+        Sets the encrypted, httpOnly `vd_oauth` cookie (state, nonce, PKCE verifier; 10 minutes;
+        SameSite=Lax so it survives the trip back from Google) and redirects to Google's account chooser.
+        `mode=connect` (Security settings) needs a signed-in user who did "Confirm it's you".
+        Problems redirect to the frontend instead (see GoogleRedirects).
+      operationId: startGoogleSignIn
+      tags: [google]
+      parameters:
+        - { name: mode, in: query, schema: { type: string, enum: [sign_in, connect], default: sign_in } }
+        - { name: keepSignedIn, in: query, schema: { type: string, enum: ["true", "false"], default: "false" } }
+      responses:
+        "302":
+          description: To Google, or to a frontend page with `?error=…`.
+          headers:
+            Location: { schema: { type: string, format: uri } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/v1/auth/google/callback:
+    get:
+      summary: Where Google sends the browser back (registered as the redirect URI)
+      description: |
+        Exchanges the one-time code with Google (server to server, client secret + PKCE), checks the
+        signed ID token (issuer, audience, nonce, expiry), then always redirects to the frontend:
+
+        | Result | Redirect |
+        |---|---|
+        | Signed in (cookies set; then GET /auth/csrf) | `{APP_URL}/` |
+        | Enter the 2FA code (vd_2fa cookie) | `{APP_URL}/sign-in?step=two-factor` |
+        | Seller/admin must set up 2FA | `{APP_URL}/sign-in?step=two-factor-setup` |
+        | Email already has a password account: enter it once to connect | `{APP_URL}/sign-in?step=google-link` |
+        | Connected from Security settings | `{APP_URL}/account/security?google=connected` |
+        | Problem | `{APP_URL}/sign-in?error=…` or `/account/security?error=…` |
+
+        Error codes: google_cancelled, google_failed (expired, forged or replayed), google_email_unverified,
+        google_already_used, google_account_mismatch, account_suspended, reauth_required, sign_in_required,
+        google_unavailable.
+      operationId: googleCallback
+      tags: [google]
+      parameters:
+        - { name: code, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+        - { name: error, in: query, schema: { type: string }, description: Set by Google, e.g. access_denied when the person cancels. }
+      responses:
+        "302":
+          description: To a frontend page (see the table).
+          headers:
+            Location: { schema: { type: string, format: uri } }
+
+  /api/v1/auth/google/link:
+    post:
+      summary: "\"This email already has a Vendora account. Sign in with your password to connect Google.\""
+      description: |
+        After the callback answered `step=google-link` (vd_2fa cookie, 10 minutes). The password counts toward
+        the sign-in lockout. With 2FA on, the answer is `two_factor_required` and Google is connected after the code.
+      operationId: linkGoogleWithPassword
+      tags: [google]
+      security: [{ challengeCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [password], properties: { password: { type: string, maxLength: 128 } } }
+      responses:
+        "200": { $ref: "#/components/responses/SignInStep" }
+        "400":
+          description: CHALLENGE_EXPIRED (start again) or VALIDATION_ERROR.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401":
+          description: INVALID_CREDENTIALS, with `details.attemptsLeft`.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "409":
+          description: CONFLICT. That Google account was connected to another Vendora account meanwhile.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429":
+          description: ACCOUNT_LOCKED or RATE_LIMITED.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/v1/auth/google/disconnect:
+    post:
+      summary: Disconnect Google sign-in (needs "Confirm it's you" and a password on the account)
+      operationId: disconnectGoogle
+      tags: [google]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "200":
+          description: Disconnected. The owner gets an email.
+          content:
+            application/json:
+              schema: { type: object, required: [connected], properties: { connected: { type: boolean, const: false } } }
+        "401":
+          description: UNAUTHORIZED. Not signed in.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403":
+          description: REAUTH_REQUIRED (open "Confirm it's you", then retry) or CSRF_INVALID.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: CONFLICT. No password yet (add one with Forgot password? first), or Google isn't connected.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
   /api/v1/auth/me:
     get:
       summary: Who is signed in?
@@ -939,7 +1063,7 @@ components:
       properties:
         status:
           type: string
-          enum: [two_factor_required, two_factor_setup_required]
+          enum: [two_factor_required, two_factor_setup_required, google_link_required]
           description: "two_factor_required: show 'Enter the 6-digit code'. two_factor_setup_required: sellers/admins must set up 2FA first."
         expiresInSeconds: { type: integer, example: 300 }
 
@@ -986,7 +1110,7 @@ components:
 
     SecurityOverview:
       type: object
-      required: [email, emailVerified, hasPassword, passwordChangedAt, accountCreatedAt, twoFactor, confirmMethod]
+      required: [email, emailVerified, hasPassword, passwordChangedAt, accountCreatedAt, twoFactor, confirmMethod, google]
       properties:
         email: { type: string, format: email }
         emailVerified: { type: boolean }
@@ -995,6 +1119,12 @@ components:
         accountCreatedAt: { type: string, format: date-time }
         twoFactor: { $ref: "#/components/schemas/TwoFactorStatus" }
         confirmMethod: { type: string, enum: [app, password, email] }
+        google:
+          type: object
+          required: [connected, email]
+          properties:
+            connected: { type: boolean }
+            email: { type: [string, "null"], format: email, description: '"Connected as …"' }
 
     ConfirmStatus:
       type: object
@@ -1038,7 +1168,7 @@ components:
         id: { type: string, format: uuid }
         type:
           type: string
-          enum: [LOGIN_OK, LOCKED, LOGOUT_ALL, PASSWORD_CHANGED, PASSWORD_RESET, EMAIL_CHANGED, TWO_FA_ENABLED, TWO_FA_DISABLED, BACKUP_CODE_USED, BACKUP_CODES_RENEWED, SESSION_REVOKED, TOKEN_REUSE_DETECTED]
+          enum: [LOGIN_OK, LOCKED, LOGOUT_ALL, PASSWORD_CHANGED, PASSWORD_RESET, EMAIL_CHANGED, TWO_FA_ENABLED, TWO_FA_DISABLED, BACKUP_CODE_USED, BACKUP_CODES_RENEWED, SESSION_REVOKED, TOKEN_REUSE_DETECTED, GOOGLE_CONNECTED, GOOGLE_DISCONNECTED]
         device: { type: string, example: Safari on iPhone }
         deviceType: { type: string, enum: [desktop, mobile, tablet, unknown] }
         location: { type: [string, "null"] }

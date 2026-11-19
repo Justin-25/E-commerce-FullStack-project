@@ -10,7 +10,10 @@ import { createCsrf } from "../../src/middleware/csrf.js";
 import { authRouter } from "../../src/modules/auth/auth.routes.js";
 import { authKeys } from "../../src/modules/auth/keys.js";
 import { AuthService } from "../../src/modules/auth/auth.service.js";
+import { GoogleService } from "../../src/modules/auth/google.service.js";
 import { SecurityService } from "../../src/modules/auth/security.service.js";
+import type { GoogleProfile } from "../../src/lib/google.js";
+import { FakeGoogle } from "./fakeGoogle.js";
 import { TokenService } from "../../src/modules/auth/tokens.js";
 import { silentLogger, testConfig } from "../helpers.js";
 import { Browser } from "./browser.js";
@@ -67,6 +70,7 @@ export async function createAuthHarness(env: Record<string, string> = {}) {
   const kv = new FlakyKv(memory, redis);
   const outbox = new DevOutbox();
   const breached = new Set(BREACHED_PASSWORDS);
+  const fakeGoogle = new FakeGoogle();
   const logs: { level: number; msg: string }[] = [];
   const logger = pino({ level: "warn" }, { write: (line: string) => void logs.push(JSON.parse(line)) });
 
@@ -85,7 +89,8 @@ export async function createAuthHarness(env: Record<string, string> = {}) {
         res.json({ userId: req.auth?.userId ?? null });
       });
     const security = new SecurityService({ prisma: db.prisma, kv, email: outbox, config, logger });
-    const auth = authRouter({ service, security, tokens, csrf, guards, config, logger, rateLimitStore: new FlakyStore(redis) });
+    const google = new GoogleService({ prisma: db.prisma, kv, auth: service, identity: fakeGoogle, email: outbox, config, logger });
+    const auth = authRouter({ service, security, google, tokens, csrf, guards, config, logger, rateLimitStore: new FlakyStore(redis) });
     return createApp({ config, logger: silentLogger, csrf, routers: [auth, testRoutes] });
   };
 
@@ -123,6 +128,21 @@ export async function createAuthHarness(env: Record<string, string> = {}) {
       return token;
     },
     browser: (headers: Record<string, string> = {}) => Browser.open(app, headers),
+
+    fakeGoogle,
+
+    /**
+     * "Continue with Google" like a browser: start (→ Google), pick this Google account,
+     * come back to the callback. Returns the callback response (a redirect to the frontend).
+     */
+    async googleSignIn(browser: Browser, profile: GoogleProfile, query: Record<string, string> = {}) {
+      const start = await browser.get(`/api/v1/auth/google/start?${new URLSearchParams(query)}`);
+      expect(start.status).toBe(302);
+      const google = new URL(String(start.headers.location));
+      const state = google.searchParams.get("state") ?? "";
+      const code = fakeGoogle.choose(state, profile);
+      return browser.get(`/api/v1/auth/google/callback?${new URLSearchParams({ code, state, scope: "openid email profile" })}`);
+    },
 
     /** Forget which app codes this user already used, so a test can sign in again within the same 30 seconds. */
     allowCodeReuse: async (userId: string) => {

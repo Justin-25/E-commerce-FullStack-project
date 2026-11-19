@@ -1,5 +1,7 @@
+import { pino } from "pino";
 import request from "supertest";
 import { describe, expect, it } from "vitest";
+import { redactUrl } from "../src/middleware/requestLogger.js";
 import { buildApp } from "./helpers.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -133,6 +135,23 @@ describe("rate limiting", () => {
     expect(res.status).toBe(429);
     expect(res.body.error.code).toBe("RATE_LIMITED");
     expect(res.headers["ratelimit-policy"]).toBeDefined();
+  });
+});
+
+describe("request logs", () => {
+  it("never contain one-time codes from the URL (e.g. Google's sign-in code)", async () => {
+    const lines: string[] = [];
+    const logger = pino({ level: "info" }, { write: (line: string) => void lines.push(line) });
+    await request(buildApp({ logger })).get("/api/v1/query?code=4/0AbCdEfSECRET&state=STATE-SECRET&scope=openid&page=2");
+    const logged = lines.join("\n");
+    expect(logged).not.toContain("SECRET");
+    expect(logged).toContain("/api/v1/query?code=%5Bredacted%5D&state=%5Bredacted%5D&scope=openid&page=2");
+  });
+
+  it("leave ordinary URLs untouched", () => {
+    expect(redactUrl("/api/v1/products?page=2&sort=price")).toBe("/api/v1/products?page=2&sort=price");
+    expect(redactUrl("/health")).toBe("/health");
+    expect(redactUrl("/x?Token=abc")).toBe("/x?Token=%5Bredacted%5D");
   });
 });
 

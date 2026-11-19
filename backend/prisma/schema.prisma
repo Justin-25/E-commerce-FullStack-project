@@ -52,6 +52,8 @@ enum SecurityEventType {
   BACKUP_CODES_RENEWED
   SESSION_REVOKED
   TOKEN_REUSE_DETECTED
+  GOOGLE_CONNECTED
+  GOOGLE_DISCONNECTED
 }
 
 enum StoreStatus {
@@ -218,13 +220,14 @@ model OAuthAccount {
   id             String        @id @default(uuid(7)) @db.Uuid
   userId         String        @db.Uuid
   provider       OAuthProvider
-  providerUserId String        @db.VarChar(255)
+  providerUserId String        @db.VarChar(255) // Google's "sub": stable even if the Google email changes
+  email          String?       @db.VarChar(254) // shown as "Connected as …"; refreshed at each Google sign-in
   createdAt      DateTime      @default(now()) @db.Timestamptz(3)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerUserId])
-  @@index([userId])
+  @@unique([userId, provider]) // at most one Google account per Vendora account
   @@map("oauth_accounts")
 }
 

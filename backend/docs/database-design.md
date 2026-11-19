@@ -56,7 +56,8 @@ erDiagram
     uuid id PK
     uuid userId FK
     enum provider "GOOGLE"
-    string providerUserId "unique with provider"
+    string providerUserId "Google sub; unique with provider"
+    string email "Connected as … (refreshed at sign-in)"
   }
   sessions {
     uuid id PK
@@ -117,6 +118,7 @@ erDiagram
 ```
 
 - **Signed-in devices** = `sessions` (one chain per device; `location` from the hosting provider's headers). "Sign out of all other devices" revokes every other session and their 2FA trust. A password change revokes all sessions and sets `passwordChangedAt`.
+- **Google sign-in:** at most one Google account per Vendora account (`userId + provider` unique), and a Google account never serves two Vendora accounts (`provider + providerUserId` unique). Migration `20261119150000_google_sign_in`.
 - **Two-step verification:** the authenticator secret is encrypted; backup codes are keyed hashes; "Trust this device for 30 days" = `trusted_devices` (cookie token hashed), all revoked by a password change/reset or turning 2FA off. Added in migration `20261119090000_two_factor_trusted_devices`.
 - **Lockout counters, rate limits and revoked access tokens** are in Redis with automatic expiry. `security_events` keeps the history shown on the "Recent security activity" screen.
 

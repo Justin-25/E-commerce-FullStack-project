@@ -14,6 +14,7 @@ import { createAuthGuards } from "../src/middleware/auth.js";
 import { createCsrf } from "../src/middleware/csrf.js";
 import { authRouter } from "../src/modules/auth/auth.routes.js";
 import type { AuthService } from "../src/modules/auth/auth.service.js";
+import type { GoogleService } from "../src/modules/auth/google.service.js";
 import type { SecurityService } from "../src/modules/auth/security.service.js";
 import { TokenService } from "../src/modules/auth/tokens.js";
 import { testConfig } from "./helpers.js";
@@ -44,6 +45,7 @@ describe("openapi.yaml", () => {
     const router = authRouter({
       service: {} as AuthService, // never called: we only list the routes
       security: {} as SecurityService,
+      google: {} as GoogleService,
       tokens,
       csrf: createCsrf(config),
       guards: createAuthGuards({ tokens, kv: new MemoryKv() }),

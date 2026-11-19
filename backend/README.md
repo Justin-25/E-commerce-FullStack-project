@@ -38,7 +38,7 @@ npm run db:status    # which migrations are applied
 
 Design and reasoning: [`docs/database-design.md`](docs/database-design.md).
 
-## Sign-in and account security (milestone 3a–3d)
+## Sign-in and account security (milestone 3a–3e)
 
 | Endpoint | What it does |
 |---|---|
@@ -65,6 +65,9 @@ Design and reasoning: [`docs/database-design.md`](docs/database-design.md).
 | `POST /api/v1/auth/sessions/{id}/sign-out` · `/sessions/sign-out-others` | Sign out one device, or all others, immediately |
 | `GET /api/v1/auth/activity` | Recent security activity, newest first, page by page |
 | `POST /api/v1/auth/email/change` · `/email/change/confirm` | Change email: after "Confirm it's you", a code to the new address; the old one is told |
+| `GET /api/v1/auth/google/start` → Google → `/google/callback` | "Continue with Google" (page loads that end in a redirect to the frontend) |
+| `POST /api/v1/auth/google/link` | "Sign in with your password to connect Google" (existing password accounts) |
+| `POST /api/v1/auth/google/disconnect` | Security settings (needs "Confirm it's you" and a password on the account) |
 
 How it works:
 - **Two passes in httpOnly cookies.** A 15-minute access pass (JWT, `vd_at`) and a refresh pass (random, `vd_rt`, sent only to `/api/v1/auth`). Page JavaScript can't read either, so an XSS bug can't steal them.
@@ -73,6 +76,11 @@ How it works:
 - **Two-step verification.** After a correct password (or a reset link), people with 2FA get `two_factor_required` and a 5-minute httpOnly step cookie; no session exists until the authenticator code (or a backup code) is right. Codes can't be replayed, wrong ones count toward the lockout, and "Trust this device for 30 days" skips the code on that browser only. Sellers and admins must have it: without it they get `two_factor_setup_required` and set it up before getting in. If someone loses their phone and backup codes, support resets it after checking who they are (admin screen in milestone 7).
 - **"Confirm it's you" before sensitive changes.** The strongest proof the account has: the authenticator code if 2FA is on, else the password, else a code by email (accounts without a password). It lasts 10 minutes and only on the sign-in where it was done, so a stolen session can't borrow it. Sensitive endpoints answer `REAUTH_REQUIRED` until then.
 - **Devices and activity.** Each sign-in chain is one device, named from its User-Agent with a small built-in reader. The location comes from the hosting provider's headers (`GEO_HEADERS`), none locally. "Sign out of all other devices" also ends their 2FA trust.
+- **Google sign-in** is the server-side OAuth 2.0 authorization-code flow with PKCE (`openid-client`, a certified OpenID Connect library). State, nonce and PKCE verifier live in an encrypted httpOnly cookie for 10 minutes; Google's ID token signature, issuer, audience and nonce are checked. Google replaces the password, not 2FA. Matching rules:
+  - Already connected: sign in.
+  - New email: a shopper account with no password.
+  - Never-verified account with that email: taken over, and its unknown password erased.
+  - Verified account with a password: asked for that password once, then connected.
 - **Password changes end other sign-ins.** A reset or change revokes every other sign-in chain and sets an "invalid before" time, so passes issued earlier stop working at once. The owner gets a "your password was changed" email.
 - **Emails.** Sent in the background, so response times don't reveal whether an account exists. In development they're printed in the API terminal (look for `DEV OUTBOX`) so you can copy the code or link. A real email provider is added before deploying (milestone 9); production refuses to start with the outbox.
 
@@ -134,6 +142,7 @@ openapi/openapi.yaml     the API contract
 | Password reset tokens | 256 random bits, stored only as a keyed hash, 30-minute expiry, single use, a newer link cancels older ones; at most 1 email a minute and 5 a day. The token sits after `#` in the link, so it never reaches server logs or other sites. |
 | Notify on security changes | Emails after a password reset or change, turning 2FA on or off, and every backup-code sign-in, each with a way out if it wasn't them. |
 | Re-authenticate before high-value actions | "Confirm it's you" (app code → password → email code), 10 minutes, per device; changing the email needs it, plus a code from the new inbox. |
+| Social sign-in (OAuth) safely | Authorization code + PKCE, state and nonce checked, ID token verified; code exchanged server to server; existing password accounts connect only after their password; unverified Google emails refused. |
 | Two-factor authentication | Authenticator app (TOTP, `otpauth`) + 10 single-use backup codes; required for sellers and admins; also asked after a password reset; replay-proof; wrong codes count toward the lockout. |
 | Encrypt sensitive data | The 2FA secret is encrypted with AES-256-GCM (`DATA_ENCRYPTION_KEY`), bound to its user, so a copy pasted into another account fails to decrypt. Backup codes are keyed hashes. |
 | Confirm email after sign-up | 6-digit code, 10 minutes, required before the first sign-in. |
@@ -142,9 +151,9 @@ openapi/openapi.yaml     the API contract
 | Rate limiting, DoS | `express-rate-limit` counts the real visitor IP behind proxies (`TRUST_PROXY_HOPS`), IPv6 grouped by /56. JSON bodies ≤ 10 KB (413 otherwise); passwords ≤ 128 characters. |
 | Special HTTP headers | `helmet` (HSTS, nosniff, frame protection…); `X-Powered-By` removed. |
 | Parameter pollution, operator injection | Custom query parser: last value wins for repeated keys; never builds nested objects, so `?price[$gt]=0` stays plain text and `__proto__` can't pollute objects. SQL goes through Prisma (parameterized). |
-| No error details to clients | One error format. Users see safe messages; stack traces go to the log under the same request ID. Logs redact cookies, passwords and tokens. |
+| No error details to clients | One error format. Users see safe messages; stack traces go to the log under the same request ID. Logs redact cookies, passwords and tokens, and hide one-time values in URLs (e.g. Google's `code` and `state`). |
 | Evil regular expressions | Only simple, linear patterns. |
 | No secrets in git | `.env` is git-ignored; `npm run secrets` writes keys without printing them; config errors name a variable but never its value. |
 | HTTPS | Production requires https origins and `APP_URL`, sets HSTS, and uses `__Host-`/`__Secure-` Secure cookies. |
 
-Coming next: Google sign-in (3e). "Delete account" comes once orders exist (it must keep order records).
+Milestone 3 (sign-in & security) is complete. "Delete account" comes once orders exist (it must keep order records).

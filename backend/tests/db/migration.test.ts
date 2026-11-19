@@ -48,7 +48,10 @@ describe("migration structure", () => {
   });
 
   it("really builds every index the migration declares", async () => {
-    const declared = [...migrationSql.join("\n").matchAll(/CREATE (?:UNIQUE )?INDEX "([^"]+)"/g)].flatMap((m) => (m[1] ? [m[1]] : []));
+    const all = migrationSql.join("\n");
+    // Created by any migration and not dropped by a later one (e.g. 3e replaced oauth_accounts_userId_idx).
+    const dropped = new Set([...all.matchAll(/DROP INDEX "([^"]+)"/g)].flatMap((m) => (m[1] ? [m[1]] : [])));
+    const declared = [...all.matchAll(/CREATE (?:UNIQUE )?INDEX "([^"]+)"/g)].flatMap((m) => (m[1] && !dropped.has(m[1]) ? [m[1]] : []));
     const { rows } = await db.query<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE schemaname = 'public'`);
     const built = new Set(rows.map((r) => r.indexname));
     expect(declared.length).toBeGreaterThanOrEqual(57);

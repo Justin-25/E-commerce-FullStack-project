@@ -86,6 +86,16 @@ export const activityQuerySchema = z.object({
 });
 
 export type ConfirmInput = z.infer<typeof confirmSchema>;
+
+// --- Google sign-in (3e) ---
+
+export const googleLinkSchema = z.object({
+  password: z.string({ error: "Enter your password" }).min(1, { error: "Enter your password" }).max(128, { error: "Email or password is incorrect." })
+});
+export const googleStartQuerySchema = z.object({
+  mode: z.enum(["sign_in", "connect"]).default("sign_in"),
+  keepSignedIn: z.enum(["true", "false"]).default("false").transform((v) => v === "true")
+});
 export type TwoFactorVerifyInput = z.infer<typeof twoFactorVerifySchema>;
 
 export type RegisterInput = z.infer<typeof registerSchema>;

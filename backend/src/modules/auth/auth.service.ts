@@ -35,6 +35,7 @@ import { BackupCodes } from "./backupCodes.js";
 import { SignInChallenges, type Challenge, type IssuedChallenge } from "./challenges.js";
 import { OneTimeCodes, OneTimeLinks } from "./codes.js";
 import { recordSecurityEvent, type ClientInfo } from "./events.js";
+import { connectGoogle } from "./googleAccounts.js";
 import { authKeys, emailKey } from "./keys.js";
 import { LoginLockout } from "./lockout.js";
 import { SecondFactorCheck } from "./secondFactor.js";
@@ -197,15 +198,25 @@ export class AuthService {
 
   /** `trustedDeviceToken`: the "trust this device" cookie, if the browser has one. */
   async login(input: LoginInput, client: ClientInfo, trustedDeviceToken?: string): Promise<SignInOutcome> {
+    const user = await this.checkPasswordSignIn(input.email, input.password, client);
+    return this.completeSignIn(user, input.keepSignedIn, client, trustedDeviceToken);
+  }
+
+  /**
+   * Email + password check with the lockout, shared by sign-in and "sign in with
+   * your password to connect Google". Returns the user once the password is
+   * right and the account is active and verified.
+   */
+  private async checkPasswordSignIn(email: string, password: string, client: ClientInfo): Promise<User> {
     const { prisma } = this.deps;
-    const account = emailKey(input.email);
+    const account = emailKey(email);
     const wait = await this.lockout.secondsLocked(account, client.ipKey);
     if (wait > 0) throw locked(wait);
 
-    const user = await prisma.user.findUnique({ where: { email: input.email } });
+    const user = await prisma.user.findUnique({ where: { email } });
     const stored = user && !user.deletedAt ? user.passwordHash : null; // null for Google-only accounts
     // Always run exactly one Argon2 check, so the timing doesn't reveal whether the account exists.
-    const passwordOk = await verifyPassword(input.password, stored ?? (await dummyHash()));
+    const passwordOk = await verifyPassword(password, stored ?? (await dummyHash()));
 
     if (!user || !stored || !passwordOk) {
       const result = await this.lockout.recordFailure(account, client.ipKey);
@@ -229,9 +240,9 @@ export class AuthService {
     }
 
     if (needsRehash(stored)) {
-      await prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hashPassword(input.password) } });
+      await prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hashPassword(password) } });
     }
-    return this.completeSignIn(user, input.keepSignedIn, client, trustedDeviceToken);
+    return user;
   }
 
   /**
@@ -397,6 +408,32 @@ export class AuthService {
     return session;
   }
 
+  // --- Google sign-in (3e) --------------------------------------------------
+
+  /**
+   * Google proved who this is: the same next steps as after a correct password
+   * (2FA code if on, set-up for sellers/admins, otherwise signed in).
+   */
+  signInWithGoogle(user: User, keepSignedIn: boolean, client: ClientInfo, trustedDeviceToken?: string): Promise<SignInOutcome> {
+    return this.completeSignIn(user, keepSignedIn, client, trustedDeviceToken);
+  }
+
+  /** The Google email already has a password account: ask for the password once before connecting (the user's choice). */
+  startGoogleLink(user: User, google: { sub: string; email: string }, keepSignedIn: boolean): Promise<IssuedChallenge> {
+    return this.challenges.create({ userId: user.id, type: "google_link", keepSignedIn, linkGoogle: google });
+  }
+
+  /** "Sign in with your password to connect Google": password (with the lockout), then 2FA if on, then connected. */
+  async linkGoogleWithPassword(challengeToken: string | undefined, password: string, client: ClientInfo, trustedDeviceToken?: string): Promise<SignInOutcome> {
+    const challenge = await this.challenges.find(challengeToken);
+    if (!challengeToken || !challenge || challenge.type !== "google_link" || !challenge.linkGoogle) throw challengeExpired();
+    const owner = await this.deps.prisma.user.findUnique({ where: { id: challenge.userId } });
+    if (!owner) throw challengeExpired();
+    const user = await this.checkPasswordSignIn(owner.email, password, client);
+    await this.challenges.remove(challengeToken);
+    return this.completeSignIn(user, challenge.keepSignedIn, client, trustedDeviceToken, challenge.linkGoogle);
+  }
+
   // --- two-step verification (3c) --------------------------------------------
 
   /** The pending "enter your code" / "set up 2FA" step this cookie token belongs to, if any. */
@@ -421,6 +458,7 @@ export class AuthService {
       const updated = await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: now } });
       await recordSecurityEvent(tx, user.id, "LOGIN_OK", client);
       if (method === "backup") await recordSecurityEvent(tx, user.id, "BACKUP_CODE_USED", client);
+      if (challenge.linkGoogle) await connectGoogle(tx, user.id, challenge.linkGoogle, client);
       const trustedDevice = input.trustDevice ? await this.trustedDevices.create(tx, user.id, client) : undefined;
       return { session: await this.startSession(tx, updated, challenge.keepSignedIn, client), trustedDevice };
     });
@@ -478,6 +516,7 @@ export class AuthService {
       await recordSecurityEvent(tx, user.id, "TWO_FA_ENABLED", client);
       if (!challenge) return { backupCodes };
       await recordSecurityEvent(tx, user.id, "LOGIN_OK", client);
+      if (challenge.linkGoogle) await connectGoogle(tx, user.id, challenge.linkGoogle, client);
       return { backupCodes, session: await this.startSession(tx, updated, challenge.keepSignedIn, client) };
     });
     if (subject.challengeToken) await this.challenges.remove(subject.challengeToken);
@@ -523,18 +562,26 @@ export class AuthService {
    * After a correct password (or reset link): signed in now, or one more step.
    * A trusted device skips the 2FA code; sellers/admins without 2FA must set it up first.
    */
-  private async completeSignIn(user: User, keepSignedIn: boolean, client: ClientInfo, trustedDeviceToken?: string): Promise<SignInOutcome> {
+  private async completeSignIn(
+    user: User,
+    keepSignedIn: boolean,
+    client: ClientInfo,
+    trustedDeviceToken?: string,
+    linkGoogle?: { sub: string; email: string }
+  ): Promise<SignInOutcome> {
+    const pending = linkGoogle ? { linkGoogle } : {};
     if (user.twoFactorEnabledAt) {
       if (!(await this.trustedDevices.isTrusted(user.id, trustedDeviceToken))) {
-        return { kind: "challenge", challenge: await this.challenges.create({ userId: user.id, type: "two_factor", keepSignedIn }) };
+        return { kind: "challenge", challenge: await this.challenges.create({ userId: user.id, type: "two_factor", keepSignedIn, ...pending }) };
       }
     } else if (requiresTwoFactor(user.role)) {
-      return { kind: "challenge", challenge: await this.challenges.create({ userId: user.id, type: "two_factor_setup", keepSignedIn }) };
+      return { kind: "challenge", challenge: await this.challenges.create({ userId: user.id, type: "two_factor_setup", keepSignedIn, ...pending }) };
     }
     const now = this.now();
     const session = await this.deps.prisma.$transaction(async (tx) => {
       const updated = await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: now } });
       await recordSecurityEvent(tx, user.id, "LOGIN_OK", client);
+      if (linkGoogle) await connectGoogle(tx, user.id, linkGoogle, client);
       return this.startSession(tx, updated, keepSignedIn, client);
     });
     return { kind: "signed_in", session };

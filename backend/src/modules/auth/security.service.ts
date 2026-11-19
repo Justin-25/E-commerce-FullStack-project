@@ -97,6 +97,7 @@ export class SecurityService {
   async overview(userId: string) {
     const user = await this.activeUser(userId);
     const backupCodesLeft = user.twoFactorEnabledAt ? await this.deps.prisma.backupCode.count({ where: { userId, usedAt: null } }) : 0;
+    const google = await this.deps.prisma.oAuthAccount.findUnique({ where: { userId_provider: { userId, provider: "GOOGLE" } } });
     return {
       email: user.email,
       emailVerified: user.emailVerifiedAt !== null,
@@ -104,6 +105,8 @@ export class SecurityService {
       passwordChangedAt: user.passwordChangedAt,
       accountCreatedAt: user.createdAt,
       twoFactor: { enabled: user.twoFactorEnabledAt !== null, enabledAt: user.twoFactorEnabledAt, required: requiresTwoFactor(user.role), backupCodesLeft },
+      // Design: "Google sign-in · Connected as maria.santos@gmail.com · Disconnect"
+      google: { connected: google !== null, email: google?.email ?? null },
       confirmMethod: confirmMethodFor(user)
     };
   }

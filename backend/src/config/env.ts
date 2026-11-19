@@ -44,11 +44,20 @@ const schema = z
      * Which hosting provider's location headers to trust for "Manila, PH" in the device and activity lists.
      * Only set this when the API really runs behind that provider; otherwise visitors could fake the headers.
      */
-    GEO_HEADERS: z.enum(["none", "vercel", "cloudflare"]).default("none")
+    GEO_HEADERS: z.enum(["none", "vercel", "cloudflare"]).default("none"),
+
+    // --- Google sign-in (3e). Off when the client id/secret are empty. ---
+    GOOGLE_CLIENT_ID: optional(z.string().regex(/^[\w.-]+\.apps\.googleusercontent\.com$/, "must be the client ID from Google Cloud (…apps.googleusercontent.com)")),
+    GOOGLE_CLIENT_SECRET: optional(z.string().min(10, "looks too short")),
+    /** Where Google sends people back. Must match one registered in Google Cloud. Default: APP_URL + /api/v1/auth/google/callback. */
+    GOOGLE_REDIRECT_URI: optional(z.url())
   })
   .superRefine((env, ctx) => {
     if (new Set(SECRET_KEYS.map((k) => env[k])).size !== SECRET_KEYS.length) {
       ctx.addIssue({ code: "custom", path: ["ACCESS_TOKEN_SECRET"], message: "each secret key must be different" });
+    }
+    if (Boolean(env.GOOGLE_CLIENT_ID) !== Boolean(env.GOOGLE_CLIENT_SECRET)) {
+      ctx.addIssue({ code: "custom", path: ["GOOGLE_CLIENT_SECRET"], message: "set both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or neither" });
     }
     if (env.NODE_ENV !== "production") return;
     for (const key of ["DATABASE_URL", "REDIS_URL"] as const) {
@@ -59,6 +68,9 @@ const schema = z
     }
     if (!env.APP_URL.startsWith("https://")) {
       ctx.addIssue({ code: "custom", path: ["APP_URL"], message: "must use https:// in production" });
+    }
+    if (env.GOOGLE_REDIRECT_URI && !env.GOOGLE_REDIRECT_URI.startsWith("https://")) {
+      ctx.addIssue({ code: "custom", path: ["GOOGLE_REDIRECT_URI"], message: "must use https:// in production" });
     }
     if (env.EMAIL_PROVIDER === "outbox") {
       ctx.addIssue({ code: "custom", path: ["EMAIL_PROVIDER"], message: "the dev outbox prints codes in the log; use a real provider in production" });

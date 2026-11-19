@@ -126,6 +126,32 @@ export const emailChangedNoticeMessage = (to: string, name: string, newEmailMask
   ].join("\n")
 });
 
+export const googleConnectedMessage = (to: string, name: string, googleEmail: string, appUrl: string): EmailMessage => ({
+  to,
+  kind: "google-connected",
+  subject: "Google sign-in was connected",
+  text: [
+    `Hi ${name},`,
+    "",
+    `You can now sign in to Vendora with the Google account ${googleEmail}.`,
+    "",
+    `If this wasn't you, reset your password now (${appUrl}/forgot-password) and disconnect Google in Security settings.`
+  ].join("\n")
+});
+
+export const googleDisconnectedMessage = (to: string, name: string, appUrl: string): EmailMessage => ({
+  to,
+  kind: "google-disconnected",
+  subject: "Google sign-in was disconnected",
+  text: [
+    `Hi ${name},`,
+    "",
+    "Google sign-in was just disconnected from your Vendora account. You can still sign in with your email and password.",
+    "",
+    `If this wasn't you, reset your password now (${appUrl}/forgot-password).`
+  ].join("\n")
+});
+
 export const accountExistsMessage = (to: string, name: string, appUrl: string): EmailMessage => ({
   to,
   kind: "account-exists",

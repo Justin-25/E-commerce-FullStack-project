@@ -12,7 +12,9 @@ import { createCsrf } from "./middleware/csrf.js";
 import { redisRateLimitStore } from "./middleware/rateLimit.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { AuthService } from "./modules/auth/auth.service.js";
+import { GoogleService } from "./modules/auth/google.service.js";
 import { SecurityService } from "./modules/auth/security.service.js";
+import { createGoogleIdentity } from "./lib/google.js";
 import { TokenService } from "./modules/auth/tokens.js";
 
 loadEnvFile();
@@ -35,9 +37,22 @@ if (prisma) {
   const email = new DevOutbox(logger); // config refuses this in production; a real provider comes in milestone 9
   const authService = new AuthService({ prisma, kv, email, tokens, config, isBreached: createHibpCheck({ logger }), logger });
   const security = new SecurityService({ prisma, kv, email, config, logger });
-  services.push(authService, security);
+  const identity = config.GOOGLE_CLIENT_ID && config.GOOGLE_CLIENT_SECRET ? createGoogleIdentity(config.GOOGLE_CLIENT_ID, config.GOOGLE_CLIENT_SECRET) : null;
+  if (!identity) logger.info("GOOGLE_CLIENT_ID is not set — 'Continue with Google' is off");
+  const google = new GoogleService({ prisma, kv, auth: authService, identity, email, config, logger });
+  services.push(authService, security, google);
   routers.push(
-    authRouter({ service: authService, security, tokens, csrf, guards, config, logger, ...(redis ? { rateLimitStore: redisRateLimitStore(redis, "rl:auth:") } : {}) })
+    authRouter({
+      service: authService,
+      security,
+      google,
+      tokens,
+      csrf,
+      guards,
+      config,
+      logger,
+      ...(redis ? { rateLimitStore: redisRateLimitStore(redis, "rl:auth:") } : {})
+    })
   );
 }
 

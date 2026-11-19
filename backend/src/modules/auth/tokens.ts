@@ -9,6 +9,7 @@ export const ACCESS_TTL_SECONDS = 15 * 60;
 export const SESSION_TTL_MS = { persistent: 30 * 24 * 60 * 60 * 1000, browser: 24 * 60 * 60 * 1000 } as const;
 /** The refresh cookie is only ever sent to the sign-in endpoints, never to the rest of the API. */
 export const REFRESH_COOKIE_PATH = "/api/v1/auth";
+const GOOGLE_COOKIE_PATH = "/api/v1/auth/google";
 
 const ISSUER = "vendora-api";
 const AUDIENCE = "vendora-web";
@@ -40,7 +41,7 @@ export interface IssuedSession {
  * can't make the browser send them.
  */
 export class TokenService {
-  readonly cookieNames: { access: string; refresh: string; challenge: string; trustedDevice: string };
+  readonly cookieNames: { access: string; refresh: string; challenge: string; trustedDevice: string; googleState: string };
   private readonly key: Uint8Array;
   private readonly secure: boolean;
 
@@ -49,8 +50,8 @@ export class TokenService {
     this.secure = config.NODE_ENV === "production";
     // __Host- / __Secure- prefixes make browsers refuse these cookies unless they're Secure and set by us.
     this.cookieNames = this.secure
-      ? { access: "__Host-vd_at", refresh: "__Secure-vd_rt", challenge: "__Secure-vd_2fa", trustedDevice: "__Secure-vd_td" }
-      : { access: "vd_at", refresh: "vd_rt", challenge: "vd_2fa", trustedDevice: "vd_td" };
+      ? { access: "__Host-vd_at", refresh: "__Secure-vd_rt", challenge: "__Secure-vd_2fa", trustedDevice: "__Secure-vd_td", googleState: "__Secure-vd_oauth" }
+      : { access: "vd_at", refresh: "vd_rt", challenge: "vd_2fa", trustedDevice: "vd_td", googleState: "vd_oauth" };
   }
 
   signAccess(input: { userId: string; sessionId: string; familyId: string; role: Role }): Promise<string> {
@@ -106,6 +107,19 @@ export class TokenService {
   /** "Trust this device for 30 days": only ever sent to /api/v1/auth. */
   setTrustedDeviceCookie(res: Response, token: string, expiresAt: Date): void {
     res.cookie(this.cookieNames.trustedDevice, token, { httpOnly: true, secure: this.secure, sameSite: "strict", path: REFRESH_COOKIE_PATH, expires: expiresAt });
+  }
+
+  /**
+   * The Google sign-in attempt (encrypted state, nonce, PKCE verifier), for 10 minutes.
+   * SameSite=Lax, not Strict: it must come back with the browser's redirect from
+   * Google, which is a cross-site navigation. Sent only to /api/v1/auth/google.
+   */
+  setGoogleStateCookie(res: Response, value: string): void {
+    res.cookie(this.cookieNames.googleState, value, { httpOnly: true, secure: this.secure, sameSite: "lax", path: GOOGLE_COOKIE_PATH, maxAge: 10 * 60 * 1000 });
+  }
+
+  clearGoogleStateCookie(res: Response): void {
+    res.clearCookie(this.cookieNames.googleState, { httpOnly: true, secure: this.secure, sameSite: "lax", path: GOOGLE_COOKIE_PATH });
   }
 
   clearSessionCookies(res: Response): void {
