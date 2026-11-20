@@ -16,6 +16,8 @@ import { authRouter } from "../src/modules/auth/auth.routes.js";
 import type { AuthService } from "../src/modules/auth/auth.service.js";
 import type { GoogleService } from "../src/modules/auth/google.service.js";
 import type { SecurityService } from "../src/modules/auth/security.service.js";
+import { catalogRouter } from "../src/modules/catalog/catalog.routes.js";
+import type { CatalogService } from "../src/modules/catalog/catalog.service.js";
 import { TokenService } from "../src/modules/auth/tokens.js";
 import { testConfig } from "./helpers.js";
 
@@ -39,10 +41,10 @@ function documented(prefix: string): string[] {
 }
 
 describe("openapi.yaml", () => {
-  it("documents exactly the sign-in routes the code has", () => {
+  it("documents exactly the /api/v1 routes the code has (sign-in, catalog…)", () => {
     const config = testConfig();
     const tokens = new TokenService(config);
-    const router = authRouter({
+    const auth = authRouter({
       service: {} as AuthService, // never called: we only list the routes
       security: {} as SecurityService,
       google: {} as GoogleService,
@@ -51,7 +53,9 @@ describe("openapi.yaml", () => {
       guards: createAuthGuards({ tokens, kv: new MemoryKv() }),
       config
     });
-    expect(documented("/api/v1/auth/").sort()).toEqual(routesOf(router, "/api/v1").sort());
+    const catalog = catalogRouter({ catalog: {} as CatalogService });
+    const inCode = [...routesOf(auth, "/api/v1"), ...routesOf(catalog, "/api/v1")];
+    expect(documented("/api/v1/").sort()).toEqual(inCode.sort());
   });
 
   it("lists exactly the error codes the code can return", () => {

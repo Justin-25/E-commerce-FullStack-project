@@ -206,6 +206,8 @@ erDiagram
     decimal ratingAvg
     int ratingCount
     int soldCount
+    jsonb specs "Specifications tab"
+    tsvector searchVector "generated, for search"
   }
   product_variants {
     uuid id PK
@@ -214,6 +216,7 @@ erDiagram
     string name "Midnight Black"
     int priceCentavos
     int compareAtCentavos "crossed-out price"
+    timestamptz saleEndsAt "deal countdown"
     int stock "never below 0"
     int weightGrams
     bool isActive
@@ -244,7 +247,12 @@ erDiagram
   }
 ```
 
-- **Search** (milestone 4) uses PostgreSQL full-text search plus fuzzy matching (`pg_trgm`) on products. No extra search service is needed.
+- **Search** (milestone 4a, migration `20261120090000_catalog_search`) runs inside PostgreSQL, with no extra search service:
+  - `searchVector` is a **generated** `tsvector` column (title weight A, description weight B, `english` stemming), so PostgreSQL keeps it in step with every insert and edit. A GIN index makes `@@ websearch_to_tsquery(...)` fast.
+  - Typos fall back to `pg_trgm` `word_similarity` on the title (GIN trigram index), only when the words match nothing. The extension is created by the migration.
+  - Prisma can't describe generated columns, so the schema marks `searchVector` as `Unsupported("tsvector")` and the SQL is hand-written in the migration.
+- **Specifications** (`specs`, JSONB): `[{ "label": "Battery life", "value": "30 hours" }]`. They're only shown, never filtered on, so a JSON list beats a separate table. CHECK: it's a list of at most 30.
+- **Deal countdown** (`saleEndsAt`): after it, the variant sells at `compareAtCentavos` again, worked out when the price is read (TypeScript and SQL share one rule), so no job has to end deals. CHECK: a countdown needs a regular price to go back to.
 
 ## 4 · Cart, orders & payments
 

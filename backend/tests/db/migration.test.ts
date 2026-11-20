@@ -6,6 +6,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
+import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const MIGRATIONS_DIR = join(import.meta.dirname, "..", "..", "prisma", "migrations");
@@ -36,7 +37,7 @@ const order = async (userId: string, subtotal = 749_900, delivery = 0, total = 7
   one<{ id: string; orderNumber: number }>(`INSERT INTO orders (id, "userId", "paymentMethod", "subtotalCentavos", "deliveryCentavos", "totalCentavos", "shippingAddress", "updatedAt") VALUES (gen_random_uuid(), $1, 'GCASH', $2, $3, $4, '{}', now()) RETURNING id, "orderNumber"`, [userId, subtotal, delivery, total]);
 
 beforeAll(async () => {
-  db = new PGlite();
+  db = new PGlite({ extensions: { pg_trgm } });
   for (const sql of migrationSql) await db.exec(sql);
 }, 60_000);
 afterAll(async () => db?.close());
@@ -61,11 +62,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 45 foreign keys and 26 safety (CHECK) rules", async () => {
+  it("has the 45 foreign keys and 28 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
     expect(fk.n).toBe(45);
-    expect(chk.n).toBe(26);
+    expect(chk.n).toBe(28);
   });
 });
 

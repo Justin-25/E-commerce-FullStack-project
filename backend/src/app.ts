@@ -12,7 +12,7 @@ import { securityMiddleware } from "./middleware/security.js";
 import { healthRouter, type ReadinessChecks } from "./modules/health/health.routes.js";
 
 // Query keys allowed to repeat (?category=a&category=b). Filled in as modules need them.
-const REPEATABLE_QUERY_KEYS: readonly string[] = [];
+const REPEATABLE_QUERY_KEYS: readonly string[] = ["category", "store"];
 
 export interface AppOptions {
   config: Config;

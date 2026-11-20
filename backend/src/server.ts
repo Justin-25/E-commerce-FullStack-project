@@ -14,6 +14,8 @@ import { authRouter } from "./modules/auth/auth.routes.js";
 import { AuthService } from "./modules/auth/auth.service.js";
 import { GoogleService } from "./modules/auth/google.service.js";
 import { SecurityService } from "./modules/auth/security.service.js";
+import { catalogRouter } from "./modules/catalog/catalog.routes.js";
+import { CatalogService } from "./modules/catalog/catalog.service.js";
 import { createGoogleIdentity } from "./lib/google.js";
 import { TokenService } from "./modules/auth/tokens.js";
 
@@ -41,6 +43,7 @@ if (prisma) {
   if (!identity) logger.info("GOOGLE_CLIENT_ID is not set — 'Continue with Google' is off");
   const google = new GoogleService({ prisma, kv, auth: authService, identity, email, config, logger });
   services.push(authService, security, google);
+  routers.push(catalogRouter({ catalog: new CatalogService({ prisma, kv, logger }) }));
   routers.push(
     authRouter({
       service: authService,

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -10,6 +10,8 @@ info:
     Two-step verification (milestone 3c): authenticator app, backup codes, trusted devices.
     Account security (milestone 3d): "Confirm it's you", signed-in devices, security activity, change email.
     Google sign-in (milestone 3e): "Continue with Google" (authorization code + PKCE), connect and disconnect.
+    Catalog (milestone 4a): categories, product search with filters and sort, product pages.
+    Money is always an integer number of centavos (₱7,499 = 749900).
 
     **How signing in works**
     - Signing in sets two httpOnly cookies that page JavaScript cannot read:
@@ -35,6 +37,8 @@ tags:
     description: Security settings (milestone 3d)
   - name: google
     description: Google sign-in (milestone 3e)
+  - name: catalog
+    description: What shoppers browse, public (milestone 4a)
 
 paths:
   /health:
@@ -904,6 +908,90 @@ paths:
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
+  /api/v1/categories:
+    get:
+      summary: The category tree with product counts
+      description: Counts include sub-categories and only products shoppers can see. Cached for 5 minutes.
+      operationId: listCategories
+      tags: [catalog]
+      responses:
+        "200":
+          description: Top-level categories with their children.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [categories]
+                properties:
+                  categories: { type: array, items: { $ref: "#/components/schemas/CategoryNode" } }
+
+  /api/v1/products:
+    get:
+      summary: Search and browse products (filters, sort, page numbers)
+      description: |
+        Visible products only: active, from an approved store, with something on sale. The price shown is
+        the cheapest variant after deal rules ("from ₱…").
+
+        `q` uses search-engine syntax: `"exact phrase"`, `-exclude`, `or`. Words match through full-text search
+        (so "headphone" finds "Headphones"); if they match nothing, similar spellings are used instead
+        (`matchMode: similar`, e.g. "hedphones"). Facet counts for each filter ignore that filter itself,
+        so the panel can show what the other choices would give.
+      operationId: searchProducts
+      tags: [catalog]
+      parameters:
+        - { name: q, in: query, schema: { type: string, maxLength: 100 }, example: "pink wireless earbuds" }
+        - { name: category, in: query, description: Category slug, includes sub-categories. Repeat for several., schema: { type: array, maxItems: 10, items: { type: string } }, style: form, explode: true }
+        - { name: store, in: query, description: Store slug. Repeat for several., schema: { type: array, maxItems: 20, items: { type: string } }, style: form, explode: true }
+        - { name: minPrice, in: query, description: Centavos., schema: { type: integer, minimum: 0 } }
+        - { name: maxPrice, in: query, description: Centavos., schema: { type: integer, minimum: 0 } }
+        - { name: rating, in: query, description: '"4★ & up"', schema: { type: integer, minimum: 1, maximum: 4 } }
+        - { name: freeDelivery, in: query, description: Only products that reach the free-delivery minimum (₱999) on their own., schema: { type: string, enum: ["true", "false"] } }
+        - { name: sort, in: query, schema: { type: string, enum: [featured, best_selling, newest, price_asc, price_desc, top_rated], default: featured } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, enum: [12, 24, 48], default: 24 } }
+      responses:
+        "200":
+          description: One page of results with the filter panel's counts.
+          headers:
+            Cache-Control: { schema: { type: string, example: "public, max-age=60" } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/products/{id}:
+    get:
+      summary: The product page
+      operationId: getProduct
+      tags: [catalog]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Everything the product page shows.
+          content:
+            application/json:
+              schema: { type: object, required: [product], properties: { product: { $ref: "#/components/schemas/ProductDetail" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/products/{id}/related:
+    get:
+      summary: Related products (best sellers from the same category)
+      operationId: getRelatedProducts
+      tags: [catalog]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Up to 8 product cards, never the product itself.
+          content:
+            application/json:
+              schema: { type: object, required: [products], properties: { products: { type: array, maxItems: 8, items: { $ref: "#/components/schemas/ProductCard" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/auth/me:
     get:
       summary: Who is signed in?
@@ -1179,6 +1267,143 @@ components:
       required: [newEmail]
       properties:
         newEmail: { type: string, format: email, maxLength: 254 }
+
+    CategoryNode:
+      type: object
+      required: [id, slug, name, productCount, children]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string, example: headphones }
+        name: { type: string, example: Headphones }
+        productCount: { type: integer, description: Visible products here and in sub-categories. }
+        children: { type: array, items: { $ref: "#/components/schemas/CategoryNode" } }
+
+    ProductCard:
+      type: object
+      required: [id, slug, title, store, image, priceCentavos, compareAtCentavos, savingsPercent, saleEndsAt, ratingAvg, ratingCount, soldCount, inStock, freeDelivery, badges]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        title: { type: string }
+        store: { type: object, required: [name, slug], properties: { name: { type: string }, slug: { type: string } } }
+        image: { type: [object, "null"], properties: { url: { type: string }, alt: { type: [string, "null"] } } }
+        priceCentavos: { type: integer, example: 749900, description: The cheapest variant after deal rules ("from"). }
+        compareAtCentavos: { type: [integer, "null"], example: 999900, description: Crossed-out price while a deal is on. }
+        savingsPercent: { type: integer, example: 25 }
+        saleEndsAt: { type: [string, "null"], format: date-time, description: Deal countdown end. }
+        ratingAvg: { type: number, example: 4.8 }
+        ratingCount: { type: integer }
+        soldCount: { type: integer }
+        inStock: { type: boolean }
+        freeDelivery: { type: boolean, description: Reaches the ₱999 free-delivery minimum on its own. }
+        badges:
+          type: object
+          required: [deal, bestseller, new]
+          properties: { deal: { type: boolean }, bestseller: { type: boolean }, new: { type: boolean } }
+
+    CategoryFacet:
+      type: object
+      required: [slug, name, count, children]
+      properties:
+        slug: { type: string }
+        name: { type: string }
+        count: { type: integer }
+        children: { type: array, items: { $ref: "#/components/schemas/CategoryFacet" } }
+
+    SearchResult:
+      type: object
+      required: [query, matchMode, items, page, pageSize, totalItems, totalPages, sellerCount, facets]
+      properties:
+        query: { type: [string, "null"] }
+        matchMode: { type: string, enum: [words, similar], description: '"similar": no exact matches, showing similar spellings.' }
+        items: { type: array, items: { $ref: "#/components/schemas/ProductCard" } }
+        page: { type: integer }
+        pageSize: { type: integer }
+        totalItems: { type: integer, example: 1248 }
+        totalPages: { type: integer, maximum: 50 }
+        sellerCount: { type: integer, example: 214, description: '"1,248 results from 214 verified sellers"' }
+        facets:
+          type: object
+          required: [categories, stores, price]
+          properties:
+            categories: { type: array, items: { $ref: "#/components/schemas/CategoryFacet" } }
+            stores:
+              type: object
+              required: [items, total]
+              properties:
+                items: { type: array, items: { type: object, required: [slug, name, count], properties: { slug: { type: string }, name: { type: string }, count: { type: integer } } } }
+                total: { type: integer, description: '"+ Show N more"' }
+            price:
+              type: object
+              required: [minCentavos, maxCentavos]
+              properties: { minCentavos: { type: [integer, "null"] }, maxCentavos: { type: [integer, "null"] } }
+
+    ProductDetail:
+      type: object
+      required: [id, slug, title, description, specs, category, breadcrumbs, store, images, variants, price, rating, soldCount, inStock, delivery, returns]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        title: { type: string }
+        description: { type: string }
+        specs: { type: array, items: { type: object, required: [label, value], properties: { label: { type: string, example: Battery life }, value: { type: string, example: 30 hours } } } }
+        category: { type: object, properties: { slug: { type: string }, name: { type: string } } }
+        breadcrumbs: { type: array, items: { type: object, properties: { slug: { type: string }, name: { type: string } } } }
+        store:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            slug: { type: string }
+            name: { type: string }
+            logoUrl: { type: [string, "null"] }
+            ratingAvg: { type: number }
+            ratingCount: { type: integer }
+            followerCount: { type: integer }
+            shipsFrom: { type: [string, "null"] }
+            verified: { type: boolean }
+            sellingSince: { type: integer, example: 2023 }
+        images: { type: array, items: { type: object, properties: { url: { type: string }, alt: { type: string } } } }
+        variants:
+          type: array
+          items:
+            type: object
+            required: [id, sku, name, priceCentavos, compareAtCentavos, saleEndsAt, savingsCentavos, savingsPercent, stock]
+            properties:
+              id: { type: string, format: uuid }
+              sku: { type: string }
+              name: { type: string, example: Midnight Black }
+              priceCentavos: { type: integer }
+              compareAtCentavos: { type: [integer, "null"] }
+              saleEndsAt: { type: [string, "null"], format: date-time }
+              savingsCentavos: { type: integer }
+              savingsPercent: { type: integer }
+              stock:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [in_stock, low_stock, out_of_stock] }
+                  left: { type: integer, description: Only for low_stock ("Only 3 left"). Exact stock is never shown otherwise. }
+        price:
+          type: object
+          properties:
+            fromCentavos: { type: integer }
+            toCentavos: { type: integer }
+            compareAtCentavos: { type: [integer, "null"] }
+            savingsPercent: { type: integer }
+            dealEndsAt: { type: [string, "null"], format: date-time, description: '"Deal ends in 08:42:19"' }
+        rating: { type: object, properties: { avg: { type: number }, count: { type: integer } } }
+        soldCount: { type: integer }
+        inStock: { type: boolean }
+        delivery:
+          type: object
+          properties:
+            freeThresholdCentavos: { type: integer, example: 99900 }
+            qualifiesForFreeDelivery: { type: boolean }
+            standardFeeCentavos: { type: integer, example: 4900 }
+            expressFeeCentavos: { type: integer, example: 12900 }
+            standardDays: { type: object, properties: { min: { type: integer }, max: { type: integer } } }
+            expressDays: { type: object, properties: { min: { type: integer }, max: { type: integer } } }
+        returns: { type: object, properties: { days: { type: integer, example: 30 } } }
 
     RegisterRequest:
       type: object

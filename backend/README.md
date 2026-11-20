@@ -32,7 +32,7 @@ npm run dev            # http://localhost:4000/health
 
 ```bash
 npm run db:migrate   # create/upgrade the tables (prisma migrate deploy)
-npm run db:seed      # demo stores and products from the designs (safe to run again)
+npm run db:seed      # demo categories, stores and 63 products from the designs (safe to run again)
 npm run db:status    # which migrations are applied
 ```
 
@@ -84,13 +84,35 @@ How it works:
 - **Password changes end other sign-ins.** A reset or change revokes every other sign-in chain and sets an "invalid before" time, so passes issued earlier stop working at once. The owner gets a "your password was changed" email.
 - **Emails.** Sent in the background, so response times don't reveal whether an account exists. In development they're printed in the API terminal (look for `DEV OUTBOX`) so you can copy the code or link. A real email provider is added before deploying (milestone 9); production refuses to start with the outbox.
 
+## Catalog: browse and search (milestone 4a)
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/v1/categories` | The category tree, with how many products each one has (cached 5 minutes) |
+| `GET /api/v1/products` | Search and browse: `q`, `category` and `store` (both repeatable), `minPrice`/`maxPrice` (centavos), `rating` (4 = "4★ & up"), `freeDelivery`, `sort`, `page`, `pageSize` |
+| `GET /api/v1/products/{id}` | Product page: variants with price, stock and deal countdown, specifications, breadcrumbs, store card, delivery and returns |
+| `GET /api/v1/products/{id}/related` | "You may also like": best sellers from the same category (up to 8) |
+
+How it works:
+- **Search runs inside PostgreSQL**, so there's no extra search service to pay for or keep in sync. Each product has a search column that PostgreSQL keeps up to date itself (a generated `tsvector`; title words weigh more than description words), with a GIN index. People can type the way they do on Google: `"exact phrase"`, or `-word` to leave something out (`websearch_to_tsquery`). Word stems match, so "headphone" finds "Headphones".
+- **Typos.** Only when the words match nothing does it retry on title similarity (`pg_trgm`), so "hedphones" still finds headphones. Mixing both on every search let near-misses into good results, which is why it's a fallback. The response says which one ran (`matchMode`: `words` or `similar`) so the page can say "Showing similar results". The 0.45 cut-off was measured on the demo titles: typos scored 0.50–0.80 against the right product, wrong products at most 0.31.
+- **Filters with counts (facets).** Each filter's counts ignore that filter itself, so after ticking "Glow Lab" the other stores still show how many products they'd add.
+- **Deal countdown.** A variant can have a `saleEndsAt`. After that moment it sells at its regular price again. This is worked out every time the price is read, by one rule written in TypeScript and SQL (`modules/catalog/pricing.ts`; checkout will use the same rule), so no background job has to remember to end a deal.
+- **What's visible.** Only `ACTIVE` products from `APPROVED` stores with at least one variant on sale. Anything else answers 404, exactly like an id that never existed.
+- **Safe by construction.** Every filter and sort is checked against an allow-list (zod). What people type reaches PostgreSQL only as a query parameter, never as SQL, and the sort orders come from a fixed list. Pages stop at 50, which nobody browses but bots would make the database work for.
+- **Cached category list.** Kept in Redis for 5 minutes (browsers may keep it too, `Cache-Control`). If Redis is down it's loaded from the database instead.
+
+Demo data: `npm run db:seed` adds 15 categories, 7 stores and 63 products (62 on sale and 1 draft, which must stay hidden), with 99 variants, specifications and a few running deals. The 14 product photos from the designs are reused.
+
+Measured against Neon from a PC in the Philippines: searches and filters 0.26–0.37 s, a product page 0.22 s, the cached category list 0.10 s (the first request after starting takes about 1 s while connections open).
+
 ## If Redis (Upstash) goes down
 
 Redis commands give up after 1 second instead of waiting, and each part of the API then does what's safest for it:
 
 | Part | While Redis is down |
 |---|---|
-| Browsing, the general rate limit | Keeps working without the limit (logged) |
+| Browsing and search, the general rate limit | Keep working: no limit, and the category list loads from the database instead of the cache (both logged) |
 | `/ready` | 503 with `"redis": "error"` within ~3 seconds, so monitoring sees the real cause |
 | Sign-in, sign-up, codes, passwords | **503 `SERVICE_UNAVAILABLE`** with `Retry-After: 30`, before touching the database. Brute-force protection is never silently switched off. |
 | Already signed-in shoppers | Keep working: their pass is accepted without the sign-out check (logged) |
@@ -104,6 +126,7 @@ Measured with Redis pointed at an unreachable address: before this, every API re
 - **On your PC** the database is PGlite (Postgres inside Node): a fresh copy of the real migrations for each test file, with no internet needed. **In CI** (`TEST_DATABASE_URL`) the same tests run on a real PostgreSQL 18 server, each file in its own throwaway schema.
 - `tests/auth/outage.test.ts` and `tests/resilience.test.ts` switch the Redis stand-in off and check the table above, including a real Redis client timing out against an unreachable address.
 - `tests/openapi.test.ts` checks the contract matches the code: every route is documented (and every documented route exists), the error codes match, and no `$ref` is broken.
+- `tests/catalog/catalog.test.ts` seeds the 63 demo products and checks search (words, typos, `-excluded` words, an injection attempt), every filter with its counts, every sort, deal prices before and after the countdown, stock labels, hidden products (draft, suspended store, no variant on sale) and the category cache with Redis down.
 - `tests/db/migration.test.ts` checks that every table, index, foreign key and safety rule really exists. CI also migrates and seeds a real PostgreSQL 18 server, the same major version as Neon.
 
 ## Structure
@@ -114,15 +137,17 @@ src/
   server.ts              starts the server, wires Redis/Prisma/sign-in, shuts down gracefully
   config/env.ts          validates environment variables at startup
   lib/                   logger, Redis/Prisma clients, key-value store, password hashing, crypto helpers,
-                         email outbox, breached-password check, money helpers, error types, query parser
+                         email outbox, breached-password check, money helpers, error types, query parser,
+                         cache (fails open), delivery rules (free over ₱999)
   middleware/            security headers + CORS, rate limit, CSRF + Origin check, auth guards, request IDs, errors
   modules/health/        GET /health (alive) and GET /ready (dependencies OK)
   modules/auth/          sign-in: routes → service (rules) → tokens, lockout, one-time codes, emails
+  modules/catalog/       categories, search, product page: routes → service → search SQL + one pricing rule
   generated/prisma/      Prisma client (generated by `npm run db:generate`, not committed)
 prisma/
-  schema.prisma          the 30 tables
+  schema.prisma          the 31 tables
   migrations/            SQL applied to the database, in order
-  seed.ts                demo data
+  seed.ts, demo-data.ts  demo categories, stores, products and accounts (safe to run again)
 scripts/                 npm run secrets
 tests/                   API, database and unit tests (tests/support: test database, browser, harness)
 openapi/openapi.yaml     the API contract
@@ -148,9 +173,9 @@ openapi/openapi.yaml     the API contract
 | Confirm email after sign-up | 6-digit code, 10 minutes, required before the first sign-in. |
 | Account enumeration | Sign-up, sign-in and code endpoints answer the same whether or not the email has an account, and sign-in always runs one Argon2 check so the timing matches too. |
 | Weak passwords | At least 8 characters, and passwords found in known breaches are refused (Have I Been Pwned; only 5 characters of a hash leave the server). |
-| Rate limiting, DoS | `express-rate-limit` counts the real visitor IP behind proxies (`TRUST_PROXY_HOPS`), IPv6 grouped by /56. JSON bodies ≤ 10 KB (413 otherwise); passwords ≤ 128 characters. |
+| Rate limiting, DoS | `express-rate-limit` counts the real visitor IP behind proxies (`TRUST_PROXY_HOPS`), IPv6 grouped by /56. JSON bodies ≤ 10 KB (413 otherwise); passwords ≤ 128 characters. Search is bounded: at most 100 characters, 50 pages of 12, 24 or 48 products, and 50 query parameters; the text and typo searches use GIN indexes. |
 | Special HTTP headers | `helmet` (HSTS, nosniff, frame protection…); `X-Powered-By` removed. |
-| Parameter pollution, operator injection | Custom query parser: last value wins for repeated keys; never builds nested objects, so `?price[$gt]=0` stays plain text and `__proto__` can't pollute objects. SQL goes through Prisma (parameterized). |
+| Parameter pollution, operator injection | Custom query parser: last value wins for repeated keys, except the filters meant to repeat (`category`, `store`), which become lists of at most 10 or 20 checked slugs; never builds nested objects, so `?price[$gt]=0` stays plain text and `__proto__` can't pollute objects. SQL goes through Prisma (parameterized); the hand-written search SQL passes what people type as parameters, and its sort orders come from a fixed list. |
 | No error details to clients | One error format. Users see safe messages; stack traces go to the log under the same request ID. Logs redact cookies, passwords and tokens, and hide one-time values in URLs (e.g. Google's `code` and `state`). |
 | Evil regular expressions | Only simple, linear patterns. |
 | No secrets in git | `.env` is git-ignored; `npm run secrets` writes keys without printing them; config errors name a variable but never its value. |
