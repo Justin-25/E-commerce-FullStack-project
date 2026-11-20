@@ -16,6 +16,10 @@ import { GoogleService } from "./modules/auth/google.service.js";
 import { SecurityService } from "./modules/auth/security.service.js";
 import { catalogRouter } from "./modules/catalog/catalog.routes.js";
 import { CatalogService } from "./modules/catalog/catalog.service.js";
+import { reviewsRouter } from "./modules/reviews/reviews.routes.js";
+import { ReviewService } from "./modules/reviews/reviews.service.js";
+import { storesRouter } from "./modules/stores/stores.routes.js";
+import { StoreService } from "./modules/stores/stores.service.js";
 import { createGoogleIdentity } from "./lib/google.js";
 import { TokenService } from "./modules/auth/tokens.js";
 
@@ -44,6 +48,8 @@ if (prisma) {
   const google = new GoogleService({ prisma, kv, auth: authService, identity, email, config, logger });
   services.push(authService, security, google);
   routers.push(catalogRouter({ catalog: new CatalogService({ prisma, kv, logger }) }));
+  routers.push(reviewsRouter({ reviews: new ReviewService({ prisma }) }));
+  routers.push(storesRouter({ stores: new StoreService({ prisma }), guards }));
   routers.push(
     authRouter({
       service: authService,

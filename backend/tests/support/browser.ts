@@ -37,6 +37,14 @@ export class Browser {
     if (typeof res.body?.csrfToken === "string") this.csrfToken = res.body.csrfToken; // sign-in/out hand out a new one
     return res;
   }
+
+  put(path: string, body: object = {}) {
+    return this.agent.put(path).set(this.headers).set("X-CSRF-Token", this.csrfToken).send(body);
+  }
+
+  delete(path: string) {
+    return this.agent.delete(path).set(this.headers).set("X-CSRF-Token", this.csrfToken);
+  }
 }
 
 /** The Set-Cookie header for one cookie, e.g. "vd_rt=…; Path=/api/v1/auth; HttpOnly; SameSite=Strict". */

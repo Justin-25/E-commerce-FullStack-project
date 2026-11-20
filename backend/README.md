@@ -89,7 +89,7 @@ How it works:
 | Endpoint | What it does |
 |---|---|
 | `GET /api/v1/categories` | The category tree, with how many products each one has (cached 5 minutes) |
-| `GET /api/v1/products` | Search and browse: `q`, `category` and `store` (both repeatable), `minPrice`/`maxPrice` (centavos), `rating` (4 = "4★ & up"), `freeDelivery`, `sort`, `page`, `pageSize` |
+| `GET /api/v1/products` | Search and browse: `q`, `category` and `store` (both repeatable), `minPrice`/`maxPrice` (centavos), `rating` (4 = "4★ & up"), `freeDelivery`, `deal`, `sort`, `page`, `pageSize` |
 | `GET /api/v1/products/{id}` | Product page: variants with price, stock and deal countdown, specifications, breadcrumbs, store card, delivery and returns |
 | `GET /api/v1/products/{id}/related` | "You may also like": best sellers from the same category (up to 8) |
 
@@ -102,9 +102,31 @@ How it works:
 - **Safe by construction.** Every filter and sort is checked against an allow-list (zod). What people type reaches PostgreSQL only as a query parameter, never as SQL, and the sort orders come from a fixed list. Pages stop at 50, which nobody browses but bots would make the database work for.
 - **Cached category list.** Kept in Redis for 5 minutes (browsers may keep it too, `Cache-Control`). If Redis is down it's loaded from the database instead.
 
-Demo data: `npm run db:seed` adds 15 categories, 7 stores and 63 products (62 on sale and 1 draft, which must stay hidden), with 99 variants, specifications and a few running deals. The 14 product photos from the designs are reused.
+Demo data: `npm run db:seed` adds 15 categories, 7 stores and 63 products (62 on sale and 1 draft, which must stay hidden), with 99 variants, specifications and a few running deals, plus demo shoppers whose reviews give every rating (see below). The 14 product photos from the designs are reused.
 
 Measured against Neon from a PC in the Philippines: searches and filters 0.26–0.37 s, a product page 0.22 s, the cached category list 0.10 s (the first request after starting takes about 1 s while connections open).
+
+## Stores and reviews (milestone 4b)
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/v1/stores/{slug}` | Store page: banner, logo, "Verified seller", ★ rating, "98% positive", followers, ships from, "On Vendora since", category chips, deal count, "Ships within 24 hours", returns. Its products are the normal search with `store=` (and `deal=true` for the Deals chip). |
+| `GET /api/v1/stores/{slug}/reviews` | The store's Reviews tab: every review of its products, each naming the product |
+| `GET /api/v1/products/{id}/reviews` | A product's Reviews tab: average, "2,341 global ratings", star bars, filter by stars, newest/highest/lowest, 10 per page |
+| `GET` / `PUT` / `DELETE /api/v1/stores/{slug}/follow` | Signed in: do I follow it, follow, unfollow |
+
+How it works:
+- **Every rating comes from real reviews.** A review can only exist for an item someone bought (the database requires an order item, so every review is a "Verified purchase"). Product and store ratings are stored, because search filters and sorts by them, but they're always recomputed from the published reviews (`modules/reviews/ratings.ts`), never typed in.
+- **"98% positive"** is the share of 4★ and 5★ reviews in the last 12 months, rounded down, so 100% only shows when every review is positive. A store's rating counts all its products' reviews except products removed by moderation.
+- **"Top rated" uses a weighted rating.** Each product starts with 5 imaginary 4★ reviews, so three 5★ reviews can't outrank a 4.8 from hundreds (a Bayesian average, the usual fix). The "4★ & up" filter still uses the plain average shown on the card.
+- **"Ships within 24 hours"** is measured: 90% of the store's orders in the last 90 days shipped within that many hours (null with fewer than 5 orders).
+- **Follow can't be double counted.** The follow row is inserted only if missing, and the follower counter moves only when a row was really added, in the same transaction, so double clicks or two tabs count once. Your own store can't be followed. Unfollow always works, even for a store that's since been suspended.
+- **Public pages stay public.** The store page is the same for everyone and cacheable; "am I following?" is a separate signed-in request answered with `Cache-Control: private, no-store`, so a shared cache can never show one person's state to someone else.
+- **Privacy.** Reviewers appear as "Maria S.": never their full name, email or id.
+
+Demo reviews: the seed adds 40 demo shoppers (no password, so nobody can sign in as them) with 623 delivered orders and one review each, written to fit the product (headphones talk about battery life, serums about skin). Stars are drawn around each product's target, so the shop has the usual mix: mostly 5★ and 4★, a few 1–3★. The same products get the same reviews on every run.
+
+Measured against Neon: store page 0.21 s (about 1 s on the first request after starting), reviews 0.25 s, follow/unfollow 0.3–0.4 s.
 
 ## If Redis (Upstash) goes down
 
@@ -127,6 +149,7 @@ Measured with Redis pointed at an unreachable address: before this, every API re
 - `tests/auth/outage.test.ts` and `tests/resilience.test.ts` switch the Redis stand-in off and check the table above, including a real Redis client timing out against an unreachable address.
 - `tests/openapi.test.ts` checks the contract matches the code: every route is documented (and every documented route exists), the error codes match, and no `$ref` is broken.
 - `tests/catalog/catalog.test.ts` seeds the 63 demo products and checks search (words, typos, `-excluded` words, an injection attempt), every filter with its counts, every sort, deal prices before and after the countdown, stock labels, hidden products (draft, suspended store, no variant on sale) and the category cache with Redis down.
+- `tests/catalog/stores.test.ts` and `reviews.test.ts` check the store page against the database ("98% positive", shipping time, chips), Follow with real cookies and CSRF tokens (double clicks, four clicks at once, own store, suspended store), reviews (star bars, filters, sorts, paging, hidden and removed reviews, no personal data) and that every demo review sits on a delivered order of that product by that reviewer.
 - `tests/db/migration.test.ts` checks that every table, index, foreign key and safety rule really exists. CI also migrates and seeds a real PostgreSQL 18 server, the same major version as Neon.
 
 ## Structure
@@ -142,12 +165,15 @@ src/
   middleware/            security headers + CORS, rate limit, CSRF + Origin check, auth guards, request IDs, errors
   modules/health/        GET /health (alive) and GET /ready (dependencies OK)
   modules/auth/          sign-in: routes → service (rules) → tokens, lockout, one-time codes, emails
-  modules/catalog/       categories, search, product page: routes → service → search SQL + one pricing rule
+  modules/catalog/       categories, search, product page: routes → service → search SQL + one pricing rule + one visibility rule
+  modules/stores/        store page, follow
+  modules/reviews/       product and store reviews; ratings.ts recomputes ratings from reviews
   generated/prisma/      Prisma client (generated by `npm run db:generate`, not committed)
 prisma/
   schema.prisma          the 31 tables
   migrations/            SQL applied to the database, in order
   seed.ts, demo-data.ts  demo categories, stores, products and accounts (safe to run again)
+  demo-reviews.ts        demo shoppers, their delivered orders and reviews
 scripts/                 npm run secrets
 tests/                   API, database and unit tests (tests/support: test database, browser, harness)
 openapi/openapi.yaml     the API contract

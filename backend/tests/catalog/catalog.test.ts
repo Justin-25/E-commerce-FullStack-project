@@ -2,6 +2,7 @@ import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CATEGORIES, PRODUCTS } from "../../prisma/demo-data.js";
 import { CATEGORY_CACHE_KEY } from "../../src/modules/catalog/catalog.service.js";
+import { TOP_RATED_PRIOR } from "../../src/modules/catalog/search.js";
 import { createCatalogHarness, type CatalogHarness } from "../support/catalogHarness.js";
 
 let h: CatalogHarness;
@@ -10,7 +11,7 @@ beforeAll(async () => {
 }, 120_000);
 afterAll(() => h?.close());
 
-type Card = { slug: string; title: string; priceCentavos: number; compareAtCentavos: number | null; ratingAvg: number; soldCount: number; store: { slug: string }; freeDelivery: boolean; badges: Record<string, boolean> };
+type Card = { slug: string; title: string; priceCentavos: number; compareAtCentavos: number | null; ratingAvg: number; ratingCount: number; soldCount: number; store: { slug: string }; freeDelivery: boolean; badges: Record<string, boolean> };
 const search = (qs = "") => request(h.app).get(`/api/v1/products${qs ? `?${qs}` : ""}`);
 const slugs = (res: { body: { items: Card[] } }) => res.body.items.map((i) => i.slug);
 const visible = PRODUCTS.filter((p) => (p.status ?? "ACTIVE") === "ACTIVE");
@@ -125,8 +126,18 @@ describe("GET /products (search)", () => {
     expect(priced.body.facets.price.minCentavos).toBe(Math.min(...visible.flatMap((p) => p.variants.map((v) => v[2]))));
 
     const best = await search("rating=4&sort=top_rated&pageSize=48");
-    expect((best.body.items as Card[]).every((i) => i.ratingAvg >= 4)).toBe(true);
-    expect(best.body.items[0].ratingAvg).toBe(4.9);
+    const cards = best.body.items as Card[];
+    expect(cards.every((i) => i.ratingAvg >= 4)).toBe(true);
+    // Weighted rating: a few perfect reviews don't beat a long track record.
+    const weighted = (c: Card) => (c.ratingAvg * c.ratingCount + TOP_RATED_PRIOR.stars * TOP_RATED_PRIOR.reviews) / (c.ratingCount + TOP_RATED_PRIOR.reviews);
+    for (let i = 1; i < cards.length; i++) expect(weighted(cards[i - 1] as Card)).toBeGreaterThanOrEqual(weighted(cards[i] as Card) - 1e-9);
+    // Checked without the code's constant: a perfect 5.0 from a handful of reviews ranks
+    // below a 4.7–4.99 with a long track record (the plain average would put it on top).
+    const fewPerfect = cards.filter((c) => c.ratingAvg === 5 && c.ratingCount <= 5);
+    const proven = cards.findIndex((c) => c.ratingAvg >= 4.7 && c.ratingAvg < 5 && c.ratingCount >= 15);
+    expect(fewPerfect.length).toBeGreaterThan(0);
+    expect(proven).toBeGreaterThanOrEqual(0);
+    for (const c of fewPerfect) expect(cards.indexOf(c), c.slug).toBeGreaterThan(proven);
 
     const free = await search("freeDelivery=true&pageSize=48");
     expect((free.body.items as Card[]).every((i) => i.freeDelivery && i.priceCentavos >= 99_900)).toBe(true);
@@ -182,12 +193,20 @@ describe("GET /products/:id (product page)", () => {
     expect(p).toMatchObject({
       slug: "aurasound-pro",
       breadcrumbs: [{ slug: "electronics", name: "Electronics" }, { slug: "headphones", name: "Headphones" }],
-      store: { slug: "soundcraft-audio", name: "SoundCraft Audio", verified: true, shipsFrom: "Manila", ratingAvg: 4.9 },
+      store: { slug: "soundcraft-audio", name: "SoundCraft Audio", verified: true, shipsFrom: "Manila" },
       price: { fromCentavos: 749_900, compareAtCentavos: 999_900, savingsPercent: 25 },
-      rating: { avg: 4.8, count: 2341 },
       delivery: { qualifiesForFreeDelivery: true, freeThresholdCentavos: 99_900 },
       returns: { days: 30 }
     });
+    // Ratings are computed from the demo reviews, so compare with the database, not typed-in numbers.
+    const [own, store] = await Promise.all([
+      h.db.prisma.product.findFirstOrThrow({ where: { slug: "aurasound-pro" }, select: { ratingAvg: true, ratingCount: true } }),
+      h.db.prisma.store.findUniqueOrThrow({ where: { slug: "soundcraft-audio" }, select: { ratingAvg: true, ratingCount: true } })
+    ]);
+    expect(own.ratingCount).toBeGreaterThan(0);
+    expect(p.rating).toEqual({ avg: Number(own.ratingAvg), count: own.ratingCount });
+    expect(p.store).toMatchObject({ ratingAvg: Number(store.ratingAvg), ratingCount: store.ratingCount });
+    expect(p.store.positivePercent).toEqual(expect.any(Number));
     expect(p.specs).toContainEqual({ label: "Battery life", value: "30 hours (ANC on)" });
     expect(p.variants.map((v: { name: string; stock: { status: string } }) => [v.name, v.stock.status])).toEqual([
       ["Midnight Black", "in_stock"],

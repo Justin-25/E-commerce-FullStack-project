@@ -18,6 +18,10 @@ import type { GoogleService } from "../src/modules/auth/google.service.js";
 import type { SecurityService } from "../src/modules/auth/security.service.js";
 import { catalogRouter } from "../src/modules/catalog/catalog.routes.js";
 import type { CatalogService } from "../src/modules/catalog/catalog.service.js";
+import { reviewsRouter } from "../src/modules/reviews/reviews.routes.js";
+import type { ReviewService } from "../src/modules/reviews/reviews.service.js";
+import { storesRouter } from "../src/modules/stores/stores.routes.js";
+import type { StoreService } from "../src/modules/stores/stores.service.js";
 import { TokenService } from "../src/modules/auth/tokens.js";
 import { testConfig } from "./helpers.js";
 
@@ -41,7 +45,7 @@ function documented(prefix: string): string[] {
 }
 
 describe("openapi.yaml", () => {
-  it("documents exactly the /api/v1 routes the code has (sign-in, catalog…)", () => {
+  it("documents exactly the /api/v1 routes the code has (sign-in, catalog, stores, reviews…)", () => {
     const config = testConfig();
     const tokens = new TokenService(config);
     const auth = authRouter({
@@ -53,8 +57,14 @@ describe("openapi.yaml", () => {
       guards: createAuthGuards({ tokens, kv: new MemoryKv() }),
       config
     });
-    const catalog = catalogRouter({ catalog: {} as CatalogService });
-    const inCode = [...routesOf(auth, "/api/v1"), ...routesOf(catalog, "/api/v1")];
+    const guards = createAuthGuards({ tokens, kv: new MemoryKv() });
+    const routers = [
+      auth,
+      catalogRouter({ catalog: {} as CatalogService }),
+      reviewsRouter({ reviews: {} as ReviewService }),
+      storesRouter({ stores: {} as StoreService, guards })
+    ];
+    const inCode = routers.flatMap((r) => routesOf(r, "/api/v1"));
     expect(documented("/api/v1/").sort()).toEqual(inCode.sort());
   });
 

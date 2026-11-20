@@ -1,4 +1,8 @@
 import { Router, type Express } from "express";
+import type { PrismaClient } from "../../src/generated/prisma/client.js";
+import type { KeyValueStore } from "../../src/lib/kv.js";
+import type { Logger } from "../../src/lib/logger.js";
+import type { AuthGuards } from "../../src/middleware/auth.js";
 import { Secret, TOTP } from "otpauth";
 import { pino } from "pino";
 import { expect } from "vitest";
@@ -62,7 +66,12 @@ export const BREACHED_PASSWORDS = ["password123", "iloveyou2024"];
  * move forward and a switch to make it "go down"), an email outbox we can read,
  * an offline breach checker, and captured warning/error logs.
  */
-export async function createAuthHarness(env: Record<string, string> = {}) {
+export interface HarnessOptions {
+  /** More routers on the same app (e.g. the catalog), sharing its database, Redis stand-in and sign-in guards. */
+  routers?: (deps: { prisma: PrismaClient; kv: KeyValueStore; guards: AuthGuards; logger: Logger }) => Router[];
+}
+
+export async function createAuthHarness(env: Record<string, string> = {}, options: HarnessOptions = {}) {
   const db: TestDb = await createTestDb();
   const clock = { offsetMs: 0 };
   const redis: RedisSwitch = { down: false };
@@ -91,7 +100,8 @@ export async function createAuthHarness(env: Record<string, string> = {}) {
     const security = new SecurityService({ prisma: db.prisma, kv, email: outbox, config, logger });
     const google = new GoogleService({ prisma: db.prisma, kv, auth: service, identity: fakeGoogle, email: outbox, config, logger });
     const auth = authRouter({ service, security, google, tokens, csrf, guards, config, logger, rateLimitStore: new FlakyStore(redis) });
-    return createApp({ config, logger: silentLogger, csrf, routers: [auth, testRoutes] });
+    const extra = options.routers?.({ prisma: db.prisma, kv, guards, logger }) ?? [];
+    return createApp({ config, logger: silentLogger, csrf, routers: [auth, testRoutes, ...extra] });
   };
 
   const app = build();

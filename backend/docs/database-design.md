@@ -253,6 +253,9 @@ erDiagram
   - Prisma can't describe generated columns, so the schema marks `searchVector` as `Unsupported("tsvector")` and the SQL is hand-written in the migration.
 - **Specifications** (`specs`, JSONB): `[{ "label": "Battery life", "value": "30 hours" }]`. They're only shown, never filtered on, so a JSON list beats a separate table. CHECK: it's a list of at most 30.
 - **Deal countdown** (`saleEndsAt`): after it, the variant sells at `compareAtCentavos` again, worked out when the price is read (TypeScript and SQL share one rule), so no job has to end deals. CHECK: a countdown needs a regular price to go back to.
+- **Ratings** (milestone 4b): `ratingAvg`/`ratingCount` on products and stores are stored, because search filters and sorts by them, but never typed in. `recomputeRatings()` (`src/modules/reviews/ratings.ts`) rebuilds them from the PUBLISHED reviews whenever reviews change: the seed now, writing a review in milestone 5, hiding one or removing a product in milestone 7. A store counts all its products' reviews except products removed by moderation. "98% positive" (4–5★ in the last 12 months) is computed when read.
+- **Follows**: `store_follows` has one row per shopper and store (primary key), and `stores.followerCount` is a counter kept in step in the same transaction. The counter moves only when a row was really inserted or deleted, so double clicks can't inflate it. The demo stores start from a demo number.
+- **Demo reviews** are real rows: 40 demo shoppers with delivered orders (`orders` → `seller_orders` → `order_items`), each review linked to its order item. The seed replaces only those shoppers' orders and reviews.
 
 ## 4 · Cart, orders & payments
 

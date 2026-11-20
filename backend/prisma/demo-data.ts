@@ -1,10 +1,12 @@
 /**
  * Demo catalog matching the Figma designs: 15 categories, 7 approved stores and
- * 63 products (62 on sale + 1 draft) reusing the 14 product photos.
+ * 63 products (62 on sale + 1 draft) reusing the 14 product photos, plus demo
+ * shoppers whose delivered orders and reviews give every rating (see demo-reviews.ts).
  * Used by `npm run db:seed` AND by the tests, so tests run on the real demo data.
  * Safe to run again: everything is upserted by email / slug / SKU.
  */
 import type { PrismaClient } from "../src/generated/prisma/client.js";
+import { seedDemoReviews } from "./demo-reviews.js";
 
 export const CATEGORIES: [slug: string, name: string, parent?: string][] = [
   ["electronics", "Electronics"], ["headphones", "Headphones", "electronics"], ["speakers", "Speakers", "electronics"], ["wearables", "Wearables", "electronics"],
@@ -16,26 +18,30 @@ export const CATEGORIES: [slug: string, name: string, parent?: string][] = [
 ];
 
 export const STORES = [
-  { slug: "soundcraft-audio", name: "SoundCraft Audio", email: "soundcraft@example.com", shipsFrom: "Manila", rating: 4.9, ratings: 12_841, followers: 12_400, about: "Headphones and speakers tuned in Manila since 2019." },
-  { slug: "nova-wearables", name: "Nova Wearables", email: "nova@example.com", shipsFrom: "Pasig City", rating: 4.6, ratings: 3_120, followers: 4_100, about: "Smartwatches and trackers for the whole family." },
-  { slug: "peak-outdoors", name: "Peak Outdoors", email: "peak@example.com", shipsFrom: "Quezon City", rating: 4.8, ratings: 8_930, followers: 9_800, about: "Gear for runners, hikers and weekend athletes." },
-  { slug: "hearth-home", name: "Hearth & Home", email: "hearth@example.com", shipsFrom: "Makati City", rating: 4.9, ratings: 5_210, followers: 6_300, about: "Handmade lamps and coffee gear from Filipino makers." },
-  { slug: "glow-lab", name: "Glow Lab", email: "glowlab@example.com", shipsFrom: "Taguig City", rating: 4.8, ratings: 15_400, followers: 21_000, about: "Skincare and fragrance made for humid weather." },
-  { slug: "northbound-goods", name: "Northbound Goods", email: "northbound@example.com", shipsFrom: "Cebu City", rating: 4.8, ratings: 2_870, followers: 3_500, about: "Leather and canvas bags built to last." },
-  { slug: "sol-co", name: "Sol & Co.", email: "solco@example.com", shipsFrom: "Davao City", rating: 4.6, ratings: 4_380, followers: 5_200, about: "Sunglasses, sneakers and summer essentials." }
+  { slug: "soundcraft-audio", name: "SoundCraft Audio", email: "soundcraft@example.com", shipsFrom: "Manila", followers: 12_400, about: "Headphones and speakers tuned in Manila since 2019." },
+  { slug: "nova-wearables", name: "Nova Wearables", email: "nova@example.com", shipsFrom: "Pasig City", followers: 4_100, about: "Smartwatches and trackers for the whole family." },
+  { slug: "peak-outdoors", name: "Peak Outdoors", email: "peak@example.com", shipsFrom: "Quezon City", followers: 9_800, about: "Gear for runners, hikers and weekend athletes." },
+  { slug: "hearth-home", name: "Hearth & Home", email: "hearth@example.com", shipsFrom: "Makati City", followers: 6_300, about: "Handmade lamps and coffee gear from Filipino makers." },
+  { slug: "glow-lab", name: "Glow Lab", email: "glowlab@example.com", shipsFrom: "Taguig City", followers: 21_000, about: "Skincare and fragrance made for humid weather." },
+  { slug: "northbound-goods", name: "Northbound Goods", email: "northbound@example.com", shipsFrom: "Cebu City", followers: 3_500, about: "Leather and canvas bags built to last." },
+  { slug: "sol-co", name: "Sol & Co.", email: "solco@example.com", shipsFrom: "Davao City", followers: 5_200, about: "Sunglasses, sneakers and summer essentials." }
 ];
 
 /** [sku, name, priceCentavos, compareAtCentavos, stock, dealEndsInHours] */
 type V = [sku: string, name: string, price: number, compareAt: number | null, stock: number, dealHours?: number];
 
-interface DemoProduct {
+export interface DemoProduct {
   store: string;
   category: string;
   slug: string;
   title: string;
   image: string;
   sold: number;
-  rating: [avg: number, count: number];
+  /**
+   * What the generated reviews aim for: about this average, and more reviews for a
+   * bigger popularity number. The stored rating is then COMPUTED from the reviews.
+   */
+  rating: [targetAvg: number, popularity: number];
   /** Published this many days ago ("New" badge under 30). */
   days: number;
   description: string;
@@ -340,11 +346,13 @@ export async function seedDemoData(prisma: PrismaClient, now = new Date()) {
   const storeIds = new Map<string, string>();
   for (const s of STORES) {
     const owner = await prisma.user.upsert({ where: { email: s.email }, update: {}, create: { email: s.email, name: s.name, role: "SELLER", emailVerifiedAt: now } });
-    const data = { name: s.name, description: s.about, shipsFrom: s.shipsFrom, ratingAvg: s.rating, ratingCount: s.ratings, followerCount: s.followers };
+    // followerCount is a demo counter (no screen lists followers); ratings are computed from reviews below.
+    // approvedAt is reset too, so a store is always older than its products and their reviews.
+    const data = { name: s.name, description: s.about, shipsFrom: s.shipsFrom, followerCount: s.followers, approvedAt: new Date(now.getTime() - 400 * DAY) };
     const store = await prisma.store.upsert({
       where: { slug: s.slug },
       update: data,
-      create: { ...data, slug: s.slug, ownerId: owner.id, businessType: "REGISTERED_BUSINESS", status: "APPROVED", approvedAt: new Date(now.getTime() - 400 * DAY) }
+      create: { ...data, slug: s.slug, ownerId: owner.id, businessType: "REGISTERED_BUSINESS", status: "APPROVED" }
     });
     storeIds.set(s.slug, store.id);
   }
@@ -359,8 +367,6 @@ export async function seedDemoData(prisma: PrismaClient, now = new Date()) {
       categoryId,
       status: p.status ?? "ACTIVE",
       soldCount: p.sold,
-      ratingAvg: p.rating[0],
-      ratingCount: p.rating[1],
       specs: p.specs.map(([label, value]) => ({ label, value })),
       publishedAt: p.status === "DRAFT" ? null : new Date(now.getTime() - p.days * DAY)
     };
@@ -382,4 +388,6 @@ export async function seedDemoData(prisma: PrismaClient, now = new Date()) {
     update: {},
     create: { email: "maria.santos@example.com", name: "Maria Santos", phone: "+639175550142", emailVerifiedAt: now }
   });
+
+  return seedDemoReviews(prisma, PRODUCTS, now);
 }

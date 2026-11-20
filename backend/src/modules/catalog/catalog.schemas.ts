@@ -20,6 +20,7 @@ export const searchQuerySchema = z
     maxPrice: centavos.optional(),
     rating: z.coerce.number().int().min(1).max(4).optional(), // "4★ & up"
     freeDelivery: z.enum(["true", "false"]).optional().transform((v) => v === "true"),
+    deal: z.enum(["true", "false"]).optional().transform((v) => v === "true"), // the store page's "Deals" chip, "See all deals"
     sort: z.enum(SORTS).default("featured"),
     page: z.coerce.number().int().min(1).max(MAX_PAGE, { error: `Only the first ${MAX_PAGE} pages are available` }).default(1),
     pageSize: z.coerce

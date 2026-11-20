@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.3.0
+  version: 0.4.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -39,6 +39,10 @@ tags:
     description: Google sign-in (milestone 3e)
   - name: catalog
     description: What shoppers browse, public (milestone 4a)
+  - name: stores
+    description: Store pages and following stores (milestone 4b)
+  - name: reviews
+    description: Reading product and store reviews (milestone 4b)
 
 paths:
   /health:
@@ -946,7 +950,8 @@ paths:
         - { name: maxPrice, in: query, description: Centavos., schema: { type: integer, minimum: 0 } }
         - { name: rating, in: query, description: '"4★ & up"', schema: { type: integer, minimum: 1, maximum: 4 } }
         - { name: freeDelivery, in: query, description: Only products that reach the free-delivery minimum (₱999) on their own., schema: { type: string, enum: ["true", "false"] } }
-        - { name: sort, in: query, schema: { type: string, enum: [featured, best_selling, newest, price_asc, price_desc, top_rated], default: featured } }
+        - { name: deal, in: query, description: "Only products on a deal (a crossed-out price that has not ended); the store page's Deals chip.", schema: { type: string, enum: ["true", "false"] } }
+        - { name: sort, in: query, description: "top_rated uses a weighted rating (5 imaginary 4-star reviews added), so a few 5-star reviews do not outrank hundreds of good ones.", schema: { type: string, enum: [featured, best_selling, newest, price_asc, price_desc, top_rated], default: featured } }
         - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 1 } }
         - { name: pageSize, in: query, schema: { type: integer, enum: [12, 24, 48], default: 24 } }
       responses:
@@ -990,6 +995,127 @@ paths:
             application/json:
               schema: { type: object, required: [products], properties: { products: { type: array, maxItems: 8, items: { $ref: "#/components/schemas/ProductCard" } } } }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/products/{id}/reviews:
+    get:
+      summary: A product's reviews (Reviews tab)
+      description: |
+        Every review is a verified purchase (it must be linked to a bought item). The summary always
+        describes all published reviews (the star bars); `rating` filters the list only. Reviewers
+        appear as first name + initial. 404 whenever the product page itself would be.
+      operationId: listProductReviews
+      tags: [reviews]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ReviewRating"
+        - $ref: "#/components/parameters/ReviewSort"
+        - $ref: "#/components/parameters/ReviewPage"
+      responses:
+        "200":
+          description: The rating summary and one page of reviews (10 per page).
+          headers:
+            Cache-Control: { schema: { type: string, example: "public, max-age=60" } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/stores/{slug}:
+    get:
+      summary: The store page (header, About, category chips)
+      description: |
+        Approved stores only. The product grid is the normal search with `store=<slug>` (and `deal=true`
+        for the "Deals" chip). The page is the same for everyone and cacheable; whether the signed-in
+        shopper follows the store comes from `GET /stores/{slug}/follow`.
+      operationId: getStore
+      tags: [stores]
+      parameters:
+        - $ref: "#/components/parameters/StoreSlug"
+      responses:
+        "200":
+          description: Everything the store page header and About tab show.
+          headers:
+            Cache-Control: { schema: { type: string, example: "public, max-age=60" } }
+          content:
+            application/json:
+              schema: { type: object, required: [store], properties: { store: { $ref: "#/components/schemas/StorePage" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/stores/{slug}/reviews:
+    get:
+      summary: A store's reviews (store Reviews tab)
+      description: |
+        Reviews of all the store's products except products removed by moderation, the same set as the
+        store's rating. Each review names its product; `product.available` is false when that product's
+        page can't be opened any more (e.g. the seller stopped selling it).
+      operationId: listStoreReviews
+      tags: [reviews]
+      parameters:
+        - $ref: "#/components/parameters/StoreSlug"
+        - $ref: "#/components/parameters/ReviewRating"
+        - $ref: "#/components/parameters/ReviewSort"
+        - $ref: "#/components/parameters/ReviewPage"
+      responses:
+        "200":
+          description: The rating summary and one page of reviews (10 per page).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/stores/{slug}/follow:
+    get:
+      summary: Do I follow this store?
+      operationId: getFollowState
+      tags: [stores]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/StoreSlug"
+      responses:
+        "200":
+          description: Follow state for the signed-in shopper (never cached).
+          content: { application/json: { schema: { $ref: "#/components/schemas/FollowState" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      summary: Follow a store
+      description: Idempotent. Following twice, or several clicks at once, counts the shopper once.
+      operationId: followStore
+      tags: [stores]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/StoreSlug"
+      responses:
+        "200":
+          description: Now following.
+          content: { application/json: { schema: { $ref: "#/components/schemas/FollowState" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT. It's your own store.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    delete:
+      summary: Unfollow a store
+      description: Idempotent. Works even if the store is no longer approved, so nobody gets stuck following it.
+      operationId: unfollowStore
+      tags: [stores]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/StoreSlug"
+      responses:
+        "200":
+          description: Not following.
+          content: { application/json: { schema: { $ref: "#/components/schemas/FollowState" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/auth/me:
@@ -1358,6 +1484,7 @@ components:
             logoUrl: { type: [string, "null"] }
             ratingAvg: { type: number }
             ratingCount: { type: integer }
+            positivePercent: { type: [integer, "null"], example: 98, description: Share of 4★ and 5★ reviews in the last 12 months. }
             followerCount: { type: integer }
             shipsFrom: { type: [string, "null"] }
             verified: { type: boolean }
@@ -1405,6 +1532,82 @@ components:
             expressDays: { type: object, properties: { min: { type: integer }, max: { type: integer } } }
         returns: { type: object, properties: { days: { type: integer, example: 30 } } }
 
+    RatingSummary:
+      type: object
+      required: [avg, count, stars]
+      properties:
+        avg: { type: number, example: 4.62, description: Same rounding as the stored rating on the product or store. }
+        count: { type: integer, example: 89 }
+        stars:
+          type: array
+          description: 5★ down to 1★, for the "5 star ███ 72%" bars.
+          items:
+            type: object
+            required: [stars, count, percent]
+            properties:
+              stars: { type: integer, minimum: 1, maximum: 5 }
+              count: { type: integer }
+              percent: { type: integer, example: 72 }
+    Review:
+      type: object
+      required: [id, rating, title, body, author, variantName, verifiedPurchase, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        rating: { type: integer, minimum: 1, maximum: 5 }
+        title: { type: [string, "null"] }
+        body: { type: [string, "null"] }
+        author: { type: string, example: Maria S., description: First name and initial only. }
+        variantName: { type: string, example: Midnight Black, description: The variant that was bought. }
+        verifiedPurchase: { type: boolean, const: true }
+        createdAt: { type: string, format: date-time }
+        product:
+          type: object
+          description: Store reviews only.
+          required: [id, title, available]
+          properties:
+            id: { type: string, format: uuid }
+            title: { type: string }
+            available: { type: boolean, description: Whether the product page can still be opened. }
+    ReviewList:
+      type: object
+      required: [summary, items, page, pageSize, totalItems, totalPages]
+      properties:
+        summary: { $ref: "#/components/schemas/RatingSummary" }
+        items: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/Review" } }
+        page: { type: integer }
+        pageSize: { type: integer, const: 10 }
+        totalItems: { type: integer, description: Reviews matching the star filter (all of them without one). }
+        totalPages: { type: integer, maximum: 50 }
+    StorePage:
+      type: object
+      required: [id, slug, name, description, logoUrl, bannerUrl, shipsFrom, verified, sellingSince, rating, positivePercent, followerCount, productCount, dealCount, categories, shipsWithinHours, returns]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string, example: soundcraft-audio }
+        name: { type: string, example: SoundCraft Audio }
+        description: { type: [string, "null"] }
+        logoUrl: { type: [string, "null"] }
+        bannerUrl: { type: [string, "null"] }
+        shipsFrom: { type: [string, "null"], example: Manila }
+        verified: { type: boolean, description: Every store passes document review before it can sell. }
+        sellingSince: { type: integer, example: 2025, description: '"On Vendora since 2025"' }
+        rating: { type: object, required: [avg, count], properties: { avg: { type: number }, count: { type: integer } } }
+        positivePercent: { type: [integer, "null"], example: 98, description: Share of 4★ and 5★ reviews in the last 12 months, rounded down; null without recent reviews. }
+        followerCount: { type: integer, example: 12400 }
+        productCount: { type: integer }
+        dealCount: { type: integer, description: Products on a deal (the "Deals" chip). }
+        categories:
+          type: array
+          description: The category chips, biggest first.
+          items: { type: object, required: [slug, name, count], properties: { slug: { type: string }, name: { type: string }, count: { type: integer } } }
+        shipsWithinHours: { type: [integer, "null"], example: 19, description: "90% of the last 90 days' orders shipped within this many hours; null with fewer than 5 orders." }
+        returns: { type: object, properties: { days: { type: integer, example: 30 } } }
+    FollowState:
+      type: object
+      required: [following, followerCount]
+      properties:
+        following: { type: boolean }
+        followerCount: { type: integer }
     RegisterRequest:
       type: object
       required: [name, email, password]
@@ -1463,6 +1666,12 @@ components:
         email: { type: string, format: email }
         codeExpiresInSeconds: { type: integer, example: 600 }
 
+  parameters:
+    StoreSlug: { name: slug, in: path, required: true, schema: { type: string, pattern: "^[a-z0-9-]{1,80}$" }, example: soundcraft-audio }
+    ReviewRating: { name: rating, in: query, description: Only reviews with this many stars (clicking a bar)., schema: { type: integer, minimum: 1, maximum: 5 } }
+    ReviewSort: { name: sort, in: query, schema: { type: string, enum: [newest, highest, lowest], default: newest } }
+    ReviewPage: { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 1 } }
+
   responses:
     SignedIn:
       description: Signed in. Sets the `vd_at` and `vd_rt` cookies (httpOnly) and returns a new CSRF token.
@@ -1487,6 +1696,9 @@ components:
             oneOf:
               - { $ref: "#/components/schemas/SignedIn" }
               - { $ref: "#/components/schemas/TwoFactorStep" }
+    Unauthorized:
+      description: UNAUTHORIZED. Not signed in (or the access pass expired; refresh and retry).
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     CsrfInvalid:
       description: CSRF_INVALID. Missing or wrong X-CSRF-Token, or the request came from another website.
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }

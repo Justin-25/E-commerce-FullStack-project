@@ -40,6 +40,13 @@ const FROM = Prisma.sql`
     LIMIT 1
   ) cheapest ON true`;
 
+/**
+ * "Top rated" ranks by a WEIGHTED rating: every product starts with 5 imaginary 4★ reviews,
+ * so three 5★ reviews can't outrank a 4.8 from hundreds (a Bayesian average, the usual fix).
+ * The "4★ & up" filter still uses the plain average shown on the card.
+ */
+export const TOP_RATED_PRIOR = { stars: 4, reviews: 5 } as const;
+
 const SORT_SQL: Record<SearchQuery["sort"], (hasText: boolean) => Prisma.Sql> = {
   featured: (hasText) =>
     hasText ? Prisma.raw(`rank DESC, p."soldCount" DESC`) : Prisma.raw(`p."soldCount" DESC, p."ratingAvg" DESC, p."publishedAt" DESC NULLS LAST`),
@@ -47,11 +54,14 @@ const SORT_SQL: Record<SearchQuery["sort"], (hasText: boolean) => Prisma.Sql> = 
   newest: () => Prisma.raw(`p."publishedAt" DESC NULLS LAST`),
   price_asc: () => Prisma.raw(`cheapest.price ASC`),
   price_desc: () => Prisma.raw(`cheapest.price DESC`),
-  top_rated: () => Prisma.raw(`p."ratingAvg" DESC, p."ratingCount" DESC`)
+  top_rated: () =>
+    Prisma.raw(
+      `(p."ratingAvg" * p."ratingCount" + ${TOP_RATED_PRIOR.stars * TOP_RATED_PRIOR.reviews}) / (p."ratingCount" + ${TOP_RATED_PRIOR.reviews}) DESC, p."ratingCount" DESC`
+    )
 };
 
 /** The filters that facets are counted without (disjunctive faceting). */
-type FilterKey = "category" | "store" | "price" | "rating" | "delivery";
+type FilterKey = "category" | "store" | "price" | "rating" | "delivery" | "deal";
 
 export interface SearchFilters {
   text?: string | undefined;
@@ -62,6 +72,8 @@ export interface SearchFilters {
   maxPrice?: number | undefined;
   rating?: number | undefined;
   freeDelivery: boolean;
+  /** Only products on a deal (a crossed-out price that hasn't ended), like the cards' "Deal" badge. */
+  deal?: boolean | undefined;
 }
 
 export function buildSearch(f: SearchFilters, mode: MatchMode = "words") {
@@ -85,7 +97,8 @@ export function buildSearch(f: SearchFilters, mode: MatchMode = "words") {
         ? Prisma.sql`cheapest.price BETWEEN ${f.minPrice ?? 0} AND ${f.maxPrice ?? 2_147_483_647}`
         : null,
     rating: f.rating !== undefined ? Prisma.sql`p."ratingAvg" >= ${f.rating}` : null,
-    delivery: f.freeDelivery ? Prisma.sql`cheapest.price >= ${DELIVERY.freeThresholdCentavos}` : null
+    delivery: f.freeDelivery ? Prisma.sql`cheapest.price >= ${DELIVERY.freeThresholdCentavos}` : null,
+    deal: f.deal ? Prisma.sql`cheapest.compare_at IS NOT NULL` : null
   };
 
   /** WHERE with every filter, or every filter except one (for that filter's own facet counts). */

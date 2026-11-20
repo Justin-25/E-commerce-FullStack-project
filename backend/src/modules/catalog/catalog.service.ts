@@ -4,9 +4,11 @@ import { DELIVERY } from "../../lib/delivery.js";
 import { AppError } from "../../lib/errors.js";
 import type { KeyValueStore } from "../../lib/kv.js";
 import type { Logger } from "../../lib/logger.js";
+import { storePositivePercent } from "../reviews/ratings.js";
 import type { SearchQuery } from "./catalog.schemas.js";
 import { variantPricing } from "./pricing.js";
 import { buildSearch, VISIBLE_COUNTS_BY_CATEGORY, type MatchMode, type SearchRow } from "./search.js";
+import { visibleProduct } from "./visibility.js";
 
 export const CATEGORY_CACHE_KEY = "catalog:categories:v1";
 const CATEGORY_CACHE_SECONDS = 5 * 60;
@@ -98,7 +100,8 @@ export class CatalogService {
       minPrice: query.minPrice,
       maxPrice: query.maxPrice,
       rating: query.rating,
-      freeDelivery: query.freeDelivery
+      freeDelivery: query.freeDelivery,
+      deal: query.deal
     };
     // Precise word search first. Only if that finds nothing, fall back to similar spellings
     // (typos), so fuzzy matches never pollute good results or undo "-excluded" words.
@@ -142,7 +145,7 @@ export class CatalogService {
   /** The product page. 404 unless visible (active product, approved store, something on sale). */
   async product(id: string) {
     const p = await this.deps.prisma.product.findFirst({
-      where: { id, status: "ACTIVE", store: { status: "APPROVED" } },
+      where: visibleProduct(id),
       include: {
         store: true,
         category: { include: { parent: true } },
@@ -153,6 +156,7 @@ export class CatalogService {
     if (!p || p.variants.length === 0) throw notFound();
 
     const now = this.now();
+    const positivePercent = await storePositivePercent(this.deps.prisma, p.store.id, now);
     const variants = p.variants.map((v) => {
       const pricing = variantPricing(v, now);
       return {
@@ -182,6 +186,7 @@ export class CatalogService {
         logoUrl: p.store.logoUrl,
         ratingAvg: Number(p.store.ratingAvg),
         ratingCount: p.store.ratingCount,
+        positivePercent,
         followerCount: p.store.followerCount,
         shipsFrom: p.store.shipsFrom,
         verified: true, // every store passes document review before it can sell
@@ -213,12 +218,13 @@ export class CatalogService {
 
   /** "Related products": best sellers from the same category, without this product. */
   async related(id: string): Promise<ProductCard[]> {
-    const product = await this.deps.prisma.product.findFirst({ where: { id, status: "ACTIVE", store: { status: "APPROVED" } }, include: { category: true } });
+    const product = await this.deps.prisma.product.findFirst({ where: visibleProduct(id), include: { category: true } });
     if (!product) throw notFound();
     const result = await this.search({
       category: [product.category.slug],
       store: [],
       freeDelivery: false,
+      deal: false,
       sort: "best_selling",
       page: 1,
       pageSize: 12
