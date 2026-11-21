@@ -16,10 +16,14 @@ import { GoogleService } from "./modules/auth/google.service.js";
 import { SecurityService } from "./modules/auth/security.service.js";
 import { catalogRouter } from "./modules/catalog/catalog.routes.js";
 import { CatalogService } from "./modules/catalog/catalog.service.js";
+import { homeRouter } from "./modules/home/home.routes.js";
+import { HomeService } from "./modules/home/home.service.js";
 import { reviewsRouter } from "./modules/reviews/reviews.routes.js";
 import { ReviewService } from "./modules/reviews/reviews.service.js";
 import { storesRouter } from "./modules/stores/stores.routes.js";
 import { StoreService } from "./modules/stores/stores.service.js";
+import { wishlistRouter } from "./modules/wishlist/wishlist.routes.js";
+import { WishlistService } from "./modules/wishlist/wishlist.service.js";
 import { createGoogleIdentity } from "./lib/google.js";
 import { TokenService } from "./modules/auth/tokens.js";
 
@@ -47,7 +51,10 @@ if (prisma) {
   if (!identity) logger.info("GOOGLE_CLIENT_ID is not set — 'Continue with Google' is off");
   const google = new GoogleService({ prisma, kv, auth: authService, identity, email, config, logger });
   services.push(authService, security, google);
-  routers.push(catalogRouter({ catalog: new CatalogService({ prisma, kv, logger }) }));
+  const catalog = new CatalogService({ prisma, kv, logger });
+  routers.push(catalogRouter({ catalog }));
+  routers.push(homeRouter({ home: new HomeService({ prisma, kv, catalog, logger }) }));
+  routers.push(wishlistRouter({ wishlist: new WishlistService({ prisma, catalog }), guards }));
   routers.push(reviewsRouter({ reviews: new ReviewService({ prisma }) }));
   routers.push(storesRouter({ stores: new StoreService({ prisma }), guards }));
   routers.push(

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { publicCache } from "../../lib/httpCache.js";
-import { productIdSchema, searchQuerySchema } from "./catalog.schemas.js";
+import { cardsQuerySchema, productIdSchema, searchQuerySchema } from "./catalog.schemas.js";
 import type { CatalogService } from "./catalog.service.js";
 
 /** Public catalog: no sign-in, same answer for everyone, so browsers and CDNs may keep it briefly. */
@@ -16,6 +16,13 @@ export function catalogRouter({ catalog }: { catalog: CatalogService }): Router 
     const result = await catalog.search(searchQuerySchema.parse(req.query));
     publicCache(res);
     res.json(result);
+  });
+
+  // Before "/products/:id", or Express would read "cards" as a product id.
+  router.get("/products/cards", async (req, res) => {
+    const products = await catalog.cardsByIds(cardsQuerySchema.parse(req.query).ids);
+    publicCache(res);
+    res.json({ products });
   });
 
   router.get("/products/:id", async (req, res) => {

@@ -128,13 +128,35 @@ Demo reviews: the seed adds 40 demo shoppers (no password, so nobody can sign in
 
 Measured against Neon: store page 0.21 s (about 1 s on the first request after starting), reviews 0.25 s, follow/unfollow 0.3–0.4 s.
 
+## Home and wishlist (milestone 4c)
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/v1/home` | Home's data sections: Shop by category, Today's deals (one "Ends in" countdown), Best sellers, Top-rated stores. The same for everyone, cached for a minute. |
+| `GET /api/v1/products/cards?ids=…` | "Recently viewed": up to 20 product cards in the order given (the browser remembers what was viewed) |
+| `GET /api/v1/wishlist` | Signed in: saved products, newest first, with price drops and the "Price drop on 2 saved items · Deals end in 08h 42m" banner |
+| `GET /api/v1/wishlist/ids` | Signed in: which products are saved, to fill the hearts on cards |
+| `PUT` / `DELETE /api/v1/wishlist/{id}` | Signed in: save (the heart) / remove |
+
+How it works:
+- **One Home answer for everyone.** Home is the busiest page, so its sections are built once, cached in Redis for 60 seconds and marked cacheable for browsers. Prices there can be a minute old; checkout always re-reads them. If Redis is down it's simply built each time. The hero, trust strip, AI band and "Start selling" card are fixed text in the frontend.
+- **Today's deals** are deals with a running countdown, soonest first; the section's "Ends in" is the soonest. Deals without a countdown show under "See all deals" (`/products?deal=true`).
+- **Best sellers** rank by total sold ("Most-loved across Vendora"); "this week" needs real orders, so it comes after checkout (milestone 5).
+- **Top-rated stores** use the same weighted rating as "Top rated" products, so one 5★ review can't put a store on top. Each shows its real "% positive" and the top-level category most of its products are in.
+- **A price drop is measured from the price when saved.** The saved row keeps that price; saving again keeps the first one. Today's price follows the usual rules (cheapest variant, ended deals don't count), so a deal that ends simply stops being a drop. Emails about drops come in milestone 6.
+- **Products that stop being sold stay on the wishlist** as "No longer available" (and never count as a drop) until the shopper removes them; they come back if the product does. At most 200 items.
+- **Cards say "Only 3 left"** when 1–5 units remain across the variants on sale; bigger stock numbers stay private.
+- **Personal data stays out of shared caches.** Wishlist answers are `private, no-store`; Home and product cards are the same for everyone.
+
+Measured against Neon: Home 0.10 s from the cache (1.7 s for the very first request after starting), Recently viewed 0.16 s, wishlist 0.15–0.4 s.
+
 ## If Redis (Upstash) goes down
 
 Redis commands give up after 1 second instead of waiting, and each part of the API then does what's safest for it:
 
 | Part | While Redis is down |
 |---|---|
-| Browsing and search, the general rate limit | Keep working: no limit, and the category list loads from the database instead of the cache (both logged) |
+| Browsing and search, the general rate limit | Keep working: no limit, and the category list and Home load from the database instead of the cache (both logged) |
 | `/ready` | 503 with `"redis": "error"` within ~3 seconds, so monitoring sees the real cause |
 | Sign-in, sign-up, codes, passwords | **503 `SERVICE_UNAVAILABLE`** with `Retry-After: 30`, before touching the database. Brute-force protection is never silently switched off. |
 | Already signed-in shoppers | Keep working: their pass is accepted without the sign-out check (logged) |
@@ -150,6 +172,7 @@ Measured with Redis pointed at an unreachable address: before this, every API re
 - `tests/openapi.test.ts` checks the contract matches the code: every route is documented (and every documented route exists), the error codes match, and no `$ref` is broken.
 - `tests/catalog/catalog.test.ts` seeds the 63 demo products and checks search (words, typos, `-excluded` words, an injection attempt), every filter with its counts, every sort, deal prices before and after the countdown, stock labels, hidden products (draft, suspended store, no variant on sale) and the category cache with Redis down.
 - `tests/catalog/stores.test.ts` and `reviews.test.ts` check the store page against the database ("98% positive", shipping time, chips), Follow with real cookies and CSRF tokens (double clicks, four clicks at once, own store, suspended store), reviews (star bars, filters, sorts, paging, hidden and removed reviews, no personal data) and that every demo review sits on a delivered order of that product by that reviewer.
+- `tests/catalog/home.test.ts` and `wishlist.test.ts` check Home's sections against the search and store pages (countdowns only, weighted store ranking, suspended stores left out, the Redis cache), Recently viewed (order, hidden products, limits) and the wishlist (price drops from the saved price, deals that end, unavailable products, other shoppers' lists, simultaneous saves, the 200 limit).
 - `tests/db/migration.test.ts` checks that every table, index, foreign key and safety rule really exists. CI also migrates and seeds a real PostgreSQL 18 server, the same major version as Neon.
 
 ## Structure
@@ -168,6 +191,8 @@ src/
   modules/catalog/       categories, search, product page: routes → service → search SQL + one pricing rule + one visibility rule
   modules/stores/        store page, follow
   modules/reviews/       product and store reviews; ratings.ts recomputes ratings from reviews
+  modules/home/          Home's sections (cached for a minute)
+  modules/wishlist/      saved products and price drops
   generated/prisma/      Prisma client (generated by `npm run db:generate`, not committed)
 prisma/
   schema.prisma          the 31 tables

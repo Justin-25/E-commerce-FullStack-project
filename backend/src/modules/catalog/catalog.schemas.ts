@@ -36,3 +36,11 @@ export const searchQuerySchema = z
 export type SearchQuery = z.infer<typeof searchQuerySchema>;
 
 export const productIdSchema = z.object({ id: z.uuid({ error: "Product not found" }) });
+
+/** Recently viewed: `?ids=<uuid>,<uuid>,…` (one comma-separated value, newest first), at most 20. */
+export const cardsQuerySchema = z.object({
+  ids: z
+    .string({ error: "List the product ids" })
+    .transform((v) => v.split(",").map((id) => id.trim()).filter(Boolean))
+    .pipe(z.array(z.uuid({ error: "Unknown product id" })).min(1, { error: "List at least one product id" }).max(20, { error: "At most 20 products" }))
+});

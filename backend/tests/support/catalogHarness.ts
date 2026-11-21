@@ -1,10 +1,14 @@
 import { seedDemoData } from "../../prisma/demo-data.js";
 import { catalogRouter } from "../../src/modules/catalog/catalog.routes.js";
+import { homeRouter } from "../../src/modules/home/home.routes.js";
+import { HomeService } from "../../src/modules/home/home.service.js";
 import { CatalogService } from "../../src/modules/catalog/catalog.service.js";
 import { reviewsRouter } from "../../src/modules/reviews/reviews.routes.js";
 import { ReviewService } from "../../src/modules/reviews/reviews.service.js";
 import { storesRouter } from "../../src/modules/stores/stores.routes.js";
 import { StoreService } from "../../src/modules/stores/stores.service.js";
+import { wishlistRouter } from "../../src/modules/wishlist/wishlist.routes.js";
+import { WishlistService } from "../../src/modules/wishlist/wishlist.service.js";
 import { createAuthHarness } from "./authHarness.js";
 
 /**
@@ -14,11 +18,16 @@ import { createAuthHarness } from "./authHarness.js";
  */
 export async function createCatalogHarness() {
   const h = await createAuthHarness({}, {
-    routers: ({ prisma, kv, guards, logger }) => [
-      catalogRouter({ catalog: new CatalogService({ prisma, kv, logger }) }),
-      reviewsRouter({ reviews: new ReviewService({ prisma }) }),
-      storesRouter({ stores: new StoreService({ prisma }), guards })
-    ]
+    routers: ({ prisma, kv, guards, logger }) => {
+      const catalog = new CatalogService({ prisma, kv, logger });
+      return [
+        catalogRouter({ catalog }),
+        reviewsRouter({ reviews: new ReviewService({ prisma }) }),
+        storesRouter({ stores: new StoreService({ prisma }), guards }),
+        homeRouter({ home: new HomeService({ prisma, kv, catalog, logger }) }),
+        wishlistRouter({ wishlist: new WishlistService({ prisma, catalog }), guards })
+      ];
+    }
   });
   const demo = await seedDemoData(h.db.prisma);
 

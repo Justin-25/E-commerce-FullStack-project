@@ -1,10 +1,16 @@
-import type { RequestHandler } from "express";
+import type { Request, RequestHandler } from "express";
 import type { Role } from "../generated/prisma/enums.js";
 import { AppError, DependencyUnavailableError } from "../lib/errors.js";
 import type { KeyValueStore } from "../lib/kv.js";
 import type { Logger } from "../lib/logger.js";
 import { authKeys } from "../modules/auth/keys.js";
 import type { TokenService } from "../modules/auth/tokens.js";
+
+/** The signed-in user's id, for routes behind requireAuth (401 if somehow missing). */
+export function signedInUserId(req: Request): string {
+  if (!req.auth) throw new AppError(401, "UNAUTHORIZED", "Please sign in.");
+  return req.auth.userId;
+}
 
 export interface AuthGuards {
   /** Reads the access pass if there is one and sets req.auth. Never rejects (for pages that work signed in or out). */

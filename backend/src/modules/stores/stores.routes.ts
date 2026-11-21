@@ -1,14 +1,8 @@
-import { Router, type Request } from "express";
-import { AppError } from "../../lib/errors.js";
+import { Router } from "express";
 import { privateNoStore, publicCache } from "../../lib/httpCache.js";
-import type { AuthGuards } from "../../middleware/auth.js";
+import { signedInUserId as signedInUser, type AuthGuards } from "../../middleware/auth.js";
 import { storeSlugSchema } from "./stores.schemas.js";
 import type { StoreService } from "./stores.service.js";
-
-const signedInUser = (req: Request): string => {
-  if (!req.auth) throw new AppError(401, "UNAUTHORIZED", "Please sign in.");
-  return req.auth.userId;
-};
 
 /**
  * The store page is public and the same for everyone (cacheable). Whether YOU follow

@@ -18,10 +18,14 @@ import type { GoogleService } from "../src/modules/auth/google.service.js";
 import type { SecurityService } from "../src/modules/auth/security.service.js";
 import { catalogRouter } from "../src/modules/catalog/catalog.routes.js";
 import type { CatalogService } from "../src/modules/catalog/catalog.service.js";
+import { homeRouter } from "../src/modules/home/home.routes.js";
+import type { HomeService } from "../src/modules/home/home.service.js";
 import { reviewsRouter } from "../src/modules/reviews/reviews.routes.js";
 import type { ReviewService } from "../src/modules/reviews/reviews.service.js";
 import { storesRouter } from "../src/modules/stores/stores.routes.js";
 import type { StoreService } from "../src/modules/stores/stores.service.js";
+import { wishlistRouter } from "../src/modules/wishlist/wishlist.routes.js";
+import type { WishlistService } from "../src/modules/wishlist/wishlist.service.js";
 import { TokenService } from "../src/modules/auth/tokens.js";
 import { testConfig } from "./helpers.js";
 
@@ -62,7 +66,9 @@ describe("openapi.yaml", () => {
       auth,
       catalogRouter({ catalog: {} as CatalogService }),
       reviewsRouter({ reviews: {} as ReviewService }),
-      storesRouter({ stores: {} as StoreService, guards })
+      storesRouter({ stores: {} as StoreService, guards }),
+      homeRouter({ home: {} as HomeService }),
+      wishlistRouter({ wishlist: {} as WishlistService, guards })
     ];
     const inCode = routers.flatMap((r) => routesOf(r, "/api/v1"));
     expect(documented("/api/v1/").sort()).toEqual(inCode.sort());

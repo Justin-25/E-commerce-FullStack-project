@@ -7,7 +7,7 @@ import type { Logger } from "../../lib/logger.js";
 import { storePositivePercent } from "../reviews/ratings.js";
 import type { SearchQuery } from "./catalog.schemas.js";
 import { variantPricing } from "./pricing.js";
-import { buildSearch, VISIBLE_COUNTS_BY_CATEGORY, type MatchMode, type SearchRow } from "./search.js";
+import { buildSearch, VISIBLE_COUNTS_BY_CATEGORY, type ListSort, type MatchMode, type SearchFilters, type SearchRow } from "./search.js";
 import { visibleProduct } from "./visibility.js";
 
 export const CATEGORY_CACHE_KEY = "catalog:categories:v1";
@@ -43,6 +43,8 @@ export interface ProductCard {
   ratingCount: number;
   soldCount: number;
   inStock: boolean;
+  /** "Only 3 left": units left across the variants on sale, only when 1–5; null otherwise (exact stock stays private). */
+  stockLeft: number | null;
   freeDelivery: boolean;
   badges: { deal: boolean; bestseller: boolean; new: boolean };
 }
@@ -232,6 +234,24 @@ export class CatalogService {
     return result.items.filter((c) => c.id !== id).slice(0, 8);
   }
 
+  /** Product cards for a list on another page (Home rows, deals), with the same visibility and price rules as search. */
+  async list(filters: Partial<SearchFilters>, sort: ListSort, limit: number): Promise<ProductCard[]> {
+    const sql = buildSearch({ storeSlugs: [], freeDelivery: false, ...filters });
+    return this.toCards(await this.deps.prisma.$queryRaw<SearchRow[]>(sql.page(sort, limit, 0)));
+  }
+
+  /**
+   * "Recently viewed": cards for these ids, in the order given (the browser keeps the list).
+   * Products that aren't visible any more are simply left out.
+   */
+  async cardsByIds(ids: string[]): Promise<ProductCard[]> {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) return [];
+    const cards = await this.list({ productIds: unique }, "featured", unique.length);
+    const byId = new Map(cards.map((c) => [c.id, c]));
+    return unique.flatMap((id) => byId.get(id) ?? []);
+  }
+
   private async toCards(rows: SearchRow[]): Promise<ProductCard[]> {
     if (rows.length === 0) return [];
     const images = await this.deps.prisma.productImage.findMany({
@@ -257,7 +277,8 @@ export class CatalogService {
         ratingAvg: Number(r.ratingAvg),
         ratingCount: r.ratingCount,
         soldCount: r.soldCount,
-        inStock: r.inStock,
+        inStock: r.stockOnSale > 0,
+        stockLeft: r.stockOnSale > 0 && r.stockOnSale <= LOW_STOCK ? r.stockOnSale : null,
         freeDelivery: r.price >= DELIVERY.freeThresholdCentavos,
         badges: { deal: r.compareAt !== null, bestseller: r.soldCount >= BESTSELLER_SOLD, new: r.publishedAt !== null && new Date(r.publishedAt).getTime() >= newSince }
       };

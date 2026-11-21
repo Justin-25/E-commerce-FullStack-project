@@ -47,7 +47,10 @@ const FROM = Prisma.sql`
  */
 export const TOP_RATED_PRIOR = { stars: 4, reviews: 5 } as const;
 
-const SORT_SQL: Record<SearchQuery["sort"], (hasText: boolean) => Prisma.Sql> = {
+/** The public sorts, plus "ending_soon" used inside the API (Home's "Today's deals"). */
+export type ListSort = SearchQuery["sort"] | "ending_soon";
+
+const SORT_SQL: Record<ListSort, (hasText: boolean) => Prisma.Sql> = {
   featured: (hasText) =>
     hasText ? Prisma.raw(`rank DESC, p."soldCount" DESC`) : Prisma.raw(`p."soldCount" DESC, p."ratingAvg" DESC, p."publishedAt" DESC NULLS LAST`),
   best_selling: () => Prisma.raw(`p."soldCount" DESC`),
@@ -57,7 +60,8 @@ const SORT_SQL: Record<SearchQuery["sort"], (hasText: boolean) => Prisma.Sql> = 
   top_rated: () =>
     Prisma.raw(
       `(p."ratingAvg" * p."ratingCount" + ${TOP_RATED_PRIOR.stars * TOP_RATED_PRIOR.reviews}) / (p."ratingCount" + ${TOP_RATED_PRIOR.reviews}) DESC, p."ratingCount" DESC`
-    )
+    ),
+  ending_soon: () => Prisma.raw(`cheapest.sale_ends_at ASC NULLS LAST, p."soldCount" DESC`)
 };
 
 /** The filters that facets are counted without (disjunctive faceting). */
@@ -74,6 +78,10 @@ export interface SearchFilters {
   freeDelivery: boolean;
   /** Only products on a deal (a crossed-out price that hasn't ended), like the cards' "Deal" badge. */
   deal?: boolean | undefined;
+  /** Only deals with a running countdown ("Ends in 08h 42m"). */
+  countdown?: boolean | undefined;
+  /** Only these products (Recently viewed, the wishlist); invisible ones are still left out. */
+  productIds?: string[] | undefined;
 }
 
 export function buildSearch(f: SearchFilters, mode: MatchMode = "words") {
@@ -81,6 +89,8 @@ export function buildSearch(f: SearchFilters, mode: MatchMode = "words") {
   const tsQuery = Prisma.sql`websearch_to_tsquery('english', ${text ?? ""})`;
   let rank = Prisma.sql`0`;
   const base: Prisma.Sql[] = [Prisma.sql`p.status = 'ACTIVE'`];
+  if (f.productIds) base.push(Prisma.sql`p.id = ANY(${f.productIds}::uuid[])`);
+  if (f.countdown) base.push(Prisma.sql`cheapest.sale_ends_at IS NOT NULL`);
   if (text && mode === "words") {
     base.push(Prisma.sql`p."searchVector" @@ ${tsQuery}`);
     rank = Prisma.sql`ts_rank(p."searchVector", ${tsQuery})`;
@@ -110,11 +120,11 @@ export function buildSearch(f: SearchFilters, mode: MatchMode = "words") {
   return {
     count: Prisma.sql`SELECT count(*)::int AS total, count(DISTINCT p."storeId")::int AS sellers ${FROM} ${where()}`,
 
-    page: (sort: SearchQuery["sort"], limit: number, offset: number) => Prisma.sql`
+    page: (sort: ListSort, limit: number, offset: number) => Prisma.sql`
       SELECT p.id, p.slug, p.title, p."ratingAvg"::float AS "ratingAvg", p."ratingCount", p."soldCount", p."publishedAt",
              s.name AS "storeName", s.slug AS "storeSlug",
              cheapest.price, cheapest.compare_at AS "compareAt", cheapest.sale_ends_at AS "saleEndsAt",
-             EXISTS (SELECT 1 FROM product_variants v2 WHERE v2."productId" = p.id AND v2."isActive" AND v2.stock > 0) AS "inStock",
+             (SELECT coalesce(sum(v2.stock), 0)::int FROM product_variants v2 WHERE v2."productId" = p.id AND v2."isActive") AS "stockOnSale",
              ${rank} AS rank
       ${FROM} ${where()}
       ORDER BY ${SORT_SQL[sort](Boolean(text))}, p.id ASC
@@ -145,7 +155,8 @@ export interface SearchRow {
   price: number;
   compareAt: number | null;
   saleEndsAt: Date | null;
-  inStock: boolean;
+  /** Units left across the variants on sale (only shown when low: "Only 3 left"). */
+  stockOnSale: number;
 }
 
 /** Visible-product counts per category, for the category list (same visibility rules as search). */

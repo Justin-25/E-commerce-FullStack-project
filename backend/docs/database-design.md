@@ -256,6 +256,7 @@ erDiagram
 - **Ratings** (milestone 4b): `ratingAvg`/`ratingCount` on products and stores are stored, because search filters and sorts by them, but never typed in. `recomputeRatings()` (`src/modules/reviews/ratings.ts`) rebuilds them from the PUBLISHED reviews whenever reviews change: the seed now, writing a review in milestone 5, hiding one or removing a product in milestone 7. A store counts all its products' reviews except products removed by moderation. "98% positive" (4–5★ in the last 12 months) is computed when read.
 - **Follows**: `store_follows` has one row per shopper and store (primary key), and `stores.followerCount` is a counter kept in step in the same transaction. The counter moves only when a row was really inserted or deleted, so double clicks can't inflate it. The demo stores start from a demo number.
 - **Demo reviews** are real rows: 40 demo shoppers with delivered orders (`orders` → `seller_orders` → `order_items`), each review linked to its order item. The seed replaces only those shoppers' orders and reviews.
+- **Wishlist** (milestone 4c): one row per shopper and product (primary key), with `priceAtSaveCentavos` = the price when saved, kept on re-save. A price drop is today's effective price below it, worked out when read. Rows stay when a product stops being sold (shown as unavailable); they go when the shopper removes them or the account is deleted (cascade).
 
 ## 4 · Cart, orders & payments
 

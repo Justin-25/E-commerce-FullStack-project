@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.4.0
+  version: 0.5.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -43,6 +43,10 @@ tags:
     description: Store pages and following stores (milestone 4b)
   - name: reviews
     description: Reading product and store reviews (milestone 4b)
+  - name: home
+    description: The Home page's sections (milestone 4c)
+  - name: wishlist
+    description: Saved products and price drops (milestone 4c)
 
 paths:
   /health:
@@ -1022,6 +1026,109 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/products/cards:
+    get:
+      summary: Product cards by id ("Recently viewed")
+      description: |
+        The browser remembers what the shopper viewed and asks for those cards here, newest first.
+        Cards come back in the order given; products that aren't visible any more are left out.
+      operationId: getProductCards
+      tags: [catalog]
+      parameters:
+        - { name: ids, in: query, required: true, description: "Comma-separated product ids, at most 20.", schema: { type: string }, example: "0193c0de-0000-7000-8000-000000000001,0193c0de-0000-7000-8000-000000000002" }
+      responses:
+        "200":
+          description: The cards, in the order asked for.
+          headers:
+            Cache-Control: { schema: { type: string, example: "public, max-age=60" } }
+          content:
+            application/json:
+              schema: { type: object, required: [products], properties: { products: { type: array, maxItems: 20, items: { $ref: "#/components/schemas/ProductCard" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/home:
+    get:
+      summary: The Home page's data sections
+      description: |
+        Shop by category, Today's deals (running countdowns, ending soonest first), Best sellers and
+        Top-rated stores. The same for every visitor and cached for a minute, so prices here can be up
+        to a minute old (checkout always re-reads them).
+      operationId: getHome
+      tags: [home]
+      responses:
+        "200":
+          description: The Home sections.
+          headers:
+            Cache-Control: { schema: { type: string, example: "public, max-age=60" } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HomePage" }
+
+  /api/v1/wishlist:
+    get:
+      summary: My wishlist
+      description: Newest first. Products no longer sold stay on the list as unavailable until removed.
+      operationId: getWishlist
+      tags: [wishlist]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200":
+          description: The wishlist with price drops (never cached).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Wishlist" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/wishlist/ids:
+    get:
+      summary: Which products have I saved? (fills the hearts on cards)
+      operationId: getWishlistIds
+      tags: [wishlist]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200":
+          description: Saved product ids, newest first.
+          content:
+            application/json:
+              schema: { type: object, required: [productIds], properties: { productIds: { type: array, items: { type: string, format: uuid } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/wishlist/{id}:
+    put:
+      summary: Save a product (the heart)
+      description: |
+        Remembers today's price, so a later drop shows as "Price drop". Saving again changes nothing
+        and keeps the first saved price. At most 200 items.
+      operationId: saveToWishlist
+      tags: [wishlist]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Saved.
+          content: { application/json: { schema: { $ref: "#/components/schemas/WishlistChange" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT. The wishlist is full (200 items).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    delete:
+      summary: Remove a product from the wishlist
+      description: Works for any saved product, including unavailable ones. Removing twice is fine.
+      operationId: removeFromWishlist
+      tags: [wishlist]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Not saved.
+          content: { application/json: { schema: { $ref: "#/components/schemas/WishlistChange" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+
   /api/v1/stores/{slug}:
     get:
       summary: The store page (header, About, category chips)
@@ -1406,7 +1513,7 @@ components:
 
     ProductCard:
       type: object
-      required: [id, slug, title, store, image, priceCentavos, compareAtCentavos, savingsPercent, saleEndsAt, ratingAvg, ratingCount, soldCount, inStock, freeDelivery, badges]
+      required: [id, slug, title, store, image, priceCentavos, compareAtCentavos, savingsPercent, saleEndsAt, ratingAvg, ratingCount, soldCount, inStock, stockLeft, freeDelivery, badges]
       properties:
         id: { type: string, format: uuid }
         slug: { type: string }
@@ -1421,6 +1528,7 @@ components:
         ratingCount: { type: integer }
         soldCount: { type: integer }
         inStock: { type: boolean }
+        stockLeft: { type: [integer, "null"], minimum: 1, maximum: 5, description: "Only 3 left: units left across the variants on sale, only when 1 to 5 (exact stock stays private)." }
         freeDelivery: { type: boolean, description: Reaches the ₱999 free-delivery minimum on its own. }
         badges:
           type: object
@@ -1532,6 +1640,80 @@ components:
             expressDays: { type: object, properties: { min: { type: integer }, max: { type: integer } } }
         returns: { type: object, properties: { days: { type: integer, example: 30 } } }
 
+    TopStore:
+      type: object
+      required: [slug, name, logoUrl, mainCategory, rating, positivePercent, followerCount]
+      properties:
+        slug: { type: string }
+        name: { type: string }
+        logoUrl: { type: [string, "null"] }
+        mainCategory: { type: [object, "null"], description: "The top-level category most of its products are in (Electronics · ★ 4.9).", properties: { slug: { type: string }, name: { type: string } } }
+        rating: { type: object, required: [avg, count], properties: { avg: { type: number }, count: { type: integer } } }
+        positivePercent: { type: [integer, "null"] }
+        followerCount: { type: integer }
+    HomePage:
+      type: object
+      required: [categories, todaysDeals, bestSellers, topStores]
+      properties:
+        categories:
+          type: array
+          description: Shop by category (top-level categories).
+          items: { type: object, required: [slug, name, productCount], properties: { slug: { type: string }, name: { type: string }, productCount: { type: integer } } }
+        todaysDeals:
+          type: object
+          required: [endsAt, items]
+          properties:
+            endsAt: { type: [string, "null"], format: date-time, description: The soonest countdown among these deals ("Ends in 08h 42m 19s"). }
+            items: { type: array, maxItems: 8, items: { $ref: "#/components/schemas/ProductCard" } }
+        bestSellers: { type: array, maxItems: 8, description: Most sold overall; the first is "#1 Best seller"., items: { $ref: "#/components/schemas/ProductCard" } }
+        topStores: { type: array, maxItems: 6, description: By weighted rating., items: { $ref: "#/components/schemas/TopStore" } }
+    WishlistItem:
+      type: object
+      required: [productId, slug, title, store, image, savedAt, savedPriceCentavos, available, card, priceDrop]
+      properties:
+        productId: { type: string, format: uuid }
+        slug: { type: string }
+        title: { type: string }
+        store: { type: object, required: [name, slug], properties: { name: { type: string }, slug: { type: string } } }
+        image: { type: [object, "null"], properties: { url: { type: string }, alt: { type: [string, "null"] } } }
+        savedAt: { type: string, format: date-time }
+        savedPriceCentavos: { type: integer, description: The price when saved. }
+        available: { type: boolean, description: false means "No longer available" (it stays until removed). }
+        card:
+          description: Everything a product card shows; null when no longer available.
+          oneOf:
+            - { $ref: "#/components/schemas/ProductCard" }
+            - { type: "null" }
+        priceDrop:
+          type: [object, "null"]
+          description: Today's price is below the saved price ("now ₱6,499, was ₱8,999"). Never for unavailable products.
+          required: [wasCentavos, nowCentavos, savingsCentavos, savingsPercent]
+          properties:
+            wasCentavos: { type: integer }
+            nowCentavos: { type: integer }
+            savingsCentavos: { type: integer }
+            savingsPercent: { type: integer }
+    Wishlist:
+      type: object
+      required: [items, count, priceDrops]
+      properties:
+        items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/WishlistItem" } }
+        count: { type: integer }
+        priceDrops:
+          type: object
+          description: The "Price drop on 2 saved items… Deals end in 08h 42m" banner.
+          required: [count, dealsEndAt]
+          properties:
+            count: { type: integer }
+            dealsEndAt: { type: [string, "null"], format: date-time }
+    WishlistChange:
+      type: object
+      required: [productId, saved, count]
+      properties:
+        productId: { type: string, format: uuid }
+        saved: { type: boolean }
+        savedPriceCentavos: { type: integer, description: Only when saved. }
+        count: { type: integer, description: Items on the wishlist now. }
     RatingSummary:
       type: object
       required: [avg, count, stars]
