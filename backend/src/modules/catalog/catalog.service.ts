@@ -7,6 +7,7 @@ import type { Logger } from "../../lib/logger.js";
 import { storePositivePercent } from "../reviews/ratings.js";
 import type { SearchQuery } from "./catalog.schemas.js";
 import { variantPricing } from "./pricing.js";
+import { LOW_STOCK, stockStatus } from "./stock.js";
 import { buildSearch, VISIBLE_COUNTS_BY_CATEGORY, type ListSort, type MatchMode, type SearchFilters, type SearchRow } from "./search.js";
 import { visibleProduct } from "./visibility.js";
 
@@ -16,8 +17,6 @@ const CATEGORY_CACHE_SECONDS = 5 * 60;
 const BESTSELLER_SOLD = 1_000;
 /** "New" badge. */
 const NEW_DAYS = 30;
-/** "Only 3 left" below this; exact stock is never shown otherwise. */
-const LOW_STOCK = 5;
 
 export interface CategoryNode {
   id: string;
@@ -167,7 +166,7 @@ export class CatalogService {
         name: v.name,
         ...pricing,
         saleEndsAt: pricing.saleEndsAt?.toISOString() ?? null,
-        stock: v.stock === 0 ? { status: "out_of_stock" as const } : v.stock <= LOW_STOCK ? { status: "low_stock" as const, left: v.stock } : { status: "in_stock" as const }
+        stock: stockStatus(v.stock)
       };
     });
     const cheapest = variants.reduce((a, b) => (b.priceCentavos < a.priceCentavos ? b : a));

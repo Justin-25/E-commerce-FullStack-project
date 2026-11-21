@@ -62,11 +62,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 45 foreign keys and 28 safety (CHECK) rules", async () => {
+  it("has the 45 foreign keys and 31 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
     expect(fk.n).toBe(45);
-    expect(chk.n).toBe(28);
+    expect(chk.n).toBe(31);
   });
 });
 
@@ -165,5 +165,17 @@ describe("orders, reviews & money", () => {
     const cart = await one<{ id: string }>(`INSERT INTO carts (id, "userId", "updatedAt") VALUES (gen_random_uuid(), $1, now()) RETURNING id`, [u]);
     const v = await variant(await product(s), s);
     for (const q of [0, 100]) await fails(`INSERT INTO cart_items ("cartId", "variantId", quantity) VALUES ($1, $2, $3)`, [cart.id, v, q], /cart_items_quantity_chk/);
+    await fails(`INSERT INTO cart_items ("cartId", "variantId", quantity, "priceAtAddCentavos") VALUES ($1, $2, 1, -1)`, [cart.id, v], /cart_items_price_at_add_chk/);
+  });
+
+  it("allows one default address per shopper, stored in Philippine formats", async () => {
+    const u = await user();
+    const address = (isDefault: boolean, phone = "+639171234567", postalCode = "1101") =>
+      db.query(`INSERT INTO addresses (id, "userId", "fullName", phone, region, city, barangay, street, "postalCode", "isDefault", "updatedAt") VALUES (gen_random_uuid(), $1, 'Maria Santos', $2, 'NCR', 'Quezon City', 'Diliman', '12 Maginhawa St.', $3, $4, now())`, [u, phone, postalCode, isDefault]);
+    await address(true);
+    await address(false);
+    await expect(address(true)).rejects.toThrow(/addresses_one_default_per_user|unique/i);
+    for (const phone of ["09171234567", "+63917123456", "+639171234567x"]) await expect(address(false, phone)).rejects.toThrow(/addresses_phone_chk/);
+    for (const code of ["110", "11011", "A101"]) await expect(address(false, "+639171234567", code)).rejects.toThrow(/addresses_postal_code_chk/);
   });
 });

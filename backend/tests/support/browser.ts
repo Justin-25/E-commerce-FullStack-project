@@ -38,6 +38,10 @@ export class Browser {
     return res;
   }
 
+  patch(path: string, body: object = {}) {
+    return this.agent.patch(path).set(this.headers).set("X-CSRF-Token", this.csrfToken).send(body);
+  }
+
   put(path: string, body: object = {}) {
     return this.agent.put(path).set(this.headers).set("X-CSRF-Token", this.csrfToken).send(body);
   }

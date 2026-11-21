@@ -150,6 +150,29 @@ How it works:
 
 Measured against Neon: Home 0.10 s from the cache (1.7 s for the very first request after starting), Recently viewed 0.16 s, wishlist 0.15–0.4 s.
 
+## Cart and addresses (milestone 5a)
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/v1/cart` | Signed in: the cart, one package per store, with today's prices, stock warnings, delivery per store and "You saved ₱…" |
+| `POST /api/v1/cart/items` | Add to cart (adds to what's there) |
+| `PATCH` / `DELETE /api/v1/cart/items/{variantId}` | Change a line's quantity / remove it |
+| `GET /api/v1/cart/preview?items=…` | A guest's cart (kept in the browser), shown with the same rules; nothing is saved |
+| `POST /api/v1/cart/merge` | At sign-in: the guest's cart joins the account cart |
+| `GET` / `POST /api/v1/addresses` | Saved addresses (default first) / add one |
+| `PUT` / `DELETE /api/v1/addresses/{id}` · `POST /api/v1/addresses/{id}/default` | Edit / delete / "Set as default" |
+
+How it works:
+- **Stock isn't held in the cart.** It's taken when the order is placed (milestone 5b). The cart just tells the truth about today's prices and stock: each line can carry an `issue` (`unavailable`, `out_of_stock`, `not_enough_stock`), and checkout needs `canCheckout`.
+- **One package per store,** each with its own delivery: free from ₱999 of that store's items, otherwise ₱49, plus the "Add ₱X more for free delivery" nudge. A package whose items are all unavailable costs nothing.
+- **"Price changed since you added it."** Each line remembers the price the shopper last saw (`priceAtAddCentavos`), so an ended deal or a seller's price change shows as a note until the quantity is changed.
+- **Guests shop first, sign in at checkout.** A guest's cart lives in their browser; `GET /cart/preview` shows it with the same rules, and `POST /cart/merge` joins it to the account at sign-in: quantities add up, capped by stock and 99, and anything that can't be bought is skipped and reported, never an error, so signing in always works.
+- **Two tabs can't race.** Every change to one shopper's cart (and addresses) runs in a transaction that first locks that shopper's row (`SELECT … FOR UPDATE`). Proven on real PostgreSQL: with the locks removed, four simultaneous "Add to cart" clicks lost updates, and two simultaneous first addresses both became the default.
+- **Philippine addresses.** Any common mobile format ("0917 123 4567", "+63 917…") is stored as `+639XXXXXXXXX`; the region comes from the 18 regions; Metro Manila (NCR) has no province, every other region needs one; 4-digit postal code. The database enforces the formats and allows one default per shopper (a partial unique index). Up to 10 addresses; deleting the default passes it to the newest one left. Past orders keep their own copy, so editing an address never changes them.
+- **Limits:** 50 different items, 99 of one item, only known fields accepted (`strict` schemas), and someone else's address answers 404, exactly like one that doesn't exist.
+
+Measured against Neon from this PC: the guest preview 1.1 s on first use, cart changes 0.4–1.1 s (about ten round trips to Singapore inside one locked transaction), addresses 0.1–0.45 s. Next to the database (milestone 9) each round trip is about a millisecond.
+
 ## If Redis (Upstash) goes down
 
 Redis commands give up after 1 second instead of waiting, and each part of the API then does what's safest for it:
@@ -173,6 +196,7 @@ Measured with Redis pointed at an unreachable address: before this, every API re
 - `tests/catalog/catalog.test.ts` seeds the 63 demo products and checks search (words, typos, `-excluded` words, an injection attempt), every filter with its counts, every sort, deal prices before and after the countdown, stock labels, hidden products (draft, suspended store, no variant on sale) and the category cache with Redis down.
 - `tests/catalog/stores.test.ts` and `reviews.test.ts` check the store page against the database ("98% positive", shipping time, chips), Follow with real cookies and CSRF tokens (double clicks, four clicks at once, own store, suspended store), reviews (star bars, filters, sorts, paging, hidden and removed reviews, no personal data) and that every demo review sits on a delivered order of that product by that reviewer.
 - `tests/catalog/home.test.ts` and `wishlist.test.ts` check Home's sections against the search and store pages (countdowns only, weighted store ranking, suspended stores left out, the Redis cache), Recently viewed (order, hidden products, limits) and the wishlist (price drops from the saved price, deals that end, unavailable products, other shoppers' lists, simultaneous saves, the 200 limit).
+- `tests/checkout/cart.test.ts` and `addresses.test.ts` check the cart (delivery per store from exactly ₱999, stock and price notes, sold out and hidden items, the guest preview and the merge, limits, simultaneous clicks, other shoppers' carts) and addresses (formats, one default, the whole-form edit, deleting the default, limits, privacy).
 - `tests/db/migration.test.ts` checks that every table, index, foreign key and safety rule really exists. CI also migrates and seeds a real PostgreSQL 18 server, the same major version as Neon.
 
 ## Structure
@@ -193,6 +217,8 @@ src/
   modules/reviews/       product and store reviews; ratings.ts recomputes ratings from reviews
   modules/home/          Home's sections (cached for a minute)
   modules/wishlist/      saved products and price drops
+  modules/cart/          the cart (signed in and guest), merged at sign-in
+  modules/addresses/     saved Philippine delivery addresses
   generated/prisma/      Prisma client (generated by `npm run db:generate`, not committed)
 prisma/
   schema.prisma          the 31 tables

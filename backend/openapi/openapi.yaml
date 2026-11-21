@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.5.0
+  version: 0.6.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -47,6 +47,10 @@ tags:
     description: The Home page's sections (milestone 4c)
   - name: wishlist
     description: Saved products and price drops (milestone 4c)
+  - name: cart
+    description: The cart, for guests and signed-in shoppers (milestone 5a)
+  - name: addresses
+    description: Saved delivery addresses (milestone 5a)
 
 paths:
   /health:
@@ -1129,6 +1133,219 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/CsrfInvalid" }
 
+  /api/v1/cart:
+    get:
+      summary: My cart, one package per store
+      description: |
+        Today's prices and stock for every line (stock is only held once an order is placed). Lines that
+        need attention carry an `issue`; checkout needs `summary.canCheckout`. Never cached.
+      operationId: getCart
+      tags: [cart]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200":
+          description: The cart.
+          content: { application/json: { schema: { type: object, required: [cart], properties: { cart: { $ref: "#/components/schemas/Cart" } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/cart/preview:
+    get:
+      summary: A guest's cart (kept in the browser), shown with the same rules
+      description: Nothing is saved. Repeated items are added together. At sign-in the browser sends the same list to `POST /cart/merge`.
+      operationId: previewCart
+      tags: [cart]
+      parameters:
+        - { name: items, in: query, required: true, description: "Comma-separated variantId:quantity pairs, at most 50.", schema: { type: string }, example: "0193c0de-0000-7000-8000-000000000001:2,0193c0de-0000-7000-8000-000000000002:1" }
+      responses:
+        "200":
+          description: The cart as it would look.
+          content: { application/json: { schema: { type: object, required: [cart], properties: { cart: { $ref: "#/components/schemas/Cart" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/cart/items:
+    post:
+      summary: Add to cart
+      description: Adds to the quantity already in the cart. The item must be for sale, with enough stock (at most 99 of one item, 50 different items).
+      operationId: addToCart
+      tags: [cart]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [variantId], properties: { variantId: { type: string, format: uuid }, quantity: { type: integer, minimum: 1, maximum: 99, default: 1 } } }
+      responses:
+        "200":
+          description: The updated cart.
+          content: { application/json: { schema: { type: object, required: [cart], properties: { cart: { $ref: "#/components/schemas/Cart" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT. Sold out, not enough left (`details.left`, `details.inCart`), more than 99, or the cart is full.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/cart/items/{variantId}:
+    patch:
+      summary: Change a line's quantity
+      description: Also clears its "price changed" note (the shopper has now seen today's price).
+      operationId: setCartQuantity
+      tags: [cart]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: variantId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [quantity], properties: { quantity: { type: integer, minimum: 1, maximum: 99 } } }
+      responses:
+        "200":
+          description: The updated cart.
+          content: { application/json: { schema: { type: object, required: [cart], properties: { cart: { $ref: "#/components/schemas/Cart" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT. Not enough left, or the item is no longer available (remove it).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    delete:
+      summary: Remove a line
+      operationId: removeFromCart
+      tags: [cart]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: variantId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The updated cart (removing twice is fine).
+          content: { application/json: { schema: { type: object, required: [cart], properties: { cart: { $ref: "#/components/schemas/Cart" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+
+  /api/v1/cart/merge:
+    post:
+      summary: Merge a guest's browser cart into the account cart (at sign-in)
+      description: |
+        Quantities add up, capped by stock and 99. Items that can't be bought are skipped and reported,
+        never an error, so signing in always works.
+      operationId: mergeCart
+      tags: [cart]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  maxItems: 50
+                  items: { type: object, additionalProperties: false, required: [variantId, quantity], properties: { variantId: { type: string, format: uuid }, quantity: { type: integer, minimum: 1, maximum: 99 } } }
+      responses:
+        "200":
+          description: The merged cart and what happened to each item.
+          content: { application/json: { schema: { type: object, required: [cart, merge], properties: { cart: { $ref: "#/components/schemas/Cart" }, merge: { $ref: "#/components/schemas/CartMergeResult" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+
+  /api/v1/addresses:
+    get:
+      summary: My saved addresses (default first)
+      operationId: listAddresses
+      tags: [addresses]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200":
+          description: Up to 10 addresses.
+          content: { application/json: { schema: { type: object, required: [addresses], properties: { addresses: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/Address" } } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      summary: Add an address
+      description: The first address becomes the default automatically.
+      operationId: createAddress
+      tags: [addresses]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: "#/components/schemas/AddressInput" }
+                - { type: object, properties: { isDefault: { type: boolean } } }
+      responses:
+        "201":
+          description: Saved.
+          content: { application/json: { schema: { type: object, required: [address], properties: { address: { $ref: "#/components/schemas/Address" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "409":
+          description: CONFLICT. Already 10 addresses.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/addresses/{id}:
+    put:
+      summary: Edit an address (the form sends every field)
+      description: Past orders keep their own copy of the address, so they don't change.
+      operationId: updateAddress
+      tags: [addresses]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AddressInput" } } }
+      responses:
+        "200":
+          description: Saved.
+          content: { application/json: { schema: { type: object, required: [address], properties: { address: { $ref: "#/components/schemas/Address" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      summary: Delete an address
+      description: If it was the default, the newest remaining address becomes the default.
+      operationId: deleteAddress
+      tags: [addresses]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Deleted.
+          content: { application/json: { schema: { type: object, required: [deleted], properties: { deleted: { type: boolean, const: true } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/addresses/{id}/default:
+    post:
+      summary: Set as default
+      operationId: setDefaultAddress
+      tags: [addresses]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Now the default.
+          content: { application/json: { schema: { type: object, required: [address], properties: { address: { $ref: "#/components/schemas/Address" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/stores/{slug}:
     get:
       summary: The store page (header, About, category chips)
@@ -1714,6 +1931,99 @@ components:
         saved: { type: boolean }
         savedPriceCentavos: { type: integer, description: Only when saved. }
         count: { type: integer, description: Items on the wishlist now. }
+    CartLine:
+      type: object
+      required: [variantId, productId, slug, title, variantName, image, quantity, unitPriceCentavos, compareAtCentavos, saleEndsAt, lineTotalCentavos, stock, maxQuantity, priceChange, issue]
+      properties:
+        variantId: { type: string, format: uuid }
+        productId: { type: string, format: uuid }
+        slug: { type: string }
+        title: { type: string }
+        variantName: { type: string, example: Midnight Black }
+        image: { type: [object, "null"], properties: { url: { type: string }, alt: { type: [string, "null"] } } }
+        quantity: { type: integer, minimum: 1, maximum: 99 }
+        unitPriceCentavos: { type: integer, description: Today's price after deal rules (what checkout charges). }
+        compareAtCentavos: { type: [integer, "null"] }
+        saleEndsAt: { type: [string, "null"], format: date-time }
+        lineTotalCentavos: { type: integer }
+        stock:
+          type: object
+          required: [status]
+          properties:
+            status: { type: string, enum: [in_stock, low_stock, out_of_stock] }
+            left: { type: integer, description: Only for low_stock ("Only 3 left"). }
+        maxQuantity: { type: integer, description: The most the quantity box allows (what's left, up to 99; 0 when unavailable). }
+        priceChange: { type: [object, "null"], description: '"Price changed since you added it".', properties: { fromCentavos: { type: integer }, toCentavos: { type: integer } } }
+        issue: { type: [string, "null"], enum: [unavailable, out_of_stock, not_enough_stock, null], description: What must be fixed before checkout. }
+    CartGroup:
+      type: object
+      required: [store, items, subtotalCentavos, deliveryCentavos, freeDelivery]
+      properties:
+        store: { type: object, required: [slug, name], properties: { slug: { type: string }, name: { type: string } } }
+        items: { type: array, items: { $ref: "#/components/schemas/CartLine" } }
+        subtotalCentavos: { type: integer, description: Lines without an issue. }
+        deliveryCentavos: { type: integer, description: "Standard delivery for this store's package: free from ₱999, otherwise ₱49." }
+        freeDelivery:
+          type: object
+          required: [thresholdCentavos, qualifies, remainingCentavos]
+          description: '"Add ₱X more from this store for free delivery".'
+          properties:
+            thresholdCentavos: { type: integer, example: 99900 }
+            qualifies: { type: boolean }
+            remainingCentavos: { type: integer }
+    Cart:
+      type: object
+      required: [groups, summary]
+      properties:
+        groups: { type: array, description: One package per store, newest first., items: { $ref: "#/components/schemas/CartGroup" } }
+        summary:
+          type: object
+          required: [itemCount, subtotalCentavos, savingsCentavos, deliveryCentavos, totalCentavos, issueCount, canCheckout]
+          properties:
+            itemCount: { type: integer }
+            subtotalCentavos: { type: integer }
+            savingsCentavos: { type: integer, description: '"You saved ₱3,300".' }
+            deliveryCentavos: { type: integer }
+            totalCentavos: { type: integer }
+            issueCount: { type: integer }
+            canCheckout: { type: boolean }
+    CartMergeResult:
+      type: object
+      required: [added, adjusted, skipped]
+      properties:
+        added: { type: integer }
+        adjusted: { type: array, description: Fewer than asked (stock or the 99 limit)., items: { type: object, properties: { variantId: { type: string, format: uuid }, quantity: { type: integer } } } }
+        skipped: { type: array, items: { type: object, properties: { variantId: { type: string, format: uuid }, reason: { type: string, enum: [unavailable, sold_out, cart_full] } } } }
+    AddressInput:
+      type: object
+      additionalProperties: false
+      required: [fullName, phone, region, city, barangay, street, postalCode]
+      properties:
+        label: { type: [string, "null"], maxLength: 30, example: Home }
+        fullName: { type: string, minLength: 2, maxLength: 100 }
+        phone: { type: string, example: "0917 123 4567", description: A Philippine mobile number in any common format; stored as +639XXXXXXXXX. }
+        region: { type: string, enum: [NCR, CAR, Ilocos Region, Cagayan Valley, Central Luzon, CALABARZON, MIMAROPA, Bicol Region, Western Visayas, Negros Island Region, Central Visayas, Eastern Visayas, Zamboanga Peninsula, Northern Mindanao, Davao Region, SOCCSKSARGEN, Caraga, BARMM] }
+        province: { type: [string, "null"], maxLength: 100, description: Required except in NCR (Metro Manila has none). }
+        city: { type: string, minLength: 2, maxLength: 100 }
+        barangay: { type: string, minLength: 1, maxLength: 100 }
+        street: { type: string, minLength: 3, maxLength: 255, description: House number, street and building. }
+        postalCode: { type: string, pattern: "^[0-9]{4}$" }
+    Address:
+      type: object
+      required: [id, label, fullName, phone, region, province, city, barangay, street, postalCode, isDefault, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        label: { type: [string, "null"] }
+        fullName: { type: string }
+        phone: { type: string, example: "+639171234567" }
+        region: { type: string }
+        province: { type: [string, "null"] }
+        city: { type: string }
+        barangay: { type: string }
+        street: { type: string }
+        postalCode: { type: string }
+        isDefault: { type: boolean }
+        createdAt: { type: string, format: date-time }
     RatingSummary:
       type: object
       required: [avg, count, stars]

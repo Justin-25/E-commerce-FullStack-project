@@ -18,6 +18,10 @@ import type { GoogleService } from "../src/modules/auth/google.service.js";
 import type { SecurityService } from "../src/modules/auth/security.service.js";
 import { catalogRouter } from "../src/modules/catalog/catalog.routes.js";
 import type { CatalogService } from "../src/modules/catalog/catalog.service.js";
+import { addressesRouter } from "../src/modules/addresses/addresses.routes.js";
+import type { AddressService } from "../src/modules/addresses/addresses.service.js";
+import { cartRouter } from "../src/modules/cart/cart.routes.js";
+import type { CartService } from "../src/modules/cart/cart.service.js";
 import { homeRouter } from "../src/modules/home/home.routes.js";
 import type { HomeService } from "../src/modules/home/home.service.js";
 import { reviewsRouter } from "../src/modules/reviews/reviews.routes.js";
@@ -68,7 +72,9 @@ describe("openapi.yaml", () => {
       reviewsRouter({ reviews: {} as ReviewService }),
       storesRouter({ stores: {} as StoreService, guards }),
       homeRouter({ home: {} as HomeService }),
-      wishlistRouter({ wishlist: {} as WishlistService, guards })
+      wishlistRouter({ wishlist: {} as WishlistService, guards }),
+      cartRouter({ cart: {} as CartService, guards }),
+      addressesRouter({ addresses: {} as AddressService, guards })
     ];
     const inCode = routers.flatMap((r) => routesOf(r, "/api/v1"));
     expect(documented("/api/v1/").sort()).toEqual(inCode.sort());

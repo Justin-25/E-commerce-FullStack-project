@@ -16,6 +16,10 @@ import { GoogleService } from "./modules/auth/google.service.js";
 import { SecurityService } from "./modules/auth/security.service.js";
 import { catalogRouter } from "./modules/catalog/catalog.routes.js";
 import { CatalogService } from "./modules/catalog/catalog.service.js";
+import { addressesRouter } from "./modules/addresses/addresses.routes.js";
+import { AddressService } from "./modules/addresses/addresses.service.js";
+import { cartRouter } from "./modules/cart/cart.routes.js";
+import { CartService } from "./modules/cart/cart.service.js";
 import { homeRouter } from "./modules/home/home.routes.js";
 import { HomeService } from "./modules/home/home.service.js";
 import { reviewsRouter } from "./modules/reviews/reviews.routes.js";
@@ -55,6 +59,8 @@ if (prisma) {
   routers.push(catalogRouter({ catalog }));
   routers.push(homeRouter({ home: new HomeService({ prisma, kv, catalog, logger }) }));
   routers.push(wishlistRouter({ wishlist: new WishlistService({ prisma, catalog }), guards }));
+  routers.push(cartRouter({ cart: new CartService({ prisma }), guards }));
+  routers.push(addressesRouter({ addresses: new AddressService({ prisma }), guards }));
   routers.push(reviewsRouter({ reviews: new ReviewService({ prisma }) }));
   routers.push(storesRouter({ stores: new StoreService({ prisma }), guards }));
   routers.push(
