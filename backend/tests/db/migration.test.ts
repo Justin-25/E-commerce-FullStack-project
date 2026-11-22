@@ -62,11 +62,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 45 foreign keys and 31 safety (CHECK) rules", async () => {
+  it("has the 45 foreign keys and 32 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
     expect(fk.n).toBe(45);
-    expect(chk.n).toBe(31);
+    expect(chk.n).toBe(32);
   });
 });
 

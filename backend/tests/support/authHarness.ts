@@ -1,5 +1,7 @@
 import { Router, type Express } from "express";
+import type { Config } from "../../src/config/env.js";
 import type { PrismaClient } from "../../src/generated/prisma/client.js";
+import type { EmailSender } from "../../src/lib/email.js";
 import type { KeyValueStore } from "../../src/lib/kv.js";
 import type { Logger } from "../../src/lib/logger.js";
 import type { AuthGuards } from "../../src/middleware/auth.js";
@@ -68,7 +70,18 @@ export const BREACHED_PASSWORDS = ["password123", "iloveyou2024"];
  */
 export interface HarnessOptions {
   /** More routers on the same app (e.g. the catalog), sharing its database, Redis stand-in and sign-in guards. */
-  routers?: (deps: { prisma: PrismaClient; kv: KeyValueStore; guards: AuthGuards; logger: Logger }) => Router[];
+  routers?: (deps: HarnessDeps) => Router[];
+  /** Webhook routers (mounted before the JSON parser and CSRF check, like in the real app). */
+  webhooks?: (deps: HarnessDeps) => Router[];
+}
+
+export interface HarnessDeps {
+  prisma: PrismaClient;
+  kv: KeyValueStore;
+  guards: AuthGuards;
+  logger: Logger;
+  email: EmailSender;
+  config: Config;
 }
 
 export async function createAuthHarness(env: Record<string, string> = {}, options: HarnessOptions = {}) {
@@ -100,8 +113,9 @@ export async function createAuthHarness(env: Record<string, string> = {}, option
     const security = new SecurityService({ prisma: db.prisma, kv, email: outbox, config, logger });
     const google = new GoogleService({ prisma: db.prisma, kv, auth: service, identity: fakeGoogle, email: outbox, config, logger });
     const auth = authRouter({ service, security, google, tokens, csrf, guards, config, logger, rateLimitStore: new FlakyStore(redis) });
-    const extra = options.routers?.({ prisma: db.prisma, kv, guards, logger }) ?? [];
-    return createApp({ config, logger: silentLogger, csrf, routers: [auth, testRoutes, ...extra] });
+    const deps: HarnessDeps = { prisma: db.prisma, kv, guards, logger, email: outbox, config };
+    const extra = options.routers?.(deps) ?? [];
+    return createApp({ config, logger: silentLogger, csrf, routers: [auth, testRoutes, ...extra], webhooks: options.webhooks?.(deps) ?? [] });
   };
 
   const app = build();

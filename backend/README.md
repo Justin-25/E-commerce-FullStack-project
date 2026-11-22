@@ -173,6 +173,32 @@ How it works:
 
 Measured against Neon from this PC: the guest preview 1.1 s on first use, cart changes 0.4–1.1 s (about ten round trips to Singapore inside one locked transaction), addresses 0.1–0.45 s. Next to the database (milestone 9) each round trip is about a millisecond.
 
+## Checkout and payments (milestone 5b)
+
+| Endpoint | What it does |
+|---|---|
+| `POST /api/v1/checkout/summary` | The checkout page: one package per store with Standard/Express, the address, payment methods (and why one isn't available), totals. Saves nothing. |
+| `POST /api/v1/orders` | Place order (header `Idempotency-Key`). Online: returns PayMongo's page to send the shopper to. Cash on delivery: placed right away. |
+| `GET /api/v1/orders/{id}` | The waiting, failed and confirmation pages (poll it while waiting) |
+| `POST /api/v1/orders/{id}/payment` | "Try again", with the same or another method, within the 15 minutes |
+| `POST /api/v1/orders/{id}/cancel` | Give up on an unpaid order ("Back to cart"); the stock is returned |
+| `POST /api/v1/webhooks/paymongo` | PayMongo → Vendora (signed; not called by the frontend) |
+
+How it works:
+- **PayMongo Hosted Checkout.** "Pay ₱13,144 with GCash" sends the shopper to PayMongo's own page for that method; card numbers never touch Vendora. The amounts PayMongo charges are built on the server from the order (items plus each store's delivery) and must add up to the order total exactly.
+- **Placing an order takes the stock: all of it or none.** The variant rows are locked in a fixed order (so two checkouts can't deadlock), checked, then reduced, in the same transaction that creates the order, one package per store (`seller_orders`) with a 5% platform fee (0% in a store's first 30 days). Prices, item names and the address are copied into the order, so later edits never change it. Proven on real PostgreSQL: without the row lock, two shoppers both saw "1 left" and the second checkout crashed instead of getting a clean "Only 0 left".
+- **Shoppers are never charged a total they didn't see.** The page sends the total it showed; if a deal ended or a price changed meanwhile, nothing is ordered and the new total comes back (409 `total_changed`).
+- **Double clicks give one order.** The browser sends one `Idempotency-Key` per checkout; a unique index on `(user, key)` makes the database refuse a second order, even for simultaneous requests (tested on real PostgreSQL), and the repeat gets the same order back.
+- **Two ways to learn about a payment, one way to count it.** When the shopper comes back from PayMongo, the order page asks PayMongo (at most every 5 seconds); PayMongo's webhook says the same independently. Both run one `settle` step that locks the order and is idempotent: reported three times at once, a payment still counts once (one order, one email, sold counts raised once).
+- **Webhooks are verified, not trusted.** `Paymongo-Signature` is an HMAC-SHA256 of "timestamp.raw body" with the webhook's secret, compared in constant time and refused if older than 5 minutes. The route sits before the JSON parser (the raw bytes are needed) and is the one place without the CSRF check (PayMongo can't send our token; the signature is the proof). Each event is stored once in `webhook_events`; both payload shapes in PayMongo's docs are read.
+- **The 15-minute window.** An unpaid online order holds its stock for 15 minutes, with "Try again" (same or another method, including cash on delivery). A background check runs every minute: it stops PayMongo's page (sessions never expire on their own), then cancels the order and returns the stock; the cart is untouched. If PayMongo is mid-payment it refuses to stop, so the window stretches by 5 minutes, up to 45 minutes in total. A payment that went through but wasn't reported is found and settled instead of cancelled.
+- **Late and double payments.** Paid after the order was cancelled: the stock is taken again if it's all still there and the order goes through; otherwise the full amount is refunded automatically through PayMongo and the shopper is emailed. A second payment for an already-paid order is refunded the same way. A payment for the wrong amount is never accepted (logged for a person to check).
+- **If PayMongo can't be reached** when placing an order, the order is undone and the stock returned: nothing was charged. Without a PayMongo key, the checkout simply offers cash on delivery only.
+- **Cash on delivery:** up to ₱5,000 per order and at most 2 not-yet-delivered COD orders per shopper, so fake orders can't tie up sellers' stock.
+- **After payment** (or a COD order), each package goes to its seller as "Preparing" (ship within 2 days), the bought items leave the cart, the products' "sold" counts go up, and a confirmation email goes out. Sellers ship and mark deliveries in milestone 6.
+
+Tested against a fake PayMongo that behaves like the real one (pay, fail, mid-payment refusals, outages, refunds, correctly signed webhooks in both shapes); the real HTTP client is tested separately with the network stubbed (exact URLs, auth header, request body, amounts).
+
 ## If Redis (Upstash) goes down
 
 Redis commands give up after 1 second instead of waiting, and each part of the API then does what's safest for it:
@@ -197,6 +223,7 @@ Measured with Redis pointed at an unreachable address: before this, every API re
 - `tests/catalog/stores.test.ts` and `reviews.test.ts` check the store page against the database ("98% positive", shipping time, chips), Follow with real cookies and CSRF tokens (double clicks, four clicks at once, own store, suspended store), reviews (star bars, filters, sorts, paging, hidden and removed reviews, no personal data) and that every demo review sits on a delivered order of that product by that reviewer.
 - `tests/catalog/home.test.ts` and `wishlist.test.ts` check Home's sections against the search and store pages (countdowns only, weighted store ranking, suspended stores left out, the Redis cache), Recently viewed (order, hidden products, limits) and the wishlist (price drops from the saved price, deals that end, unavailable products, other shoppers' lists, simultaneous saves, the 200 limit).
 - `tests/checkout/cart.test.ts` and `addresses.test.ts` check the cart (delivery per store from exactly ₱999, stock and price notes, sold out and hidden items, the guest preview and the merge, limits, simultaneous clicks, other shoppers' carts) and addresses (formats, one default, the whole-form edit, deleting the default, limits, privacy).
+- `tests/checkout/orders.test.ts` drives checkout end to end against a fake PayMongo: placing orders (stock, snapshots, amounts), one order per Idempotency-Key, changed totals, the last unit, PayMongo down, payment by return and by signed webhook, bad signatures, wrong amounts, simultaneous reports, retries, the 15-minute window, late and duplicate payments with refunds, cash-on-delivery limits and privacy. `paymongo.test.ts` checks the real PayMongo client (requests, responses, signatures).
 - `tests/db/migration.test.ts` checks that every table, index, foreign key and safety rule really exists. CI also migrates and seeds a real PostgreSQL 18 server, the same major version as Neon.
 
 ## Structure
@@ -219,6 +246,7 @@ src/
   modules/wishlist/      saved products and price drops
   modules/cart/          the cart (signed in and guest), merged at sign-in
   modules/addresses/     saved Philippine delivery addresses
+  modules/orders/        checkout, orders, PayMongo payments and webhooks, the 15-minute window
   generated/prisma/      Prisma client (generated by `npm run db:generate`, not committed)
 prisma/
   schema.prisma          the 31 tables
@@ -237,7 +265,7 @@ openapi/openapi.yaml     the API contract
 | Compromised database | Passwords hashed with **Argon2id** (memory-hard, salted; OWASP's first choice). Refresh passes stored as SHA-256 hashes; 6-digit codes as keyed hashes (HMAC), so even a million-option code can't be reversed from a stolen copy. |
 | Brute force | Global and stricter `/auth` rate limits per IP (shared in Redis). **Lockout:** 5 wrong passwords per account + network → 15-minute pause; 20 from anywhere → pause. Codes allow 5 tries and at most 10 codes a day. |
 | XSS | Passes live in **httpOnly** cookies JavaScript can't read; `helmet` security headers; inputs validated with allow-lists (zod). |
-| CSRF | Three layers: SameSite cookies, an **Origin check**, and a signed double-submit token (`csrf-csrf`, the maintained successor of `csurf`) tied to an id that changes at sign-in and sign-out. |
+| CSRF | Three layers: SameSite cookies, an **Origin check**, and a signed double-submit token (`csrf-csrf`, the maintained successor of `csurf`) tied to an id that changes at sign-in and sign-out. The PayMongo webhook is the one exception (no cookies, no token): it's verified by its HMAC signature instead. |
 | Refresh tokens | Rotation on every use; reuse of an old one signs out the whole chain. Sign-ins end after 30 days ("keep me signed in") or 1 day at most, and refreshing never extends that. |
 | JWT blacklist | Signed-out passes and revoked chains are denied in Redis until they would have expired. |
 | Deny JWTs issued before a password change | Reset and change set a per-user "invalid before" time in Redis and revoke every other sign-in chain, so older passes stop working at once. |

@@ -50,7 +50,12 @@ const schema = z
     GOOGLE_CLIENT_ID: optional(z.string().regex(/^[\w.-]+\.apps\.googleusercontent\.com$/, "must be the client ID from Google Cloud (…apps.googleusercontent.com)")),
     GOOGLE_CLIENT_SECRET: optional(z.string().min(10, "looks too short")),
     /** Where Google sends people back. Must match one registered in Google Cloud. Default: APP_URL + /api/v1/auth/google/callback. */
-    GOOGLE_REDIRECT_URI: optional(z.url())
+    GOOGLE_REDIRECT_URI: optional(z.url()),
+
+    // --- PayMongo (5b). Online payments are off when the secret key is empty; cash on delivery still works. ---
+    PAYMONGO_SECRET_KEY: optional(z.string().regex(/^sk_(test|live)_[A-Za-z0-9]{10,}$/, "must be a PayMongo secret key (sk_test_… or sk_live_…)")),
+    /** The webhook's own secret (whsk_…), shown when the webhook is created (at deploy). Webhooks are refused until it's set. */
+    PAYMONGO_WEBHOOK_SECRET: optional(z.string().regex(/^whsk_[A-Za-z0-9]{10,}$/, "must be a PayMongo webhook secret (whsk_…)"))
   })
   .superRefine((env, ctx) => {
     if (new Set(SECRET_KEYS.map((k) => env[k])).size !== SECRET_KEYS.length) {

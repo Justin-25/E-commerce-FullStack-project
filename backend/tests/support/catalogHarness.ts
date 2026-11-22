@@ -5,6 +5,9 @@ import { cartRouter } from "../../src/modules/cart/cart.routes.js";
 import { CartService } from "../../src/modules/cart/cart.service.js";
 import { catalogRouter } from "../../src/modules/catalog/catalog.routes.js";
 import { homeRouter } from "../../src/modules/home/home.routes.js";
+import { ordersRouter } from "../../src/modules/orders/orders.routes.js";
+import { OrderService } from "../../src/modules/orders/orders.service.js";
+import { webhooksRouter } from "../../src/modules/orders/webhooks.routes.js";
 import { HomeService } from "../../src/modules/home/home.service.js";
 import { CatalogService } from "../../src/modules/catalog/catalog.service.js";
 import { reviewsRouter } from "../../src/modules/reviews/reviews.routes.js";
@@ -13,7 +16,8 @@ import { storesRouter } from "../../src/modules/stores/stores.routes.js";
 import { StoreService } from "../../src/modules/stores/stores.service.js";
 import { wishlistRouter } from "../../src/modules/wishlist/wishlist.routes.js";
 import { WishlistService } from "../../src/modules/wishlist/wishlist.service.js";
-import { createAuthHarness } from "./authHarness.js";
+import { createAuthHarness, type HarnessDeps } from "./authHarness.js";
+import { FakePaymongo, TEST_WEBHOOK_SECRET } from "./fakePaymongo.js";
 
 /**
  * The real catalog, reviews and store routes on a fresh test database filled with the
@@ -21,8 +25,24 @@ import { createAuthHarness } from "./authHarness.js";
  * stack, so signed-in actions like Follow are tested with real cookies and CSRF tokens.
  */
 export async function createCatalogHarness() {
-  const h = await createAuthHarness({}, {
-    routers: ({ prisma, kv, guards, logger }) => {
+  const paymongo = new FakePaymongo();
+  /** The order service of the most recently built app (tests call its background job directly). */
+  const services: { orders?: OrderService } = {};
+  // One order service per built app, shared by its routes and its webhook (like server.ts).
+  const built = new WeakMap<HarnessDeps, OrderService>();
+  const orderService = (deps: HarnessDeps) => {
+    const existing = built.get(deps);
+    if (existing) return existing;
+    const { prisma, kv, logger, email, config } = deps;
+    const orders = new OrderService({ prisma, cart: new CartService({ prisma }), gateway: paymongo, email, kv, appUrl: config.APP_URL, logger });
+    built.set(deps, orders);
+    services.orders = orders;
+    return orders;
+  };
+  const h = await createAuthHarness({ PAYMONGO_WEBHOOK_SECRET: TEST_WEBHOOK_SECRET }, {
+    webhooks: (deps) => [webhooksRouter({ orders: orderService(deps), secret: deps.config.PAYMONGO_WEBHOOK_SECRET, logger: deps.logger })],
+    routers: (deps) => {
+      const { prisma, kv, guards, logger } = deps;
       const catalog = new CatalogService({ prisma, kv, logger });
       return [
         catalogRouter({ catalog }),
@@ -31,7 +51,8 @@ export async function createCatalogHarness() {
         homeRouter({ home: new HomeService({ prisma, kv, catalog, logger }) }),
         wishlistRouter({ wishlist: new WishlistService({ prisma, catalog }), guards }),
         cartRouter({ cart: new CartService({ prisma }), guards }),
-        addressesRouter({ addresses: new AddressService({ prisma }), guards })
+        addressesRouter({ addresses: new AddressService({ prisma }), guards }),
+        ordersRouter({ orders: orderService(deps), guards })
       ];
     }
   });
@@ -40,7 +61,11 @@ export async function createCatalogHarness() {
   /** A product's id by its slug (demo data slugs are unique). */
   const idOf = async (slug: string) => (await h.db.prisma.product.findFirstOrThrow({ where: { slug }, select: { id: true } })).id;
 
-  return { ...h, demo, idOf };
+  const orders = () => {
+    if (!services.orders) throw new Error("no order service yet");
+    return services.orders;
+  };
+  return { ...h, demo, idOf, paymongo, orders };
 }
 
 export type CatalogHarness = Awaited<ReturnType<typeof createCatalogHarness>>;

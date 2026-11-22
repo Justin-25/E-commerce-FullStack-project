@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.6.0
+  version: 0.7.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -51,6 +51,8 @@ tags:
     description: The cart, for guests and signed-in shoppers (milestone 5a)
   - name: addresses
     description: Saved delivery addresses (milestone 5a)
+  - name: checkout
+    description: Checkout, orders and PayMongo payments (milestone 5b)
 
 paths:
   /health:
@@ -1346,6 +1348,178 @@ paths:
         "403": { $ref: "#/components/responses/CsrfInvalid" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/checkout/summary:
+    post:
+      summary: The checkout page (packages, delivery choices, address, payment methods, totals)
+      description: Saves and reserves nothing. Send it again whenever the shopper changes a choice.
+      operationId: checkoutSummary
+      tags: [checkout]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                addressId: { type: string, format: uuid, description: Default address when left out. }
+                delivery: { $ref: "#/components/schemas/DeliveryChoices" }
+                paymentMethod: { type: string, enum: [GCASH, MAYA, CARD, COD] }
+      responses:
+        "200":
+          description: The checkout page.
+          content: { application/json: { schema: { $ref: "#/components/schemas/CheckoutSummary" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/orders:
+    post:
+      summary: Place order
+      description: |
+        Takes the stock (all or nothing) and copies prices, items and the address into the order.
+        Online methods return `nextAction` with PayMongo's page; the order then waits up to 15 minutes
+        for payment. Cash on delivery (up to ₱5,000, at most 2 open COD orders) is placed right away.
+        The same `Idempotency-Key` always returns the same order (200 instead of 201).
+      operationId: placeOrder
+      tags: [checkout]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: Idempotency-Key, in: header, required: true, description: "One per checkout, reused on retries: 8–64 letters, digits, - or _.", schema: { type: string, pattern: "^[A-Za-z0-9_-]{8,64}$" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [addressId, paymentMethod, expectedTotalCentavos]
+              properties:
+                addressId: { type: string, format: uuid }
+                delivery: { $ref: "#/components/schemas/DeliveryChoices" }
+                paymentMethod: { type: string, enum: [GCASH, MAYA, CARD, COD] }
+                expectedTotalCentavos: { type: integer, minimum: 0, description: The total the shopper saw. If it changed, nothing is ordered (409 total_changed). }
+      responses:
+        "201":
+          description: Placed (COD) or waiting for payment (online).
+          content: { application/json: { schema: { $ref: "#/components/schemas/PlacedOrder" } } }
+        "200":
+          description: Already placed with this Idempotency-Key; the same order.
+          content: { application/json: { schema: { $ref: "#/components/schemas/PlacedOrder" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            CONFLICT, with `details.reason`: cart_empty, cart_issues, total_changed (+ `totalCentavos`),
+            out_of_stock (+ `variantId`, `left`), cod_over_limit, cod_too_many.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: SERVICE_UNAVAILABLE. Online payment isn't available (PayMongo unreachable or not set up). Nothing was charged; the order was undone.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/orders/{id}:
+    get:
+      summary: One of my orders (waiting, failed and confirmation pages)
+      description: |
+        While it waits for an online payment, this also asks PayMongo (at most every 5 seconds per
+        order), so the payment is confirmed when the shopper comes back even without the webhook.
+        Poll it from the waiting page. An order past its window is cancelled here too.
+      operationId: getOrder
+      tags: [checkout]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The order.
+          content: { application/json: { schema: { type: object, required: [order], properties: { order: { $ref: "#/components/schemas/Order" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/orders/{id}/payment:
+    post:
+      summary: Try paying again (same or another method)
+      description: Within the 15 minutes. The previous PayMongo page is stopped first, so it can't also be paid. Switching to COD places the order right away (if eligible).
+      operationId: retryPayment
+      tags: [checkout]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [paymentMethod], properties: { paymentMethod: { type: string, enum: [GCASH, MAYA, CARD, COD] } } }
+      responses:
+        "200":
+          description: The order, with PayMongo's new page for online methods.
+          content: { application/json: { schema: { $ref: "#/components/schemas/PlacedOrder" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT, with `details.reason`; order_closed (window over), payment_in_progress, cod_over_limit, cod_too_many.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: SERVICE_UNAVAILABLE. PayMongo unreachable; try again.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/orders/{id}/cancel:
+    post:
+      summary: Cancel an order that's still waiting for payment ("Back to cart")
+      description: The stock is returned. Placed orders are cancelled through the seller or support (later milestones).
+      operationId: cancelOrder
+      tags: [checkout]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Cancelled.
+          content: { application/json: { schema: { type: object, required: [order], properties: { order: { $ref: "#/components/schemas/Order" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT. Not waiting for payment (not_pending), or a payment is in progress (payment_in_progress).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/webhooks/paymongo:
+    post:
+      summary: PayMongo → Vendora payment events
+      description: |
+        Not called by the frontend. Verified with the `Paymongo-Signature` header (HMAC-SHA256 of
+        "<t>.<raw body>" with the webhook's secret, at most 5 minutes old) instead of cookies or a CSRF
+        token. Each event is stored once; `checkout_session.payment.paid` confirms the order the same
+        way as the shopper's return.
+      operationId: paymongoWebhook
+      tags: [checkout]
+      parameters:
+        - { name: Paymongo-Signature, in: header, required: true, schema: { type: string, example: "t=1496734173,te=1447a89e…,li=" } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        "200":
+          description: Received.
+          content:
+            application/json:
+              schema: { type: object, required: [received, result], properties: { received: { type: boolean }, result: { type: string, enum: [processed, duplicate, ignored] } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: UNAUTHORIZED. Missing, wrong or old signature.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: SERVICE_UNAVAILABLE. Webhooks aren't set up (no PAYMONGO_WEBHOOK_SECRET).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
   /api/v1/stores/{slug}:
     get:
       summary: The store page (header, About, category chips)
@@ -2024,6 +2198,110 @@ components:
         postalCode: { type: string }
         isDefault: { type: boolean }
         createdAt: { type: string, format: date-time }
+    DeliveryChoices:
+      type: object
+      description: Per store slug, STANDARD (free from ₱999, else ₱49) or EXPRESS (₱129). Stores left out get STANDARD.
+      additionalProperties: { type: string, enum: [STANDARD, EXPRESS] }
+      example: { soundcraft-audio: EXPRESS }
+    CheckoutSummary:
+      type: object
+      required: [packages, address, paymentMethods, totals, canPlaceOrder, blockers]
+      properties:
+        packages:
+          type: array
+          items:
+            type: object
+            required: [store, items, subtotalCentavos, delivery]
+            properties:
+              store: { type: object, properties: { slug: { type: string }, name: { type: string } } }
+              items: { type: array, items: { $ref: "#/components/schemas/CartLine" } }
+              subtotalCentavos: { type: integer }
+              delivery:
+                type: object
+                properties:
+                  option: { type: string, enum: [STANDARD, EXPRESS] }
+                  feeCentavos: { type: integer }
+                  days: { type: object, properties: { min: { type: integer }, max: { type: integer } } }
+                  options: { type: array, items: { type: object, properties: { option: { type: string }, feeCentavos: { type: integer }, days: { type: object } } } }
+        address: { oneOf: [{ $ref: "#/components/schemas/Address" }, { type: "null" }] }
+        paymentMethods:
+          type: array
+          items:
+            type: object
+            required: [method, available, reason]
+            properties:
+              method: { type: string, enum: [GCASH, MAYA, CARD, COD] }
+              available: { type: boolean }
+              reason: { type: [string, "null"], example: "Not available for orders over ₱5,000" }
+        totals:
+          type: object
+          properties:
+            subtotalCentavos: { type: integer }
+            deliveryCentavos: { type: integer }
+            discountCentavos: { type: integer }
+            totalCentavos: { type: integer, description: Send this back as expectedTotalCentavos. }
+            savingsCentavos: { type: integer }
+        canPlaceOrder: { type: boolean }
+        blockers: { type: array, items: { type: string, enum: [cart_empty, cart_issues, no_address] } }
+    Order:
+      type: object
+      required: [id, number, status, createdAt, placedAt, cancelledAt, payment, packages, itemCount, totals, address]
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: string, example: VD-21458 }
+        status: { type: string, enum: [PENDING_PAYMENT, PLACED, COMPLETED, CANCELLED] }
+        createdAt: { type: string, format: date-time }
+        placedAt: { type: [string, "null"], format: date-time }
+        cancelledAt: { type: [string, "null"], format: date-time }
+        payment:
+          type: object
+          required: [method, status, checkoutUrl, expiresAt, paidAt]
+          properties:
+            method: { type: string, enum: [GCASH, MAYA, CARD, COD] }
+            status: { type: string, enum: [PENDING, AWAITING_ACTION, PAID, FAILED, EXPIRED, REFUNDED] }
+            checkoutUrl: { type: [string, "null"], description: Unpaid online orders only ("Continue to payment"). }
+            expiresAt: { type: [string, "null"], format: date-time, description: Unpaid online orders only; the 15-minute window. }
+            paidAt: { type: [string, "null"], format: date-time }
+        packages:
+          type: array
+          description: One per store.
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              store: { type: object, properties: { slug: { type: string }, name: { type: string } } }
+              status: { type: string, enum: [AWAITING_PAYMENT, PREPARING, SHIPPED, DELIVERED, CANCELLED, RETURN_REQUESTED, RETURNED] }
+              deliveryOption: { type: string, enum: [STANDARD, EXPRESS] }
+              deliveryDays: { type: object, properties: { min: { type: integer }, max: { type: integer } } }
+              subtotalCentavos: { type: integer }
+              deliveryCentavos: { type: integer }
+              items:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    productId: { type: string, format: uuid }
+                    variantId: { type: string, format: uuid }
+                    title: { type: string }
+                    variantName: { type: string }
+                    imageUrl: { type: [string, "null"] }
+                    unitPriceCentavos: { type: integer, description: The price when ordered. }
+                    quantity: { type: integer }
+                    lineTotalCentavos: { type: integer }
+        itemCount: { type: integer }
+        totals: { type: object, properties: { subtotalCentavos: { type: integer }, deliveryCentavos: { type: integer }, discountCentavos: { type: integer }, totalCentavos: { type: integer } } }
+        address: { type: object, description: The address copied at checkout (editing the address book doesn't change it). }
+    PlacedOrder:
+      type: object
+      required: [order, nextAction]
+      properties:
+        order: { $ref: "#/components/schemas/Order" }
+        nextAction:
+          type: [object, "null"]
+          description: Online payment; send the shopper to PayMongo's page.
+          properties:
+            type: { type: string, const: redirect }
+            url: { type: string, example: "https://checkout.paymongo.com/cs_…" }
     RatingSummary:
       type: object
       required: [avg, count, stars]

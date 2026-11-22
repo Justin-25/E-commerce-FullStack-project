@@ -350,6 +350,7 @@ erDiagram
 - **One checkout = one `order`, split into one `seller_order` per store.** Each seller ships, tracks and gets paid separately, which is the "3 packages" on the confirmation screen.
 - **Cart and addresses** (milestone 5a, migration `20261121090000_cart_addresses`): `cart_items.priceAtAddCentavos` remembers the price the shopper last saw ("Price changed since you added it"). Addresses are stored in Philippine formats (CHECK: mobile `+639XXXXXXXXX`, 4-digit postal code) with one default per shopper (a partial unique index, `WHERE "isDefault"`).
 - **Stock can't oversell.** Placing an order takes stock with one atomic update (`stock = stock − qty` only if enough is left), all inside one transaction with the order. A failed or expired payment (15 min) puts the stock back.
+- **Checkout** (milestone 5b, migration `20261122090000_checkout_payments`): `orders.idempotencyKey` is unique per shopper, so "Place order" sent twice can only create one order. Each PayMongo attempt is a `payments` row: `providerRef` = the checkout session (`cs_…`), `providerPaymentId` = the payment that settled it (`pay_…`, used for refunds), `checkoutUrl` = PayMongo's page. An unpaid online order holds its stock until `expiresAt` (15 minutes, stretched while PayMongo is mid-payment, at most 45).
 - **`webhook_events`** (below) stores every PayMongo event ID once, so a repeated webhook can't mark an order paid twice.
 
 ## 5 · Seller money & admin

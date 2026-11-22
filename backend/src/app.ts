@@ -25,6 +25,11 @@ export interface AppOptions {
   csrf?: Csrf;
   /** Feature routers, mounted under /api/v1 (auth, products…). */
   routers?: Router[];
+  /**
+   * Webhook routers (PayMongo), mounted under /api/v1 BEFORE the JSON parser and the CSRF
+   * check: they verify a signature over the raw body instead of a CSRF token.
+   */
+  webhooks?: Router[];
   /** How long each readiness check may take before it counts as down. */
   readinessTimeoutMs?: number;
 }
@@ -32,10 +37,10 @@ export interface AppOptions {
 /**
  * Builds the Express app without starting a server, so tests can exercise the
  * exact same app with fake dependencies. Middleware order matters:
- * request ID/logging → security headers + CORS → rate limit → cookies → JSON body (10 KB)
- * → CSRF (Origin check + token, on POST/PUT/PATCH/DELETE) → routes → 404 → error handler.
+ * request ID/logging → security headers + CORS → rate limit → cookies → webhooks (raw body, signed)
+ * → JSON body (10 KB) → CSRF (Origin check + token, on POST/PUT/PATCH/DELETE) → routes → 404 → error handler.
  */
-export function createApp({ config, logger, checks = {}, rateLimitStore, csrf = createCsrf(config), routers = [], readinessTimeoutMs = 2000 }: AppOptions): Express {
+export function createApp({ config, logger, checks = {}, rateLimitStore, csrf = createCsrf(config), routers = [], webhooks = [], readinessTimeoutMs = 2000 }: AppOptions): Express {
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", config.TRUST_PROXY_HOPS);
@@ -56,6 +61,7 @@ export function createApp({ config, logger, checks = {}, rateLimitStore, csrf = 
     })
   );
   app.use(cookieParser());
+  for (const router of webhooks) app.use("/api/v1", router);
   app.use(express.json({ limit: config.JSON_BODY_LIMIT, strict: true }));
   app.use(originCheck(config.CORS_ORIGINS));
   app.use(csrf.protect);

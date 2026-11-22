@@ -608,6 +608,8 @@ model Order {
   placedAt         DateTime?     @db.Timestamptz(3) // when payment succeeded (or COD confirmed)
   expiresAt        DateTime?     @db.Timestamptz(3) // unpaid orders release their stock after this
   cancelledAt      DateTime?     @db.Timestamptz(3)
+  /// "Place order" sent twice gives one order: unique per shopper (milestone 5b).
+  idempotencyKey   String?       @db.VarChar(64)
   createdAt        DateTime      @default(now()) @db.Timestamptz(3)
   updatedAt        DateTime      @updatedAt @db.Timestamptz(3)
 
@@ -615,6 +617,7 @@ model Order {
   sellerOrders SellerOrder[]
   payments     Payment[]
 
+  @@unique([userId, idempotencyKey])
   @@index([userId, createdAt(sort: Desc)])
   @@index([status, expiresAt])
   @@map("orders")
@@ -690,17 +693,21 @@ model ShipmentEvent {
 }
 
 model Payment {
-  id             String          @id @default(uuid(7)) @db.Uuid
-  orderId        String          @db.Uuid
-  provider       PaymentProvider
-  method         PaymentMethod
-  providerRef    String?         @unique @db.VarChar(100) // PayMongo payment intent id; null for COD
-  amountCentavos Int // > 0 (CHECK)
-  status         PaymentStatus   @default(PENDING)
-  failureReason  String?         @db.VarChar(255)
-  paidAt         DateTime?       @db.Timestamptz(3)
-  createdAt      DateTime        @default(now()) @db.Timestamptz(3)
-  updatedAt      DateTime        @updatedAt @db.Timestamptz(3)
+  id                String          @id @default(uuid(7)) @db.Uuid
+  orderId           String          @db.Uuid
+  provider          PaymentProvider
+  method            PaymentMethod
+  providerRef       String?         @unique @db.VarChar(100) // PayMongo checkout session id (cs_…); null for COD
+  amountCentavos    Int // > 0 (CHECK)
+  status            PaymentStatus   @default(PENDING)
+  /// The PayMongo payment that settled this attempt (pay_…), needed for refunds.
+  providerPaymentId String?         @unique @db.VarChar(100)
+  /// PayMongo's hosted page for this attempt ("Continue to payment").
+  checkoutUrl       String?         @db.VarChar(500)
+  failureReason     String?         @db.VarChar(255)
+  paidAt            DateTime?       @db.Timestamptz(3)
+  createdAt         DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime        @updatedAt @db.Timestamptz(3)
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Restrict)
 

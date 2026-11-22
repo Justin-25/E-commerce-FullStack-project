@@ -16,11 +16,15 @@ import { GoogleService } from "./modules/auth/google.service.js";
 import { SecurityService } from "./modules/auth/security.service.js";
 import { catalogRouter } from "./modules/catalog/catalog.routes.js";
 import { CatalogService } from "./modules/catalog/catalog.service.js";
+import { PayMongoGateway } from "./lib/paymongo.js";
 import { addressesRouter } from "./modules/addresses/addresses.routes.js";
 import { AddressService } from "./modules/addresses/addresses.service.js";
 import { cartRouter } from "./modules/cart/cart.routes.js";
 import { CartService } from "./modules/cart/cart.service.js";
 import { homeRouter } from "./modules/home/home.routes.js";
+import { ordersRouter } from "./modules/orders/orders.routes.js";
+import { OrderService } from "./modules/orders/orders.service.js";
+import { webhooksRouter } from "./modules/orders/webhooks.routes.js";
 import { HomeService } from "./modules/home/home.service.js";
 import { reviewsRouter } from "./modules/reviews/reviews.routes.js";
 import { ReviewService } from "./modules/reviews/reviews.service.js";
@@ -46,6 +50,8 @@ const tokens = new TokenService(config);
 const guards = createAuthGuards({ tokens, kv, logger });
 
 const routers: Router[] = [];
+const webhooks: Router[] = [];
+let paymentSweeper: NodeJS.Timeout | undefined;
 const services: { drain(): Promise<void> }[] = [];
 if (prisma) {
   const email = new DevOutbox(logger); // config refuses this in production; a real provider comes in milestone 9
@@ -59,8 +65,21 @@ if (prisma) {
   routers.push(catalogRouter({ catalog }));
   routers.push(homeRouter({ home: new HomeService({ prisma, kv, catalog, logger }) }));
   routers.push(wishlistRouter({ wishlist: new WishlistService({ prisma, catalog }), guards }));
-  routers.push(cartRouter({ cart: new CartService({ prisma }), guards }));
+  const cart = new CartService({ prisma });
+  routers.push(cartRouter({ cart, guards }));
   routers.push(addressesRouter({ addresses: new AddressService({ prisma }), guards }));
+
+  const gateway = config.PAYMONGO_SECRET_KEY ? new PayMongoGateway(config.PAYMONGO_SECRET_KEY, logger) : null;
+  if (!gateway) logger.info("PAYMONGO_SECRET_KEY is not set — online payments are off (cash on delivery still works)");
+  const orders = new OrderService({ prisma, cart, gateway, email, kv, appUrl: config.APP_URL, logger });
+  services.push(orders);
+  routers.push(ordersRouter({ orders, guards }));
+  webhooks.push(webhooksRouter({ orders, secret: config.PAYMONGO_WEBHOOK_SECRET, logger }));
+  // Every minute: cancel unpaid orders whose 15-minute window is over, and return their stock.
+  paymentSweeper = setInterval(() => {
+    orders.expireDue().catch((err: unknown) => logger.error({ err }, "the payment-window check failed"));
+  }, 60_000);
+  paymentSweeper.unref();
   routers.push(reviewsRouter({ reviews: new ReviewService({ prisma }) }));
   routers.push(storesRouter({ stores: new StoreService({ prisma }), guards }));
   routers.push(
@@ -83,6 +102,7 @@ const app = createApp({
   logger,
   csrf,
   routers,
+  webhooks,
   checks: {
     redis: redis ? () => redis.ping() : null,
     database: prisma ? () => prisma.$queryRaw`SELECT 1` : null
@@ -101,6 +121,7 @@ function shutdown(signal: string): void {
   if (stopping) return;
   stopping = true;
   logger.info({ signal }, "shutting down");
+  if (paymentSweeper) clearInterval(paymentSweeper);
   server.close(() => {
     void Promise.allSettled(services.map((s) => s.drain()))
       .then(() => Promise.allSettled([redis?.quit(), prisma?.$disconnect()]))
