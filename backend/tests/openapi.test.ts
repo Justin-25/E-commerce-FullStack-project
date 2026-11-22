@@ -22,6 +22,7 @@ import { addressesRouter } from "../src/modules/addresses/addresses.routes.js";
 import type { AddressService } from "../src/modules/addresses/addresses.service.js";
 import { cartRouter } from "../src/modules/cart/cart.routes.js";
 import type { CartService } from "../src/modules/cart/cart.service.js";
+import type { RecommendationService } from "../src/modules/cart/recommendations.js";
 import { homeRouter } from "../src/modules/home/home.routes.js";
 import { ordersRouter } from "../src/modules/orders/orders.routes.js";
 import type { OrderService } from "../src/modules/orders/orders.service.js";
@@ -72,11 +73,11 @@ describe("openapi.yaml", () => {
     const routers = [
       auth,
       catalogRouter({ catalog: {} as CatalogService }),
-      reviewsRouter({ reviews: {} as ReviewService }),
+      reviewsRouter({ reviews: {} as ReviewService, guards }),
       storesRouter({ stores: {} as StoreService, guards }),
       homeRouter({ home: {} as HomeService }),
       wishlistRouter({ wishlist: {} as WishlistService, guards }),
-      cartRouter({ cart: {} as CartService, guards }),
+      cartRouter({ cart: {} as CartService, recommendations: {} as RecommendationService, guards }),
       addressesRouter({ addresses: {} as AddressService, guards }),
       ordersRouter({ orders: {} as OrderService, guards }),
       webhooksRouter({ orders: {} as OrderService, secret: undefined })

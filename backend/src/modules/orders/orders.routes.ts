@@ -1,7 +1,7 @@
 import { Router, type RequestHandler } from "express";
 import { privateNoStore } from "../../lib/httpCache.js";
 import { signedInUserId, type AuthGuards } from "../../middleware/auth.js";
-import { idempotencyKeySchema, orderIdSchema, placeOrderSchema, retryPaymentSchema, summarySchema } from "./orders.schemas.js";
+import { idempotencyKeySchema, orderIdSchema, orderListSchema, placeOrderSchema, retryPaymentSchema, summarySchema } from "./orders.schemas.js";
 import type { OrderService } from "./orders.service.js";
 
 /** Checkout and the shopper's orders. Signed in, never cached; changes are CSRF-checked app-wide. */
@@ -22,8 +22,16 @@ export function ordersRouter({ orders, guards }: { orders: OrderService; guards:
     res.status(result.replayed ? 200 : 201).json({ order: result.order, nextAction: result.nextAction });
   });
 
+  router.get("/orders", ...guards.requireAuth, live, async (req, res) => {
+    res.json(await orders.list(signedInUserId(req), orderListSchema.parse(req.query)));
+  });
+
   router.get("/orders/:id", ...guards.requireAuth, live, async (req, res) => {
     res.json({ order: await orders.get(signedInUserId(req), orderIdSchema.parse(req.params).id) });
+  });
+
+  router.post("/orders/:id/buy-again", ...guards.requireAuth, live, async (req, res) => {
+    res.json(await orders.buyAgain(signedInUserId(req), orderIdSchema.parse(req.params).id));
   });
 
   router.post("/orders/:id/payment", ...guards.requireAuth, live, async (req, res) => {

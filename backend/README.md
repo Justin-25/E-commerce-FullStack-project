@@ -199,6 +199,27 @@ How it works:
 
 Tested against a fake PayMongo that behaves like the real one (pay, fail, mid-payment refusals, outages, refunds, correctly signed webhooks in both shapes); the real HTTP client is tested separately with the network stubbed (exact URLs, auth header, request body, amounts).
 
+## Your orders, tracking and reviews (milestone 5c)
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/v1/orders?tab=&q=&page=` | "Your orders": newest first, 10 per page; tabs All / To ship / On the way / Delivered with their counts; search by order number or product name |
+| `GET /api/v1/orders/{id}` | The order page and package tracking (the same endpoint as the waiting and confirmation pages) |
+| `POST /api/v1/orders/{id}/buy-again` | "Buy again": the order's items go back into the cart |
+| `POST /api/v1/reviews` | "Write a review" for an item you bought, once its package is delivered |
+| `PATCH` / `DELETE /api/v1/reviews/{id}` | Edit or delete your review, any time |
+| `GET /api/v1/cart/recommendations` | "Recommended for you" on the cart page (signed in or guest) |
+
+How it works:
+- **Tabs follow the packages.** An order is "To ship" when at least one of its packages is still being prepared, "On the way" when one is shipped, so an order with two packages can be in both tabs at once (that's how a shopper thinks about it). The tab counts ignore the search.
+- **Search** takes "VD-21458", "#VD-21458" or "21458", or words from a product's name. Prisma's `contains` becomes SQL `ILIKE '%…%'` without escaping `%` and `_`, so a "%" typed in the box matched every order until they were escaped (a test caught it).
+- **Tracking in 4 real steps: Ordered → Preparing → Shipped → Delivered**, each with the moment it was reached. Sellers only mark "shipped" (with courier and tracking number) and "delivered" (milestone 6), and there's no courier connection, so the design's "Packed" and "Out for delivery" would be steps that never light up. The timeline is built from the same facts (paid with GCash, shipped with LBC · tracking 8841 2201, delivered), plus any extra courier updates in `shipment_events`.
+- **Arrival is a date range, not a promise to the hour:** the "2–5 days" from checkout (Express 1–2), counted from when the order was paid, shown only while the package is on its way.
+- **Buy again** reuses the sign-in cart merge: same quantities, capped by stock and 99; sold-out or removed items are skipped and reported, never an error. Not for an order still waiting for payment (its items are still held for it).
+- **Reviews are for things you received.** One per order item (a unique index), only once that package is delivered, only by the buyer. Stars are required; the title and text are optional. Edit or delete any time; a review hidden by moderation stays hidden when edited.
+- **Ratings stay true under load.** Every write recomputes the product's and the store's rating from the reviews in the same transaction, with the store row locked first. Without the lock, two reviews written at the same moment could each recompute from a count that's missing the other one (tested with simultaneous reviews).
+- **Recommended for you** (5 cards): best sellers from the cart's categories first ("Based on your cart"); signed in, then the wishlist's categories and followed stores; topped up with best sellers (signed in) or top rated (guests). Never what's in the cart, never sold out. "See all" searches the category most of the cart is in.
+
 ## If Redis (Upstash) goes down
 
 Redis commands give up after 1 second instead of waiting, and each part of the API then does what's safest for it:
@@ -224,6 +245,7 @@ Measured with Redis pointed at an unreachable address: before this, every API re
 - `tests/catalog/home.test.ts` and `wishlist.test.ts` check Home's sections against the search and store pages (countdowns only, weighted store ranking, suspended stores left out, the Redis cache), Recently viewed (order, hidden products, limits) and the wishlist (price drops from the saved price, deals that end, unavailable products, other shoppers' lists, simultaneous saves, the 200 limit).
 - `tests/checkout/cart.test.ts` and `addresses.test.ts` check the cart (delivery per store from exactly ₱999, stock and price notes, sold out and hidden items, the guest preview and the merge, limits, simultaneous clicks, other shoppers' carts) and addresses (formats, one default, the whole-form edit, deleting the default, limits, privacy).
 - `tests/checkout/orders.test.ts` drives checkout end to end against a fake PayMongo: placing orders (stock, snapshots, amounts), one order per Idempotency-Key, changed totals, the last unit, PayMongo down, payment by return and by signed webhook, bad signatures, wrong amounts, simultaneous reports, retries, the 15-minute window, late and duplicate payments with refunds, cash-on-delivery limits and privacy. `paymongo.test.ts` checks the real PayMongo client (requests, responses, signatures).
+- `tests/checkout/my-orders.test.ts` checks "Your orders" (tabs and counts, packages in two tabs, search by number and product name with `%` and `_` as plain text, pages, unpaid and cancelled orders, privacy), tracking (the 4 steps, arrival dates for Standard and Express, the timeline with courier updates) and Buy again (stock, sold-out and removed items). `recommendations.test.ts` checks the cart's "Recommended for you" (cart categories first, never cart items, sold-out or draft products, the wishlist and followed stores, top-ups, "See all"). `tests/catalog/write-reviews.test.ts` checks writing, editing and deleting reviews (only after delivery, one per item even when sent twice at once, only your own, field rules) and that the stored ratings always equal what the reviews say, also when several shoppers review one store at the same moment.
 - `tests/db/migration.test.ts` checks that every table, index, foreign key and safety rule really exists. CI also migrates and seeds a real PostgreSQL 18 server, the same major version as Neon.
 
 ## Structure
@@ -241,12 +263,12 @@ src/
   modules/auth/          sign-in: routes → service (rules) → tokens, lockout, one-time codes, emails
   modules/catalog/       categories, search, product page: routes → service → search SQL + one pricing rule + one visibility rule
   modules/stores/        store page, follow
-  modules/reviews/       product and store reviews; ratings.ts recomputes ratings from reviews
+  modules/reviews/       product and store reviews, writing your own; ratings.ts recomputes ratings from reviews
   modules/home/          Home's sections (cached for a minute)
   modules/wishlist/      saved products and price drops
-  modules/cart/          the cart (signed in and guest), merged at sign-in
+  modules/cart/          the cart (signed in and guest), merged at sign-in; Recommended for you
   modules/addresses/     saved Philippine delivery addresses
-  modules/orders/        checkout, orders, PayMongo payments and webhooks, the 15-minute window
+  modules/orders/        checkout, orders, PayMongo payments and webhooks, the 15-minute window; your orders, tracking, buy again
   generated/prisma/      Prisma client (generated by `npm run db:generate`, not committed)
 prisma/
   schema.prisma          the 31 tables

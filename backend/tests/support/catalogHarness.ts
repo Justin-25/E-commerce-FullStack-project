@@ -3,6 +3,7 @@ import { addressesRouter } from "../../src/modules/addresses/addresses.routes.js
 import { AddressService } from "../../src/modules/addresses/addresses.service.js";
 import { cartRouter } from "../../src/modules/cart/cart.routes.js";
 import { CartService } from "../../src/modules/cart/cart.service.js";
+import { RecommendationService } from "../../src/modules/cart/recommendations.js";
 import { catalogRouter } from "../../src/modules/catalog/catalog.routes.js";
 import { homeRouter } from "../../src/modules/home/home.routes.js";
 import { ordersRouter } from "../../src/modules/orders/orders.routes.js";
@@ -46,11 +47,11 @@ export async function createCatalogHarness() {
       const catalog = new CatalogService({ prisma, kv, logger });
       return [
         catalogRouter({ catalog }),
-        reviewsRouter({ reviews: new ReviewService({ prisma }) }),
+        reviewsRouter({ reviews: new ReviewService({ prisma }), guards }),
         storesRouter({ stores: new StoreService({ prisma }), guards }),
         homeRouter({ home: new HomeService({ prisma, kv, catalog, logger }) }),
         wishlistRouter({ wishlist: new WishlistService({ prisma, catalog }), guards }),
-        cartRouter({ cart: new CartService({ prisma }), guards }),
+        cartRouter({ cart: new CartService({ prisma }), recommendations: new RecommendationService({ prisma, catalog }), guards }),
         addressesRouter({ addresses: new AddressService({ prisma }), guards }),
         ordersRouter({ orders: orderService(deps), guards })
       ];

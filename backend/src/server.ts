@@ -21,6 +21,7 @@ import { addressesRouter } from "./modules/addresses/addresses.routes.js";
 import { AddressService } from "./modules/addresses/addresses.service.js";
 import { cartRouter } from "./modules/cart/cart.routes.js";
 import { CartService } from "./modules/cart/cart.service.js";
+import { RecommendationService } from "./modules/cart/recommendations.js";
 import { homeRouter } from "./modules/home/home.routes.js";
 import { ordersRouter } from "./modules/orders/orders.routes.js";
 import { OrderService } from "./modules/orders/orders.service.js";
@@ -66,7 +67,7 @@ if (prisma) {
   routers.push(homeRouter({ home: new HomeService({ prisma, kv, catalog, logger }) }));
   routers.push(wishlistRouter({ wishlist: new WishlistService({ prisma, catalog }), guards }));
   const cart = new CartService({ prisma });
-  routers.push(cartRouter({ cart, guards }));
+  routers.push(cartRouter({ cart, recommendations: new RecommendationService({ prisma, catalog }), guards }));
   routers.push(addressesRouter({ addresses: new AddressService({ prisma }), guards }));
 
   const gateway = config.PAYMONGO_SECRET_KEY ? new PayMongoGateway(config.PAYMONGO_SECRET_KEY, logger) : null;
@@ -80,7 +81,7 @@ if (prisma) {
     orders.expireDue().catch((err: unknown) => logger.error({ err }, "the payment-window check failed"));
   }, 60_000);
   paymentSweeper.unref();
-  routers.push(reviewsRouter({ reviews: new ReviewService({ prisma }) }));
+  routers.push(reviewsRouter({ reviews: new ReviewService({ prisma }), guards }));
   routers.push(storesRouter({ stores: new StoreService({ prisma }), guards }));
   routers.push(
     authRouter({

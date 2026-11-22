@@ -1,7 +1,9 @@
 import type { Prisma, PrismaClient } from "../../generated/prisma/client.js";
 import { AppError } from "../../lib/errors.js";
+import { isUniqueViolation } from "../../lib/prismaErrors.js";
 import { visibleProduct } from "../catalog/visibility.js";
-import { REVIEWS_PAGE_SIZE, type ReviewQuery } from "./reviews.schemas.js";
+import { recomputeRatings } from "./ratings.js";
+import { REVIEWS_PAGE_SIZE, type EditReviewInput, type ReviewQuery, type WriteReviewInput } from "./reviews.schemas.js";
 
 export interface RatingSummary {
   avg: number;
@@ -32,9 +34,108 @@ const ORDER: Record<ReviewQuery["sort"], Prisma.ReviewOrderByWithRelationInput[]
   lowest: [{ rating: "asc" }, { createdAt: "desc" }, { id: "desc" }]
 };
 
-/** Reading reviews: a product's Reviews tab and a store's Reviews tab. Public. */
+/** A review as its author sees it (on the order page and after writing or editing it). */
+export interface MyReview {
+  id: string;
+  orderItemId: string;
+  productId: string;
+  rating: number;
+  title: string | null;
+  body: string | null;
+  /** HIDDEN = taken off the product page by moderation (milestone 7); its author still sees it. */
+  status: "PUBLISHED" | "HIDDEN";
+  createdAt: string;
+  updatedAt: string;
+}
+
+const mine = (r: { id: string; orderItemId: string; productId: string; rating: number; title: string | null; body: string | null; status: "PUBLISHED" | "HIDDEN"; createdAt: Date; updatedAt: Date }): MyReview => ({
+  id: r.id,
+  orderItemId: r.orderItemId,
+  productId: r.productId,
+  rating: r.rating,
+  title: r.title,
+  body: r.body,
+  status: r.status,
+  createdAt: r.createdAt.toISOString(),
+  updatedAt: r.updatedAt.toISOString()
+});
+const reviewNotFound = () => new AppError(404, "NOT_FOUND", "This review doesn't exist.");
+const alreadyReviewed = () => new AppError(409, "CONFLICT", "You've already reviewed this item. You can edit your review instead.", { details: { reason: "already_reviewed" } });
+
+/**
+ * Review changes for one store run one at a time. Ratings are recomputed from the reviews
+ * inside the same transaction; without this lock, two reviews written at the same moment
+ * could each recompute from a count that's missing the other one (proven on PostgreSQL).
+ * Locking the store covers both the product's and the store's rating.
+ */
+async function lockStoreOf(tx: Prisma.TransactionClient, productId: string) {
+  await tx.$queryRaw`SELECT s.id FROM stores s JOIN products p ON p."storeId" = s.id WHERE p.id = ${productId}::uuid FOR UPDATE OF s`;
+}
+
+/**
+ * Reviews: reading a product's and a store's Reviews tab (public), and writing, editing and
+ * deleting your own (signed in). A review needs an item you bought and received: one review
+ * per order item, enforced by a unique index.
+ */
 export class ReviewService {
   constructor(private readonly deps: { prisma: PrismaClient }) {}
+
+  /** "Write a review": only for an item in one of your orders, once its package is delivered. */
+  async write(userId: string, input: WriteReviewInput): Promise<MyReview> {
+    try {
+      return await this.deps.prisma.$transaction(async (tx) => {
+        const item = await tx.orderItem.findFirst({
+          where: { id: input.orderItemId, sellerOrder: { order: { userId } } },
+          select: { id: true, productId: true, sellerOrder: { select: { deliveredAt: true } }, review: { select: { id: true } } }
+        });
+        if (!item) throw new AppError(404, "NOT_FOUND", "This item isn't in your orders.");
+        if (!item.sellerOrder.deliveredAt) throw new AppError(409, "CONFLICT", "You can review this item once it's delivered.", { details: { reason: "not_delivered" } });
+        if (item.review) throw alreadyReviewed();
+        await lockStoreOf(tx, item.productId);
+        const review = await tx.review.create({
+          data: { productId: item.productId, userId, orderItemId: item.id, rating: input.rating, title: input.title ?? null, body: input.body ?? null }
+        });
+        await recomputeRatings(tx, { productIds: [item.productId] });
+        return mine(review);
+      });
+    } catch (err) {
+      if (isUniqueViolation(err)) throw alreadyReviewed(); // the same item reviewed twice at the same moment
+      throw err;
+    }
+  }
+
+  /** Edit your review (any time): only the stars, title and text sent change. */
+  async edit(userId: string, reviewId: string, input: EditReviewInput): Promise<MyReview> {
+    return this.deps.prisma.$transaction(async (tx) => {
+      const existing = await tx.review.findFirst({ where: { id: reviewId, userId }, select: { productId: true } });
+      if (!existing) throw reviewNotFound();
+      await lockStoreOf(tx, existing.productId);
+      // updateMany + count: deleted in another tab meanwhile → 404, not a crash.
+      const { count } = await tx.review.updateMany({
+        where: { id: reviewId, userId },
+        data: {
+          ...(input.rating !== undefined ? { rating: input.rating } : {}),
+          ...(input.title !== undefined ? { title: input.title } : {}),
+          ...(input.body !== undefined ? { body: input.body } : {})
+        }
+      });
+      if (count === 0) throw reviewNotFound();
+      await recomputeRatings(tx, { productIds: [existing.productId] });
+      return mine(await tx.review.findUniqueOrThrow({ where: { id: reviewId } }));
+    });
+  }
+
+  /** Delete your review (any time); the item can be reviewed again later. */
+  async remove(userId: string, reviewId: string): Promise<void> {
+    await this.deps.prisma.$transaction(async (tx) => {
+      const existing = await tx.review.findFirst({ where: { id: reviewId, userId }, select: { productId: true } });
+      if (!existing) throw reviewNotFound();
+      await lockStoreOf(tx, existing.productId);
+      const { count } = await tx.review.deleteMany({ where: { id: reviewId, userId } });
+      if (count === 0) throw reviewNotFound(); // deleted in another tab meanwhile
+      await recomputeRatings(tx, { productIds: [existing.productId] });
+    });
+  }
 
   /** A product's reviews. 404 when the product page itself would be. */
   async forProduct(productId: string, query: ReviewQuery) {

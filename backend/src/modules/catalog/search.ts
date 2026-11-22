@@ -82,6 +82,10 @@ export interface SearchFilters {
   countdown?: boolean | undefined;
   /** Only these products (Recently viewed, the wishlist); invisible ones are still left out. */
   productIds?: string[] | undefined;
+  /** Never these products ("Recommended for you" leaves out what's already in the cart). */
+  excludeProductIds?: string[] | undefined;
+  /** Only products with at least one unit on sale (recommendations shouldn't suggest sold-out items). */
+  inStock?: boolean | undefined;
 }
 
 export function buildSearch(f: SearchFilters, mode: MatchMode = "words") {
@@ -90,6 +94,8 @@ export function buildSearch(f: SearchFilters, mode: MatchMode = "words") {
   let rank = Prisma.sql`0`;
   const base: Prisma.Sql[] = [Prisma.sql`p.status = 'ACTIVE'`];
   if (f.productIds) base.push(Prisma.sql`p.id = ANY(${f.productIds}::uuid[])`);
+  if (f.excludeProductIds?.length) base.push(Prisma.sql`NOT (p.id = ANY(${f.excludeProductIds}::uuid[]))`);
+  if (f.inStock) base.push(Prisma.sql`EXISTS (SELECT 1 FROM product_variants vs WHERE vs."productId" = p.id AND vs."isActive" AND vs.stock > 0)`);
   if (f.countdown) base.push(Prisma.sql`cheapest.sale_ends_at IS NOT NULL`);
   if (text && mode === "words") {
     base.push(Prisma.sql`p."searchVector" @@ ${tsQuery}`);

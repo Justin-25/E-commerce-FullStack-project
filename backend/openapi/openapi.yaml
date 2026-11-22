@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.7.0
+  version: 0.8.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -42,7 +42,7 @@ tags:
   - name: stores
     description: Store pages and following stores (milestone 4b)
   - name: reviews
-    description: Reading product and store reviews (milestone 4b)
+    description: Reading product and store reviews (milestone 4b); writing your own (milestone 5c)
   - name: home
     description: The Home page's sections (milestone 4c)
   - name: wishlist
@@ -52,7 +52,7 @@ tags:
   - name: addresses
     description: Saved delivery addresses (milestone 5a)
   - name: checkout
-    description: Checkout, orders and PayMongo payments (milestone 5b)
+    description: Checkout, orders and PayMongo payments (milestone 5b); your orders, tracking and buy again (milestone 5c)
 
 paths:
   /health:
@@ -1164,6 +1164,25 @@ paths:
           content: { application/json: { schema: { type: object, required: [cart], properties: { cart: { $ref: "#/components/schemas/Cart" } } } } }
         "400": { $ref: "#/components/responses/BadRequest" }
 
+  /api/v1/cart/recommendations:
+    get:
+      summary: Recommended for you (the cart page)
+      description: |
+        Up to 5 products: best sellers from the cart's categories first ("Based on your cart"); signed in,
+        then the wishlist's categories and followed stores; topped up with best sellers (signed in) or top
+        rated (guests). Never what's in the cart, never sold out. Signed in, the account cart is used and
+        `items` is ignored; a guest sends their browser cart. Never cached.
+      operationId: cartRecommendations
+      tags: [cart]
+      security: [{}, { accessCookie: [] }]
+      parameters:
+        - { name: items, in: query, required: false, description: "Guests: the browser cart, as for /cart/preview.", schema: { type: string } }
+      responses:
+        "200":
+          description: The recommendations.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Recommendations" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
   /api/v1/cart/items:
     post:
       summary: Add to cart
@@ -1376,6 +1395,25 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/orders:
+    get:
+      summary: Your orders
+      description: |
+        Newest first, 10 per page. A tab shows the orders with at least one package in that state, so an
+        order with one package shipped and one still to ship is in both. `counts` are for the tabs (not
+        the search). Unpaid and cancelled orders are listed too (under All).
+      operationId: listOrders
+      tags: [checkout]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: tab, in: query, schema: { type: string, enum: [all, to_ship, on_the_way, delivered], default: all } }
+        - { name: q, in: query, description: "An order number (VD-21458, #VD-21458 or 21458) or words from a product's name. % and _ are plain text.", schema: { type: string, maxLength: 100 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 1 } }
+      responses:
+        "200":
+          description: One page of orders and the tab counts.
+          content: { application/json: { schema: { $ref: "#/components/schemas/OrderList" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       summary: Place order
       description: |
@@ -1491,6 +1529,30 @@ paths:
           description: CONFLICT. Not waiting for payment (not_pending), or a payment is in progress (payment_in_progress).
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
+  /api/v1/orders/{id}/buy-again:
+    post:
+      summary: Buy again
+      description: |
+        The order's items go back into the cart with the same quantities (added to what's there), capped
+        by stock and 99. Items that can't be bought any more are skipped and reported, never an error.
+        Pressing it twice adds them twice.
+      operationId: buyAgain
+      tags: [checkout]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The cart, and what happened to each item.
+          content: { application/json: { schema: { type: object, required: [cart, merge], properties: { cart: { $ref: "#/components/schemas/Cart" }, merge: { $ref: "#/components/schemas/CartMergeResult" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT (`not_paid`). The order is still waiting for payment; its items are still held for it.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
   /api/v1/webhooks/paymongo:
     post:
       summary: PayMongo → Vendora payment events
@@ -1519,6 +1581,85 @@ paths:
         "503":
           description: SERVICE_UNAVAILABLE. Webhooks aren't set up (no PAYMONGO_WEBHOOK_SECRET).
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/reviews:
+    post:
+      summary: Write a review
+      description: |
+        For one item from one of your orders, once its package is delivered; one review per item bought.
+        Stars are required, the title and text are optional (empty = none). The product's and the store's
+        ratings are recomputed in the same transaction. Product review pages are cached for up to 60 s.
+      operationId: writeReview
+      tags: [reviews]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [orderItemId, rating]
+              properties:
+                orderItemId: { type: string, format: uuid, description: "From the order page: packages[].items[].id." }
+                rating: { type: integer, minimum: 1, maximum: 5 }
+                title: { type: [string, "null"], maxLength: 120 }
+                body: { type: [string, "null"], maxLength: 2000 }
+      responses:
+        "201":
+          description: Published.
+          content: { application/json: { schema: { type: object, required: [review], properties: { review: { $ref: "#/components/schemas/MyReview" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT, with `details.reason`; not_delivered, already_reviewed.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/reviews/{id}:
+    patch:
+      summary: Edit your review
+      description: Any time. Only the fields sent change (stars, title, text); the ratings are recomputed. A review hidden by moderation stays hidden.
+      operationId: editReview
+      tags: [reviews]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              minProperties: 1
+              properties:
+                rating: { type: integer, minimum: 1, maximum: 5 }
+                title: { type: [string, "null"], maxLength: 120 }
+                body: { type: [string, "null"], maxLength: 2000 }
+      responses:
+        "200":
+          description: Saved.
+          content: { application/json: { schema: { type: object, required: [review], properties: { review: { $ref: "#/components/schemas/MyReview" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      summary: Delete your review
+      description: Any time; the ratings are recomputed, and the item can be reviewed again.
+      operationId: deleteReview
+      tags: [reviews]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Deleted. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/stores/{slug}:
     get:
@@ -2264,22 +2405,46 @@ components:
             paidAt: { type: [string, "null"], format: date-time }
         packages:
           type: array
-          description: One per store.
+          description: One per store, in the cart's order.
           items:
             type: object
             properties:
               id: { type: string, format: uuid }
-              store: { type: object, properties: { slug: { type: string }, name: { type: string } } }
+              store:
+                type: object
+                description: The seller card on the tracking page.
+                properties:
+                  slug: { type: string }
+                  name: { type: string }
+                  logoUrl: { type: [string, "null"] }
+                  rating: { type: object, properties: { avg: { type: number }, count: { type: integer } } }
               status: { type: string, enum: [AWAITING_PAYMENT, PREPARING, SHIPPED, DELIVERED, CANCELLED, RETURN_REQUESTED, RETURNED] }
               deliveryOption: { type: string, enum: [STANDARD, EXPRESS] }
               deliveryDays: { type: object, properties: { min: { type: integer }, max: { type: integer } } }
               subtotalCentavos: { type: integer }
               deliveryCentavos: { type: integer }
+              courier: { type: [string, "null"], example: LBC, description: Set by the seller when shipping (milestone 6). }
+              trackingNumber: { type: [string, "null"], example: 8841 2201 }
+              shipBy: { type: [string, "null"], format: date-time, description: The seller's deadline (2 days after payment). }
+              shippedAt: { type: [string, "null"], format: date-time }
+              deliveredAt: { type: [string, "null"], format: date-time }
+              cancelledAt: { type: [string, "null"], format: date-time }
+              estimatedDelivery: { $ref: "#/components/schemas/DeliveryEstimate" }
+              steps:
+                type: array
+                description: The tracking stepper, always these 4 in this order; `at` is when each was reached (null = not yet).
+                items:
+                  type: object
+                  properties:
+                    step: { type: string, enum: [ORDERED, PREPARING, SHIPPED, DELIVERED] }
+                    at: { type: [string, "null"], format: date-time }
+              events: { type: array, description: The timeline, newest first., items: { $ref: "#/components/schemas/TrackingEvent" } }
               items:
                 type: array
                 items:
                   type: object
                   properties:
+                    id: { type: string, format: uuid, description: The order item (what a review is written for). }
                     productId: { type: string, format: uuid }
                     variantId: { type: string, format: uuid }
                     title: { type: string }
@@ -2288,6 +2453,8 @@ components:
                     unitPriceCentavos: { type: integer, description: The price when ordered. }
                     quantity: { type: integer }
                     lineTotalCentavos: { type: integer }
+                    review: { oneOf: [{ $ref: "#/components/schemas/MyReview" }, { type: "null" }], description: Your review of this item, if any. }
+                    canReview: { type: boolean, description: '"Write a review": delivered and not reviewed yet.' }
         itemCount: { type: integer }
         totals: { type: object, properties: { subtotalCentavos: { type: integer }, deliveryCentavos: { type: integer }, discountCentavos: { type: integer }, totalCentavos: { type: integer } } }
         address: { type: object, description: The address copied at checkout (editing the address book doesn't change it). }
@@ -2302,6 +2469,92 @@ components:
           properties:
             type: { type: string, const: redirect }
             url: { type: string, example: "https://checkout.paymongo.com/cs_…" }
+    DeliveryEstimate:
+      type: [object, "null"]
+      description: '"Arrives Nov 24 – Nov 27": the delivery promise (Standard 2–5 days, Express 1–2) counted from when the order was paid; only while preparing or shipped.'
+      properties:
+        earliest: { type: string, format: date-time }
+        latest: { type: string, format: date-time }
+    TrackingEvent:
+      type: object
+      required: [type, message, location, at]
+      properties:
+        type: { type: string, enum: [placed, shipped, update, delivered, cancelled], description: "update = an extra courier update (milestone 6)." }
+        message: { type: string, example: Shipped with LBC · tracking 8841 2201 }
+        location: { type: [string, "null"], example: Pasay City }
+        at: { type: string, format: date-time }
+    OrderCard:
+      type: object
+      description: One order on "Your orders".
+      required: [id, number, status, createdAt, placedAt, cancelledAt, paymentMethod, totalCentavos, itemCount, packages]
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: string, example: VD-21458 }
+        status: { type: string, enum: [PENDING_PAYMENT, PLACED, COMPLETED, CANCELLED] }
+        createdAt: { type: string, format: date-time }
+        placedAt: { type: [string, "null"], format: date-time }
+        cancelledAt: { type: [string, "null"], format: date-time }
+        paymentMethod: { type: string, enum: [GCASH, MAYA, CARD, COD] }
+        totalCentavos: { type: integer }
+        itemCount: { type: integer }
+        packages:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              store: { type: object, properties: { slug: { type: string }, name: { type: string } } }
+              status: { type: string, enum: [AWAITING_PAYMENT, PREPARING, SHIPPED, DELIVERED, CANCELLED, RETURN_REQUESTED, RETURNED] }
+              itemCount: { type: integer }
+              items:
+                type: array
+                maxItems: 3
+                description: The first 3 items ("AuraSound Pro … + 1 more").
+                items: { type: object, properties: { title: { type: string }, variantName: { type: string }, imageUrl: { type: [string, "null"] }, quantity: { type: integer } } }
+              moreItems: { type: integer }
+              estimatedDelivery: { $ref: "#/components/schemas/DeliveryEstimate" }
+              courier: { type: [string, "null"] }
+              trackingNumber: { type: [string, "null"] }
+              shippedAt: { type: [string, "null"], format: date-time }
+              deliveredAt: { type: [string, "null"], format: date-time }
+              reviewableItems: { type: integer, description: Delivered items not reviewed yet ("Write a review" when > 0). }
+    OrderList:
+      type: object
+      required: [items, counts, page, pageSize, totalItems, totalPages]
+      properties:
+        items: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/OrderCard" } }
+        counts:
+          type: object
+          description: For the tabs ("To ship (1)"), regardless of the search.
+          properties: { all: { type: integer }, toShip: { type: integer }, onTheWay: { type: integer }, delivered: { type: integer } }
+        page: { type: integer }
+        pageSize: { type: integer, const: 10 }
+        totalItems: { type: integer }
+        totalPages: { type: integer }
+    MyReview:
+      type: object
+      description: A review as its author sees it.
+      required: [id, orderItemId, productId, rating, title, body, status, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        orderItemId: { type: string, format: uuid }
+        productId: { type: string, format: uuid }
+        rating: { type: integer, minimum: 1, maximum: 5 }
+        title: { type: [string, "null"] }
+        body: { type: [string, "null"] }
+        status: { type: string, enum: [PUBLISHED, HIDDEN], description: HIDDEN = taken off the product page by moderation (milestone 7). }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Recommendations:
+      type: object
+      required: [basedOn, items, seeAll]
+      properties:
+        basedOn: { type: string, enum: [cart, you, popular], description: 'For the subtitle: cart = "Based on your cart"; you = wishlist or followed stores; popular = best sellers or top rated.' }
+        items: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/ProductCard" } }
+        seeAll:
+          type: [object, "null"]
+          description: '"See all": search this category (the one most of the cart is in). Null for an empty cart.'
+          properties: { categorySlug: { type: string }, categoryName: { type: string } }
     RatingSummary:
       type: object
       required: [avg, count, stars]

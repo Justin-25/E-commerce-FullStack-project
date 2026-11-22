@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MAX_PAGE } from "../catalog/catalog.schemas.js";
 
 export const PAYMENT_METHODS = ["GCASH", "MAYA", "CARD", "COD"] as const;
 export type PaymentMethodChoice = (typeof PAYMENT_METHODS)[number];
@@ -40,5 +41,22 @@ export const idempotencyKeySchema = z
 export const retryPaymentSchema = z.strictObject({ paymentMethod: z.enum(PAYMENT_METHODS, { error: "Choose a payment method" }) });
 export const orderIdSchema = z.object({ id: z.uuid({ error: "Order not found" }) });
 
+/** "Your orders" tabs: an order is in a tab when at least one of its packages is. */
+export const ORDER_TABS = ["all", "to_ship", "on_the_way", "delivered"] as const;
+export const ORDERS_PAGE_SIZE = 10;
+
+export const orderListSchema = z.object({
+  tab: z.enum(ORDER_TABS, { error: "Unknown tab" }).default("all"),
+  /** "Search by order number or product": "VD-21458", "21458" or words from a product name. */
+  q: z
+    .string()
+    .trim()
+    .max(100, { error: "Search for at most 100 characters" })
+    .optional()
+    .transform((v) => v || undefined),
+  page: z.coerce.number().int().min(1).max(MAX_PAGE, { error: `Only the first ${MAX_PAGE} pages are available` }).default(1)
+});
+
 export type SummaryInput = z.infer<typeof summarySchema>;
 export type PlaceOrderInput = z.infer<typeof placeOrderSchema>;
+export type OrderListQuery = z.infer<typeof orderListSchema>;

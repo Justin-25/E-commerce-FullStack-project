@@ -8,13 +8,16 @@ import type { KeyValueStore } from "../../lib/kv.js";
 import type { Logger } from "../../lib/logger.js";
 import type { CheckoutState, OnlineMethod, PaidPayment, PaymentGateway, WebhookEvent } from "../../lib/paymongo.js";
 import { readSession } from "../../lib/paymongo.js";
+import { isUniqueViolation } from "../../lib/prismaErrors.js";
 import type { CartService, CartView } from "../cart/cart.service.js";
 import { orderConfirmedEmail, paymentRefundedEmail } from "./orders.emails.js";
 import {
   COD_MAX_OPEN_ORDERS,
   COD_MAX_TOTAL_CENTAVOS,
+  ORDERS_PAGE_SIZE,
   PAYMENT_METHODS,
   PAYMENT_WINDOW_MINUTES,
+  type OrderListQuery,
   type PaymentMethodChoice,
   type PlaceOrderInput,
   type SummaryInput
@@ -68,17 +71,86 @@ export interface OrderView {
   };
   packages: {
     id: string;
-    store: { slug: string; name: string };
+    /** The seller card on the tracking page. */
+    store: { slug: string; name: string; logoUrl: string | null; rating: { avg: number; count: number } };
     status: string;
     deliveryOption: DeliveryOption;
     deliveryDays: { min: number; max: number };
     subtotalCentavos: number;
     deliveryCentavos: number;
-    items: { productId: string; variantId: string; title: string; variantName: string; imageUrl: string | null; unitPriceCentavos: number; quantity: number; lineTotalCentavos: number }[];
+    /** Set by the seller when shipping (milestone 6): "LBC", "8841 2201". */
+    courier: string | null;
+    trackingNumber: string | null;
+    shipBy: string | null;
+    shippedAt: string | null;
+    deliveredAt: string | null;
+    cancelledAt: string | null;
+    /** "Arrives Nov 24 – Nov 27": the delivery promise counted from the paid date, while it's on its way. */
+    estimatedDelivery: DeliveryEstimate | null;
+    /** The tracking stepper: Ordered → Preparing → Shipped → Delivered, with when each was reached. */
+    steps: { step: TrackingStep; at: string | null }[];
+    /** The timeline, newest first. */
+    events: TrackingEvent[];
+    items: {
+      /** The order item: what a review is written for. */
+      id: string;
+      productId: string;
+      variantId: string;
+      title: string;
+      variantName: string;
+      imageUrl: string | null;
+      unitPriceCentavos: number;
+      quantity: number;
+      lineTotalCentavos: number;
+      review: { id: string; rating: number; title: string | null; body: string | null; status: string; createdAt: string; updatedAt: string } | null;
+      /** "Write a review": delivered and not reviewed yet. */
+      canReview: boolean;
+    }[];
   }[];
   itemCount: number;
   totals: { subtotalCentavos: number; deliveryCentavos: number; discountCentavos: number; totalCentavos: number };
   address: unknown;
+}
+
+export type TrackingStep = "ORDERED" | "PREPARING" | "SHIPPED" | "DELIVERED";
+export interface DeliveryEstimate {
+  earliest: string;
+  latest: string;
+}
+export interface TrackingEvent {
+  type: "placed" | "shipped" | "update" | "delivered" | "cancelled";
+  message: string;
+  location: string | null;
+  at: string;
+}
+
+/** One card on "Your orders". */
+export interface OrderSummary {
+  id: string;
+  number: string;
+  status: OrderView["status"];
+  createdAt: string;
+  placedAt: string | null;
+  cancelledAt: string | null;
+  paymentMethod: PaymentMethodChoice;
+  totalCentavos: number;
+  itemCount: number;
+  packages: {
+    id: string;
+    store: { slug: string; name: string };
+    status: string;
+    itemCount: number;
+    /** The first items ("AuraSound Pro Wireless Headphones + 1 more") and their thumbnails. */
+    items: { title: string; variantName: string; imageUrl: string | null; quantity: number }[];
+    moreItems: number;
+    estimatedDelivery: DeliveryEstimate | null;
+    courier: string | null;
+    trackingNumber: string | null;
+    shippedAt: string | null;
+    deliveredAt: string | null;
+    /** Items delivered and not reviewed yet ("Write a review" shows when > 0). */
+    reviewableItems: number;
+  }[];
 }
 
 export interface NextAction {
@@ -91,6 +163,38 @@ type Tx = Prisma.TransactionClient;
 type Line = { variantId: string; quantity: number };
 
 const daysFor = (option: DeliveryOption) => (option === "EXPRESS" ? DELIVERY.expressDays : DELIVERY.standardDays);
+const DAY_MS = 24 * 60 * MINUTE;
+/** How many first items an order card shows per package. */
+const CARD_ITEMS = 3;
+const METHOD_NAME: Record<PaymentMethodChoice, string> = { GCASH: "GCash", MAYA: "Maya", CARD: "card", COD: "cash on delivery" };
+
+/** The same "2–5 days" promise as checkout, as dates counted from when the order was paid; only while it's on its way. */
+function estimateDelivery(placedAt: Date | null, option: DeliveryOption, status: string): DeliveryEstimate | null {
+  if (!placedAt || (status !== "PREPARING" && status !== "SHIPPED")) return null;
+  const days = daysFor(option);
+  return { earliest: new Date(placedAt.getTime() + days.min * DAY_MS).toISOString(), latest: new Date(placedAt.getTime() + days.max * DAY_MS).toISOString() };
+}
+
+/** "Your orders" tabs: an order shows in a tab when at least one of its packages is in that state. */
+const TAB_WHERE: Record<OrderListQuery["tab"], Prisma.OrderWhereInput> = {
+  all: {},
+  to_ship: { sellerOrders: { some: { status: "PREPARING" } } },
+  on_the_way: { sellerOrders: { some: { status: "SHIPPED" } } },
+  delivered: { sellerOrders: { some: { status: "DELIVERED" } } }
+};
+
+/**
+ * Prisma turns `contains` into SQL `ILIKE '%…%'` WITHOUT escaping, so a "%" or "_" typed in
+ * the search box would match every order (caught by a test). Escape them (and the escape character).
+ */
+const likeLiteral = (text: string) => text.replace(/[\\%_]/g, "\\$&");
+
+/** "VD-21458", "#VD-21458" or "21458" finds that order; any text also matches the names of the products bought. */
+function searchOrders(q: string): Prisma.OrderWhereInput {
+  const number = /^#?\s*(?:vd\s*-?\s*)?(\d{1,9})$/i.exec(q)?.[1];
+  const byProduct: Prisma.OrderWhereInput = { sellerOrders: { some: { items: { some: { productTitle: { contains: likeLiteral(q), mode: "insensitive" } } } } } };
+  return number ? { OR: [{ orderNumber: Number(number) }, byProduct] } : byProduct;
+}
 
 /** Delivery per store for the cart as it is, with the shopper's Standard/Express choices. */
 export function quote(cart: CartView, choices: Record<string, "STANDARD" | "EXPRESS">) {
@@ -380,6 +484,88 @@ export class OrderService {
   }
 
   // --- orders ---------------------------------------------------------------------
+
+  /** "Your orders": newest first, by tab, optionally searched by order number or product name. */
+  async list(userId: string, query: OrderListQuery) {
+    const { prisma } = this.deps;
+    const where: Prisma.OrderWhereInput = { AND: [{ userId }, TAB_WHERE[query.tab], query.q ? searchOrders(query.q) : {}] };
+    const count = (tab: OrderListQuery["tab"]) => prisma.order.count({ where: { AND: [{ userId }, TAB_WHERE[tab]] } });
+    const [rows, totalItems, all, toShip, onTheWay, delivered] = await Promise.all([
+      prisma.order.findMany({
+        where,
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (query.page - 1) * ORDERS_PAGE_SIZE,
+        take: ORDERS_PAGE_SIZE,
+        include: {
+          sellerOrders: {
+            include: {
+              store: { select: { slug: true, name: true } },
+              items: { orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: { productTitle: true, variantName: true, imageUrl: true, quantity: true, review: { select: { id: true } } } }
+            },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }]
+          }
+        }
+      }),
+      prisma.order.count({ where }),
+      count("all"),
+      count("to_ship"),
+      count("on_the_way"),
+      count("delivered")
+    ]);
+
+    const items: OrderSummary[] = rows.map((o) => ({
+      id: o.id,
+      number: orderNumber(o.orderNumber),
+      status: o.status,
+      createdAt: o.createdAt.toISOString(),
+      placedAt: o.placedAt?.toISOString() ?? null,
+      cancelledAt: o.cancelledAt?.toISOString() ?? null,
+      paymentMethod: o.paymentMethod,
+      totalCentavos: o.totalCentavos,
+      itemCount: o.sellerOrders.reduce((s, so) => s + so.items.reduce((n, i) => n + i.quantity, 0), 0),
+      packages: o.sellerOrders.map((so) => ({
+        id: so.id,
+        store: so.store,
+        status: so.status,
+        itemCount: so.items.reduce((n, i) => n + i.quantity, 0),
+        items: so.items.slice(0, CARD_ITEMS).map((i) => ({ title: i.productTitle, variantName: i.variantName, imageUrl: i.imageUrl, quantity: i.quantity })),
+        moreItems: Math.max(0, so.items.length - CARD_ITEMS),
+        estimatedDelivery: estimateDelivery(o.placedAt, so.deliveryOption, so.status),
+        courier: so.courier,
+        trackingNumber: so.trackingNumber,
+        shippedAt: so.shippedAt?.toISOString() ?? null,
+        deliveredAt: so.deliveredAt?.toISOString() ?? null,
+        reviewableItems: so.deliveredAt ? so.items.filter((i) => !i.review).length : 0
+      }))
+    }));
+    return {
+      items,
+      counts: { all, toShip, onTheWay, delivered },
+      page: query.page,
+      pageSize: ORDERS_PAGE_SIZE,
+      totalItems,
+      totalPages: Math.ceil(totalItems / ORDERS_PAGE_SIZE)
+    };
+  }
+
+  /**
+   * "Buy again": the order's items go back into the cart, with the same quantities, as far
+   * as stock allows. Items that can't be bought any more are skipped and reported (like
+   * the sign-in merge), never an error.
+   */
+  async buyAgain(userId: string, orderId: string) {
+    const order = await this.deps.prisma.order.findFirst({
+      where: { id: orderId, userId },
+      select: { status: true, sellerOrders: { select: { items: { select: { variantId: true, quantity: true }, orderBy: { createdAt: "asc" } } }, orderBy: { createdAt: "asc" } } }
+    });
+    if (!order) throw notFound();
+    // Its items are still held for it (and still in the cart): pay or cancel it first.
+    if (order.status === "PENDING_PAYMENT") throw new AppError(409, "CONFLICT", "This order is still waiting for payment.", { details: { reason: "not_paid" } });
+    return this.deps.cart.merge(
+      userId,
+      order.sellerOrders.flatMap((so) => so.items)
+    );
+  }
 
   /**
    * One of my orders (the waiting, failed and confirmation pages). While it waits for an
@@ -672,7 +858,17 @@ export class OrderService {
     const o = await this.deps.prisma.order.findUniqueOrThrow({
       where: { id: orderId },
       include: {
-        sellerOrders: { include: { store: { select: { slug: true, name: true } }, items: { orderBy: { createdAt: "asc" } } }, orderBy: { createdAt: "asc" } },
+        sellerOrders: {
+          include: {
+            store: { select: { slug: true, name: true, logoUrl: true, ratingAvg: true, ratingCount: true } },
+            items: {
+              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+              include: { review: { select: { id: true, rating: true, title: true, body: true, status: true, createdAt: true, updatedAt: true } } }
+            },
+            events: { orderBy: [{ occurredAt: "asc" }, { id: "asc" }] }
+          },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }]
+        },
         payments: { orderBy: { createdAt: "desc" }, take: 1 }
       }
     });
@@ -694,13 +890,29 @@ export class OrderService {
       },
       packages: o.sellerOrders.map((so) => ({
         id: so.id,
-        store: so.store,
+        store: { slug: so.store.slug, name: so.store.name, logoUrl: so.store.logoUrl, rating: { avg: Number(so.store.ratingAvg), count: so.store.ratingCount } },
         status: so.status,
         deliveryOption: so.deliveryOption,
         deliveryDays: daysFor(so.deliveryOption),
         subtotalCentavos: so.subtotalCentavos,
         deliveryCentavos: so.deliveryCentavos,
+        courier: so.courier,
+        trackingNumber: so.trackingNumber,
+        shipBy: so.shipBy?.toISOString() ?? null,
+        shippedAt: so.shippedAt?.toISOString() ?? null,
+        deliveredAt: so.deliveredAt?.toISOString() ?? null,
+        cancelledAt: so.cancelledAt?.toISOString() ?? null,
+        estimatedDelivery: estimateDelivery(o.placedAt, so.deliveryOption, so.status),
+        steps: [
+          { step: "ORDERED" as const, at: o.createdAt.toISOString() },
+          // Preparing starts when the order is paid (or placed with cash on delivery).
+          { step: "PREPARING" as const, at: so.status !== "AWAITING_PAYMENT" && o.placedAt ? o.placedAt.toISOString() : null },
+          { step: "SHIPPED" as const, at: so.shippedAt?.toISOString() ?? null },
+          { step: "DELIVERED" as const, at: so.deliveredAt?.toISOString() ?? null }
+        ],
+        events: trackingEvents(o, so),
         items: so.items.map((i) => ({
+          id: i.id,
           productId: i.productId,
           variantId: i.variantId,
           title: i.productTitle,
@@ -708,7 +920,11 @@ export class OrderService {
           imageUrl: i.imageUrl,
           unitPriceCentavos: i.unitPriceCentavos,
           quantity: i.quantity,
-          lineTotalCentavos: i.unitPriceCentavos * i.quantity
+          lineTotalCentavos: i.unitPriceCentavos * i.quantity,
+          review: i.review
+            ? { id: i.review.id, rating: i.review.rating, title: i.review.title, body: i.review.body, status: i.review.status, createdAt: i.review.createdAt.toISOString(), updatedAt: i.review.updatedAt.toISOString() }
+            : null,
+          canReview: so.deliveredAt !== null && !i.review
         }))
       })),
       itemCount: o.sellerOrders.reduce((s, so) => s + so.items.reduce((n, i) => n + i.quantity, 0), 0),
@@ -716,6 +932,36 @@ export class OrderService {
       address: o.shippingAddress
     };
   }
+}
+
+/**
+ * A package's timeline, newest first. The milestones come from the package itself (paid,
+ * shipped with courier and tracking number, delivered, cancelled); `shipment_events` hold
+ * any extra updates in between ("Arrived at Manila sorting hub"), added in milestone 6.
+ */
+function trackingEvents(
+  order: { createdAt: Date; placedAt: Date | null; paymentMethod: PaymentMethodChoice },
+  so: { courier: string | null; trackingNumber: string | null; shippedAt: Date | null; deliveredAt: Date | null; cancelledAt: Date | null; events: { message: string; location: string | null; occurredAt: Date }[] }
+): TrackingEvent[] {
+  const events: (Omit<TrackingEvent, "at"> & { at: Date })[] = [];
+  if (order.placedAt) {
+    const message = order.paymentMethod === "COD" ? "Order placed · pay cash on delivery" : `Order placed and paid with ${METHOD_NAME[order.paymentMethod]}`;
+    events.push({ type: "placed", message, location: null, at: order.placedAt });
+  } else {
+    events.push({ type: "placed", message: "Order placed · waiting for payment", location: null, at: order.createdAt });
+  }
+  if (so.shippedAt) {
+    const via = so.courier ? ` with ${so.courier}${so.trackingNumber ? ` · tracking ${so.trackingNumber}` : ""}` : "";
+    events.push({ type: "shipped", message: `Shipped${via}`, location: null, at: so.shippedAt });
+  }
+  for (const e of so.events) events.push({ type: "update", message: e.message, location: e.location, at: e.occurredAt });
+  if (so.deliveredAt) events.push({ type: "delivered", message: "Delivered", location: null, at: so.deliveredAt });
+  if (so.cancelledAt) events.push({ type: "cancelled", message: "Order cancelled", location: null, at: so.cancelledAt });
+  // Oldest first (a stable sort keeps the order above for equal times), then reversed: newest first.
+  return events
+    .sort((a, b) => a.at.getTime() - b.at.getTime())
+    .reverse()
+    .map((e) => ({ ...e, at: e.at.toISOString() }));
 }
 
 /**
@@ -741,9 +987,4 @@ async function takeStock(tx: Tx, lines: Line[]): Promise<{ variantId: string; le
   }
   for (const id of ids) await tx.productVariant.update({ where: { id }, data: { stock: { decrement: wanted.get(id) ?? 0 } } });
   return null;
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; message?: string } | null;
-  return e?.code === "P2002" || /unique constraint|duplicate key/i.test(e?.message ?? "");
 }

@@ -35,4 +35,7 @@ export const previewSchema = z.object({
     .pipe(z.array(z.object({ variantId: z.uuid({ error: "Unknown item" }), quantity })))
 });
 
+/** "Recommended for you": a guest sends the same `items` list as the preview; a signed-in cart is read from the account. */
+export const recommendationsQuerySchema = z.object({ items: previewSchema.shape.items.optional() });
+
 export type CartItemInput = { variantId: string; quantity: number };
