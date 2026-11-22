@@ -54,9 +54,11 @@ enum SecurityEventType {
   TOKEN_REUSE_DETECTED
   GOOGLE_CONNECTED
   GOOGLE_DISCONNECTED
+  PAYOUT_ACCOUNT_CHANGED
 }
 
 enum StoreStatus {
+  DRAFT // being set up ("Save and exit"); not yet submitted for review
   PENDING
   APPROVED
   REJECTED
@@ -353,7 +355,11 @@ model Store {
   description    String?      @db.Text
   logoUrl        String?      @db.VarChar(500)
   bannerUrl      String?      @db.VarChar(500)
-  status         StoreStatus  @default(PENDING)
+  status         StoreStatus  @default(DRAFT)
+  /// What the store sells: a top-level category, chosen in onboarding step 1.
+  categoryId     String?      @db.Uuid
+  /// When it was submitted for review (every store past DRAFT has one; CHECK).
+  submittedAt    DateTime?    @db.Timestamptz(3)
   businessType   BusinessType
   legalName      String?      @db.VarChar(150)
   registrationNo String?      @db.VarChar(50) // DTI / SEC
@@ -369,6 +375,7 @@ model Store {
   updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
 
   owner         User             @relation("StoreOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  category      Category?        @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   documents     StoreDocument[]
   payoutAccount PayoutAccount?
   followers     StoreFollow[]
@@ -379,6 +386,7 @@ model Store {
   payouts       Payout[]
 
   @@index([status])
+  @@index([categoryId])
   @@map("stores")
 }
 
@@ -387,6 +395,9 @@ model StoreDocument {
   storeId      String         @db.Uuid
   type         DocumentType
   fileKey      String         @db.VarChar(255) // private storage key, never a public URL
+  /// Read from the storage service after upload, never from the browser.
+  format       String?        @db.VarChar(10)
+  bytes        Int?
   status       DocumentStatus @default(PENDING)
   reviewedById String?        @db.Uuid
   note         String?        @db.VarChar(500)
@@ -404,6 +415,8 @@ model PayoutAccount {
   id                     String       @id @default(uuid(7)) @db.Uuid
   storeId                String       @unique @db.Uuid
   method                 PayoutMethod
+  /// BANK only (CHECK): one of the banks in the allow-list.
+  bankName               String?      @db.VarChar(60)
   accountName            String       @db.VarChar(100)
   accountNumberEncrypted String       @db.VarChar(255)
   last4                  String       @db.VarChar(4)
@@ -443,6 +456,7 @@ model Category {
   parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
   children Category[] @relation("CategoryTree")
   products Product[]
+  stores   Store[]
 
   @@index([parentId])
   @@map("categories")

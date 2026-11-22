@@ -21,6 +21,7 @@ npm run dev            # http://localhost:4000/health
 | `npm run check` | Generate the Prisma client, type check, lint, test (run before every commit) |
 | `npm test` | Tests only (Vitest + Supertest) |
 | `npm run secrets` | Add any missing secret keys to `.env` (keeps existing ones) |
+| `npm run store:approve -- <web-address>` | Approve a store waiting for review (until the admin screens of milestone 7) |
 | `npm run build` / `npm start` | Compile to `dist/` and run the compiled server |
 
 ## Database (PostgreSQL on Neon + Prisma 7)
@@ -220,6 +221,27 @@ How it works:
 - **Ratings stay true under load.** Every write recomputes the product's and the store's rating from the reviews in the same transaction, with the store row locked first. Without the lock, two reviews written at the same moment could each recompute from a count that's missing the other one (tested with simultaneous reviews).
 - **Recommended for you** (5 cards): best sellers from the cart's categories first ("Based on your cart"); signed in, then the wishlist's categories and followed stores; topped up with best sellers (signed in) or top rated (guests). Never what's in the cart, never sold out. "See all" searches the category most of the cart is in.
 
+## Becoming a seller (milestone 6a)
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/v1/seller/store` | "Open your store": what's done, what's `missing`, whether it can be submitted |
+| `PUT /api/v1/seller/store` | Step 1, store details (creates the draft store) |
+| `PUT` / `DELETE /api/v1/seller/store/logo` | The store logo |
+| `PUT /api/v1/seller/store/verification` | Step 2, business verification (individual or registered business, TIN) |
+| `POST /api/v1/seller/store/documents`, `DELETE …/documents/{id}` | ID and DTI/SEC documents |
+| `PUT /api/v1/seller/store/payout-account` | Step 3, GCash or bank |
+| `POST /api/v1/seller/store/submit` | "Submit for review" |
+| `POST /api/v1/seller/uploads` | A one-time upload ticket (logo or document) |
+
+How it works:
+- **Two-step verification first.** Sellers handle other people's money, so an account needs 2FA before it can save any step (403 `two_factor_required`); sellers can't turn it off. Admin accounts can't open stores.
+- **Drafts, then review.** Every step is saved as it goes ("Save and exit"): the store is a `DRAFT` nobody else sees. "Submit for review" checks every step, makes the store `PENDING` and the account a `SELLER` (one `POST /auth/refresh` puts the new role in the access pass), and emails a confirmation. Products can be added while it's reviewed (6b); shoppers see the store once an admin approves it (milestone 7; until then `npm run store:approve -- <web-address>`).
+- **One name per store.** The name becomes the store's web address (`hearth-home`), so names are unique however they're written ("Glow-Lab" = "Glow Lab"), a few are reserved (anything with "vendora", "admin", "support"…), and the name is locked once submitted. Two sellers claiming a name at the same moment: the database's unique index decides.
+- **Sensitive numbers are encrypted.** The TIN (required for everyone) and the payout account number are stored with AES-256-GCM, bound to their store; only "TIN ending in 000" and "•••• 4567" ever come back. Business details and documents are locked once submitted.
+- **Changing where the money goes is guarded.** After submitting, a new payout account needs "Confirm it's you", is recorded in security activity, emails the owner (so a stolen session can't quietly redirect payouts), and is verified again.
+- **Uploads go straight to Cloudinary**, not through our server. `POST /seller/uploads` returns a ticket signed with the API secret (which never leaves the server) for ONE file, at a place our server chose (`vendora/store-documents/<account>/<random>`), in the allowed formats. ID and business documents are `authenticated` (private) files that only admins will open, through expiring links (milestone 7). When the browser hands back the upload, the server checks it with Cloudinary's Admin API: it must be in this account's folder, really exist, and have an allowed type and size (logos 5 MB, documents 10 MB). Anything else is refused and deleted. Links and file sizes come from Cloudinary, never from the browser. Without `CLOUDINARY_URL`, uploads are simply off.
+
 ## If Redis (Upstash) goes down
 
 Redis commands give up after 1 second instead of waiting, and each part of the API then does what's safest for it:
@@ -246,6 +268,7 @@ Measured with Redis pointed at an unreachable address: before this, every API re
 - `tests/checkout/cart.test.ts` and `addresses.test.ts` check the cart (delivery per store from exactly ₱999, stock and price notes, sold out and hidden items, the guest preview and the merge, limits, simultaneous clicks, other shoppers' carts) and addresses (formats, one default, the whole-form edit, deleting the default, limits, privacy).
 - `tests/checkout/orders.test.ts` drives checkout end to end against a fake PayMongo: placing orders (stock, snapshots, amounts), one order per Idempotency-Key, changed totals, the last unit, PayMongo down, payment by return and by signed webhook, bad signatures, wrong amounts, simultaneous reports, retries, the 15-minute window, late and duplicate payments with refunds, cash-on-delivery limits and privacy. `paymongo.test.ts` checks the real PayMongo client (requests, responses, signatures).
 - `tests/checkout/my-orders.test.ts` checks "Your orders" (tabs and counts, packages in two tabs, search by number and product name with `%` and `_` as plain text, pages, unpaid and cancelled orders, privacy), tracking (the 4 steps, arrival dates for Standard and Express, the timeline with courier updates) and Buy again (stock, sold-out and removed items). `recommendations.test.ts` checks the cart's "Recommended for you" (cart categories first, never cart items, sold-out or draft products, the wishlist and followed stores, top-ups, "See all"). `tests/catalog/write-reviews.test.ts` checks writing, editing and deleting reviews (only after delivery, one per item even when sent twice at once, only your own, field rules) and that the stored ratings always equal what the reviews say, also when several shoppers review one store at the same moment.
+- `tests/seller/onboarding.test.ts` walks through becoming a seller against a fake Cloudinary: 2FA first, drafts, submit and approval, encrypted TIN and payout number, registered businesses, unique and reserved names (also claimed at the same moment), locked details after submitting, re-auth and an email for payout changes, uploads (someone else's file, missing, too big, wrong type, the same file twice, limits, outages) and privacy. `media.test.ts` checks the real Cloudinary client (signatures against Cloudinary's documented example, requests, outages).
 - `tests/db/migration.test.ts` checks that every table, index, foreign key and safety rule really exists. CI also migrates and seeds a real PostgreSQL 18 server, the same major version as Neon.
 
 ## Structure
@@ -267,8 +290,10 @@ src/
   modules/home/          Home's sections (cached for a minute)
   modules/wishlist/      saved products and price drops
   modules/cart/          the cart (signed in and guest), merged at sign-in; Recommended for you
+  lib/media.ts           file storage (Cloudinary): upload tickets, checking and deleting files
   modules/addresses/     saved Philippine delivery addresses
   modules/orders/        checkout, orders, PayMongo payments and webhooks, the 15-minute window; your orders, tracking, buy again
+  modules/seller/        Seller Center: becoming a seller (onboarding, documents, payout account)
   generated/prisma/      Prisma client (generated by `npm run db:generate`, not committed)
 prisma/
   schema.prisma          the 31 tables
@@ -292,11 +317,11 @@ openapi/openapi.yaml     the API contract
 | JWT blacklist | Signed-out passes and revoked chains are denied in Redis until they would have expired. |
 | Deny JWTs issued before a password change | Reset and change set a per-user "invalid before" time in Redis and revoke every other sign-in chain, so older passes stop working at once. |
 | Password reset tokens | 256 random bits, stored only as a keyed hash, 30-minute expiry, single use, a newer link cancels older ones; at most 1 email a minute and 5 a day. The token sits after `#` in the link, so it never reaches server logs or other sites. |
-| Notify on security changes | Emails after a password reset or change, turning 2FA on or off, and every backup-code sign-in, each with a way out if it wasn't them. |
-| Re-authenticate before high-value actions | "Confirm it's you" (app code → password → email code), 10 minutes, per device; changing the email needs it, plus a code from the new inbox. |
+| Notify on security changes | Emails after a password reset or change, turning 2FA on or off, every backup-code sign-in, and a changed payout account, each with a way out if it wasn't them. |
+| Re-authenticate before high-value actions | "Confirm it's you" (app code → password → email code), 10 minutes, per device; changing the email needs it, plus a code from the new inbox; so does changing a store's payout account. |
 | Social sign-in (OAuth) safely | Authorization code + PKCE, state and nonce checked, ID token verified; code exchanged server to server; existing password accounts connect only after their password; unverified Google emails refused. |
 | Two-factor authentication | Authenticator app (TOTP, `otpauth`) + 10 single-use backup codes; required for sellers and admins; also asked after a password reset; replay-proof; wrong codes count toward the lockout. |
-| Encrypt sensitive data | The 2FA secret is encrypted with AES-256-GCM (`DATA_ENCRYPTION_KEY`), bound to its user, so a copy pasted into another account fails to decrypt. Backup codes are keyed hashes. |
+| Encrypt sensitive data | The 2FA secret is encrypted with AES-256-GCM (`DATA_ENCRYPTION_KEY`), bound to its user, so a copy pasted into another account fails to decrypt. Sellers' TINs and payout account numbers are encrypted the same way, bound to their store; only the last digits are ever shown. Backup codes are keyed hashes. |
 | Confirm email after sign-up | 6-digit code, 10 minutes, required before the first sign-in. |
 | Account enumeration | Sign-up, sign-in and code endpoints answer the same whether or not the email has an account, and sign-in always runs one Argon2 check so the timing matches too. |
 | Weak passwords | At least 8 characters, and passwords found in known breaches are refused (Have I Been Pwned; only 5 characters of a hash leave the server). |
@@ -304,6 +329,7 @@ openapi/openapi.yaml     the API contract
 | Special HTTP headers | `helmet` (HSTS, nosniff, frame protection…); `X-Powered-By` removed. |
 | Parameter pollution, operator injection | Custom query parser: last value wins for repeated keys, except the filters meant to repeat (`category`, `store`), which become lists of at most 10 or 20 checked slugs; never builds nested objects, so `?price[$gt]=0` stays plain text and `__proto__` can't pollute objects. SQL goes through Prisma (parameterized); the hand-written search SQL passes what people type as parameters, and its sort orders come from a fixed list. |
 | No error details to clients | One error format. Users see safe messages; stack traces go to the log under the same request ID. Logs redact cookies, passwords and tokens, and hide one-time values in URLs (e.g. Google's `code` and `state`). |
+| File uploads | Files go straight to Cloudinary with a one-time signed ticket for a place the server chose; the server then checks the owner's folder, type and size with Cloudinary before using a file (and deletes rejected ones). ID documents are private (`authenticated`) files. File names and links come only from the server. |
 | Evil regular expressions | Only simple, linear patterns. |
 | No secrets in git | `.env` is git-ignored; `npm run secrets` writes keys without printing them; config errors name a variable but never its value. |
 | HTTPS | Production requires https origins and `APP_URL`, sets HSTS, and uses `__Host-`/`__Secure-` Secure cookies. |

@@ -55,7 +55,11 @@ const schema = z
     // --- PayMongo (5b). Online payments are off when the secret key is empty; cash on delivery still works. ---
     PAYMONGO_SECRET_KEY: optional(z.string().regex(/^sk_(test|live)_[A-Za-z0-9]{10,}$/, "must be a PayMongo secret key (sk_test_… or sk_live_…)")),
     /** The webhook's own secret (whsk_…), shown when the webhook is created (at deploy). Webhooks are refused until it's set. */
-    PAYMONGO_WEBHOOK_SECRET: optional(z.string().regex(/^whsk_[A-Za-z0-9]{10,}$/, "must be a PayMongo webhook secret (whsk_…)"))
+    PAYMONGO_WEBHOOK_SECRET: optional(z.string().regex(/^whsk_[A-Za-z0-9]{10,}$/, "must be a PayMongo webhook secret (whsk_…)")),
+
+    // --- Cloudinary (6a): store logos, product photos, private verification documents. Uploads are off when empty. ---
+    /** The "API environment variable" from the Cloudinary dashboard: cloudinary://<api key>:<api secret>@<cloud name>. */
+    CLOUDINARY_URL: optional(z.string().regex(/^cloudinary:\/\/\d{6,20}:[A-Za-z0-9_-]{16,64}@[a-z0-9_-]{1,64}$/, "must be the API environment variable from Cloudinary (cloudinary://<key>:<secret>@<cloud name>)"))
   })
   .superRefine((env, ctx) => {
     if (new Set(SECRET_KEYS.map((k) => env[k])).size !== SECRET_KEYS.length) {

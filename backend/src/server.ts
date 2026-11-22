@@ -22,6 +22,9 @@ import { AddressService } from "./modules/addresses/addresses.service.js";
 import { cartRouter } from "./modules/cart/cart.routes.js";
 import { CartService } from "./modules/cart/cart.service.js";
 import { RecommendationService } from "./modules/cart/recommendations.js";
+import { OnboardingService } from "./modules/seller/onboarding.service.js";
+import { sellerRouter } from "./modules/seller/seller.routes.js";
+import { CloudinaryStorage } from "./lib/media.js";
 import { homeRouter } from "./modules/home/home.routes.js";
 import { ordersRouter } from "./modules/orders/orders.routes.js";
 import { OrderService } from "./modules/orders/orders.service.js";
@@ -83,6 +86,12 @@ if (prisma) {
   paymentSweeper.unref();
   routers.push(reviewsRouter({ reviews: new ReviewService({ prisma }), guards }));
   routers.push(storesRouter({ stores: new StoreService({ prisma }), guards }));
+
+  const media = config.CLOUDINARY_URL ? new CloudinaryStorage(config.CLOUDINARY_URL, logger) : null;
+  if (!media) logger.info("CLOUDINARY_URL is not set — uploads (logos, photos, documents) are off");
+  const onboarding = new OnboardingService({ prisma, kv, media, email, config, logger });
+  services.push(onboarding);
+  routers.push(sellerRouter({ onboarding, security, guards, config }));
   routers.push(
     authRouter({
       service: authService,

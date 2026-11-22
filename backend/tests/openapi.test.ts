@@ -27,6 +27,8 @@ import { homeRouter } from "../src/modules/home/home.routes.js";
 import { ordersRouter } from "../src/modules/orders/orders.routes.js";
 import type { OrderService } from "../src/modules/orders/orders.service.js";
 import { webhooksRouter } from "../src/modules/orders/webhooks.routes.js";
+import type { OnboardingService } from "../src/modules/seller/onboarding.service.js";
+import { sellerRouter } from "../src/modules/seller/seller.routes.js";
 import type { HomeService } from "../src/modules/home/home.service.js";
 import { reviewsRouter } from "../src/modules/reviews/reviews.routes.js";
 import type { ReviewService } from "../src/modules/reviews/reviews.service.js";
@@ -80,7 +82,8 @@ describe("openapi.yaml", () => {
       cartRouter({ cart: {} as CartService, recommendations: {} as RecommendationService, guards }),
       addressesRouter({ addresses: {} as AddressService, guards }),
       ordersRouter({ orders: {} as OrderService, guards }),
-      webhooksRouter({ orders: {} as OrderService, secret: undefined })
+      webhooksRouter({ orders: {} as OrderService, secret: undefined }),
+      sellerRouter({ onboarding: {} as OnboardingService, security: {} as SecurityService, guards, config })
     ];
     const inCode = routers.flatMap((r) => routesOf(r, "/api/v1"));
     expect(documented("/api/v1/").sort()).toEqual(inCode.sort());

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.8.0
+  version: 0.9.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -53,6 +53,8 @@ tags:
     description: Saved delivery addresses (milestone 5a)
   - name: checkout
     description: Checkout, orders and PayMongo payments (milestone 5b); your orders, tracking and buy again (milestone 5c)
+  - name: seller
+    description: Seller Center, becoming a seller (milestone 6a)
 
 paths:
   /health:
@@ -1661,6 +1663,249 @@ paths:
         "403": { $ref: "#/components/responses/CsrfInvalid" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/seller/store:
+    get:
+      summary: My store's onboarding (Seller Center)
+      description: |
+        Where the account is in "Open your store": two-step verification, the draft store, what's done and
+        what's still `missing` before "Submit for review". The TIN and payout number are never sent back
+        (only their last digits). Works for any signed-in account (`store` is null until step 1 is saved).
+      operationId: getSellerStore
+      tags: [seller]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200":
+          description: The onboarding state.
+          content: { application/json: { schema: { $ref: "#/components/schemas/SellerOnboarding" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      summary: Step 1, store details (creates the draft store)
+      description: |
+        Needs two-step verification on (403 `two_factor_required`); admins can't open stores (403
+        `admin_account`). The name makes the store's web address, so it's unique however it's written
+        (409 `name_taken`), some names are reserved (409 `name_reserved`), and it can't change after
+        submitting (409 `name_locked`). The category must be a top-level one.
+      operationId: saveStoreDetails
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, category, shipsFrom]
+              properties:
+                name: { type: string, minLength: 3, maxLength: 40, example: SoundCraft Audio }
+                category: { type: string, description: A top-level category's slug., example: electronics }
+                description: { type: [string, "null"], maxLength: 1000 }
+                shipsFrom: { type: string, minLength: 2, maxLength: 100, example: Manila }
+      responses:
+        "200": { $ref: "#/components/responses/SellerOnboarding" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "409":
+          description: CONFLICT, with `details.reason` and the `name` field; name_taken, name_reserved, name_locked.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/seller/store/logo:
+    put:
+      summary: Set the store logo (after uploading it with a ticket)
+      description: The upload is checked with the storage service (in this account's folder, JPG/PNG/WebP, at most 5 MB); the link comes from the storage service.
+      operationId: setStoreLogo
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/UploadedFile" } } }
+      responses:
+        "200": { $ref: "#/components/responses/SellerOnboarding" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/UploadsUnavailable" }
+    delete:
+      summary: Remove the store logo
+      operationId: removeStoreLogo
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/SellerOnboarding" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/seller/store/verification:
+    put:
+      summary: Step 2, business verification
+      description: |
+        A TIN is required for everyone (stored encrypted). A registered business also needs its DTI or SEC
+        registration number. Locked once submitted (409 `store_submitted`).
+      operationId: saveStoreVerification
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [businessType, legalName, tin]
+              properties:
+                businessType: { type: string, enum: [INDIVIDUAL, REGISTERED_BUSINESS] }
+                legalName: { type: string, minLength: 2, maxLength: 150, description: "Individual: full name as on the ID. Business: the registered business name." }
+                registrationNo: { type: [string, "null"], description: "DTI or SEC registration number (registered businesses only).", example: DTI-3810-2219 }
+                tin: { type: string, description: "9 digits plus a 3- or 5-digit branch code; spaces and dashes allowed.", example: 123-456-789-000 }
+      responses:
+        "200": { $ref: "#/components/responses/SellerOnboarding" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT (`store_submitted`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/seller/store/documents:
+    post:
+      summary: Add a verification document (after uploading it with a ticket)
+      description: |
+        A private file: its type and size are read from the storage service. Individuals need a government
+        ID; registered businesses also a DTI or SEC certificate. At most 10; locked once submitted.
+      operationId: addStoreDocument
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [type, publicId]
+              properties:
+                type: { type: string, enum: [GOV_ID, DTI_CERT, SEC_CERT, BIR_2303] }
+                publicId: { type: string, description: From the upload ticket. }
+      responses:
+        "200": { $ref: "#/components/responses/SellerOnboarding" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT, with `details.reason`; store_submitted, too_many_documents, already_added.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503": { $ref: "#/components/responses/UploadsUnavailable" }
+
+  /api/v1/seller/store/documents/{id}:
+    delete:
+      summary: Remove a verification document (and its file)
+      operationId: removeStoreDocument
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { $ref: "#/components/responses/SellerOnboarding" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT (`store_submitted`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/seller/store/payout-account:
+    put:
+      summary: Step 3, payout account (GCash or a listed bank)
+      description: |
+        The number is stored encrypted; only the last 4 digits come back. Once the store is submitted,
+        CHANGING it needs "Confirm it's you" (403 `REAUTH_REQUIRED`), is recorded in security activity
+        and emailed to the owner. A new account is verified again at review.
+      operationId: setPayoutAccount
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required: [method, accountName, accountNumber]
+                  properties:
+                    method: { const: GCASH }
+                    accountName: { type: string, minLength: 2, maxLength: 100 }
+                    accountNumber: { type: string, description: A Philippine mobile number., example: 0917 123 4567 }
+                - type: object
+                  additionalProperties: false
+                  required: [method, bankName, accountName, accountNumber]
+                  properties:
+                    method: { const: BANK }
+                    bankName: { type: string, enum: [BDO Unibank, BPI, China Bank, EastWest Bank, GoTyme Bank, Landbank, Maya Bank, Metrobank, PNB, PSBank, RCBC, Security Bank, UnionBank] }
+                    accountName: { type: string, minLength: 2, maxLength: 100 }
+                    accountNumber: { type: string, description: 10–16 digits; spaces and dashes allowed. }
+      responses:
+        "200": { $ref: "#/components/responses/SellerOnboarding" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: FORBIDDEN (`two_factor_required`, `admin_account`, `store_suspended`) or REAUTH_REQUIRED.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/seller/store/submit:
+    post:
+      summary: Submit for review
+      description: |
+        Every step must be done (409 `incomplete`, with `details.missing`). The store becomes PENDING and the
+        account a SELLER; an email confirms it. Refresh the session (`POST /auth/refresh`) to get the seller
+        role in the access pass. Products can be added while it's reviewed; it appears to shoppers once
+        approved. Sending it twice is harmless.
+      operationId: submitStore
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/SellerOnboarding" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT (`incomplete`, with `details.missing` as a comma-separated list).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/seller/uploads:
+    post:
+      summary: Get an upload ticket (the browser uploads straight to the storage service)
+      description: |
+        A one-time permission for ONE file at a place chosen by the server, in the allowed formats. POST the
+        file to `url` as multipart/form-data with every entry of `fields` plus `file`, then send `publicId`
+        to the logo or documents endpoint. At most 30 tickets an hour per account.
+      operationId: createUploadTicket
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [purpose], properties: { purpose: { type: string, enum: [store_logo, store_document] } } }
+      responses:
+        "200":
+          description: The ticket.
+          content: { application/json: { schema: { type: object, required: [upload], properties: { upload: { $ref: "#/components/schemas/UploadTicket" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "429":
+          description: RATE_LIMITED. More than 30 tickets in an hour.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503": { $ref: "#/components/responses/UploadsUnavailable" }
+
   /api/v1/stores/{slug}:
     get:
       summary: The store page (header, About, category chips)
@@ -2021,7 +2266,7 @@ components:
         id: { type: string, format: uuid }
         type:
           type: string
-          enum: [LOGIN_OK, LOCKED, LOGOUT_ALL, PASSWORD_CHANGED, PASSWORD_RESET, EMAIL_CHANGED, TWO_FA_ENABLED, TWO_FA_DISABLED, BACKUP_CODE_USED, BACKUP_CODES_RENEWED, SESSION_REVOKED, TOKEN_REUSE_DETECTED, GOOGLE_CONNECTED, GOOGLE_DISCONNECTED]
+          enum: [LOGIN_OK, LOCKED, LOGOUT_ALL, PASSWORD_CHANGED, PASSWORD_RESET, EMAIL_CHANGED, TWO_FA_ENABLED, TWO_FA_DISABLED, BACKUP_CODE_USED, BACKUP_CODES_RENEWED, SESSION_REVOKED, TOKEN_REUSE_DETECTED, GOOGLE_CONNECTED, GOOGLE_DISCONNECTED, PAYOUT_ACCOUNT_CHANGED]
         device: { type: string, example: Safari on iPhone }
         deviceType: { type: string, enum: [desktop, mobile, tablet, unknown] }
         location: { type: [string, "null"] }
@@ -2555,6 +2800,72 @@ components:
           type: [object, "null"]
           description: '"See all": search this category (the one most of the cart is in). Null for an empty cart.'
           properties: { categorySlug: { type: string }, categoryName: { type: string } }
+    UploadedFile:
+      type: object
+      additionalProperties: false
+      required: [publicId]
+      properties:
+        publicId: { type: string, description: The `publicId` of the upload ticket the file was uploaded with. }
+    UploadTicket:
+      type: object
+      required: [url, fields, publicId, allowedFormats, maxBytes, expiresAt]
+      properties:
+        url: { type: string, example: "https://api.cloudinary.com/v1_1/<cloud>/image/upload" }
+        fields: { type: object, additionalProperties: { type: string }, description: Send every one of these with the file (signed; any change is refused). }
+        publicId: { type: string, example: vendora/store-logos/0193c0de-…/q3Zr8kLpT1xV0aBc }
+        allowedFormats: { type: array, items: { type: string }, example: [jpg, png, webp] }
+        maxBytes: { type: integer, example: 5242880 }
+        expiresAt: { type: string, format: date-time, description: One hour. }
+    SellerOnboarding:
+      type: object
+      required: [twoFactorEnabled, store, steps, missing, canSubmit]
+      properties:
+        twoFactorEnabled: { type: boolean, description: Required before any step can be saved. }
+        store:
+          type: [object, "null"]
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            slug: { type: string, description: The store page's web address. }
+            status: { type: string, enum: [DRAFT, PENDING, APPROVED, REJECTED, SUSPENDED] }
+            category: { type: [object, "null"], properties: { slug: { type: string }, name: { type: string } } }
+            description: { type: [string, "null"] }
+            shipsFrom: { type: [string, "null"] }
+            logoUrl: { type: [string, "null"] }
+            submittedAt: { type: [string, "null"], format: date-time }
+            approvedAt: { type: [string, "null"], format: date-time }
+            verification:
+              type: object
+              properties:
+                businessType: { type: string, enum: [INDIVIDUAL, REGISTERED_BUSINESS] }
+                legalName: { type: [string, "null"] }
+                registrationNo: { type: [string, "null"] }
+                tinLast3: { type: [string, "null"], description: '"TIN ending in 000": the full number is never sent back.' }
+            documents:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  type: { type: string, enum: [GOV_ID, DTI_CERT, SEC_CERT, BIR_2303, SELFIE] }
+                  format: { type: [string, "null"], example: pdf }
+                  bytes: { type: [integer, "null"], example: 860000 }
+                  status: { type: string, enum: [PENDING, VERIFIED, REJECTED] }
+                  createdAt: { type: string, format: date-time }
+            payoutAccount:
+              type: [object, "null"]
+              properties:
+                method: { type: string, enum: [GCASH, BANK] }
+                bankName: { type: [string, "null"] }
+                accountName: { type: string }
+                last4: { type: string, example: "4567" }
+                verifiedAt: { type: [string, "null"], format: date-time }
+        steps: { type: object, properties: { storeDetails: { type: boolean }, verification: { type: boolean }, payoutAccount: { type: boolean } } }
+        missing:
+          type: array
+          items: { type: string, enum: [two_factor, store_details, verification, gov_id, business_certificate, payout_account] }
+        canSubmit: { type: boolean }
+        refreshSession: { type: boolean, const: true, description: 'After submitting: call POST /auth/refresh to get the seller role.' }
     RatingSummary:
       type: object
       required: [avg, count, stars]
@@ -2727,6 +3038,15 @@ components:
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     BadRequest:
       description: Malformed JSON (INVALID_JSON) or invalid input (VALIDATION_ERROR).
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    SellerOnboarding:
+      description: The whole onboarding state after the change.
+      content: { application/json: { schema: { $ref: "#/components/schemas/SellerOnboarding" } } }
+    SellerForbidden:
+      description: FORBIDDEN, with `details.reason`; two_factor_required (turn on two-step verification first), admin_account, store_suspended.
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    UploadsUnavailable:
+      description: SERVICE_UNAVAILABLE. The storage service isn't set up or didn't answer; try again.
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     NotFound:
       description: Unknown route or resource.

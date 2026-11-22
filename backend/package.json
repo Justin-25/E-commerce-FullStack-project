@@ -16,7 +16,8 @@
     "db:migrate": "prisma migrate deploy",
     "db:status": "prisma migrate status",
     "db:seed": "prisma db seed",
-    "secrets": "tsx scripts/generate-secrets.ts"
+    "secrets": "tsx scripts/generate-secrets.ts",
+    "store:approve": "tsx scripts/approve-store.ts"
   },
   "type": "module",
   "private": "true",

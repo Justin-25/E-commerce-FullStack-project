@@ -1,8 +1,7 @@
 import { Router, type Request, type Response } from "express";
-import { ipKeyGenerator, type Store } from "express-rate-limit";
+import type { Store } from "express-rate-limit";
 import type { Config } from "../../config/env.js";
 import { AppError } from "../../lib/errors.js";
-import { locationFrom } from "../../lib/location.js";
 import type { Logger } from "../../lib/logger.js";
 import type { AuthGuards } from "../../middleware/auth.js";
 import type { Csrf } from "../../middleware/csrf.js";
@@ -30,6 +29,7 @@ import type { AuthService, ClientInfo, SignInOutcome, SignInResult } from "./aut
 import { GoogleFlowError, type GoogleService } from "./google.service.js";
 import type { SecurityService } from "./security.service.js";
 import type { TokenService } from "./tokens.js";
+import { clientInfoFrom } from "./events.js";
 
 export interface AuthRouterDeps {
   service: AuthService;
@@ -55,10 +55,7 @@ const STEP_STATUS = { two_factor: "two_factor_required", two_factor_setup: "two_
 export function authRouter({ service, security, google, tokens, csrf, guards, config, rateLimitStore, logger }: AuthRouterDeps): Router {
   const router = Router();
 
-  const clientInfo = (req: Request): ClientInfo => {
-    const ip = req.ip ?? "unknown";
-    return { ip, ipKey: ipKeyGenerator(ip, 56), userAgent: req.get("user-agent"), location: locationFrom(req, config.GEO_HEADERS) };
-  };
+  const clientInfo = (req: Request): ClientInfo => clientInfoFrom(req, config.GEO_HEADERS);
   // Stricter per-IP limit on endpoints that guess passwords or codes, or send emails. If Redis is down
   // it answers 503 before anything else runs: brute-force protection is never silently switched off.
   const authLimit = rateLimiter({

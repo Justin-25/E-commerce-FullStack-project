@@ -19,6 +19,10 @@ import { wishlistRouter } from "../../src/modules/wishlist/wishlist.routes.js";
 import { WishlistService } from "../../src/modules/wishlist/wishlist.service.js";
 import { createAuthHarness, type HarnessDeps } from "./authHarness.js";
 import { FakePaymongo, TEST_WEBHOOK_SECRET } from "./fakePaymongo.js";
+import { FakeMedia } from "./fakeMedia.js";
+import { SecurityService } from "../../src/modules/auth/security.service.js";
+import { OnboardingService } from "../../src/modules/seller/onboarding.service.js";
+import { sellerRouter } from "../../src/modules/seller/seller.routes.js";
 
 /**
  * The real catalog, reviews and store routes on a fresh test database filled with the
@@ -27,6 +31,7 @@ import { FakePaymongo, TEST_WEBHOOK_SECRET } from "./fakePaymongo.js";
  */
 export async function createCatalogHarness() {
   const paymongo = new FakePaymongo();
+  const media = new FakeMedia();
   /** The order service of the most recently built app (tests call its background job directly). */
   const services: { orders?: OrderService } = {};
   // One order service per built app, shared by its routes and its webhook (like server.ts).
@@ -53,7 +58,13 @@ export async function createCatalogHarness() {
         wishlistRouter({ wishlist: new WishlistService({ prisma, catalog }), guards }),
         cartRouter({ cart: new CartService({ prisma }), recommendations: new RecommendationService({ prisma, catalog }), guards }),
         addressesRouter({ addresses: new AddressService({ prisma }), guards }),
-        ordersRouter({ orders: orderService(deps), guards })
+        ordersRouter({ orders: orderService(deps), guards }),
+        sellerRouter({
+          onboarding: new OnboardingService({ prisma, kv, media, email: deps.email, config: deps.config, logger }),
+          security: new SecurityService({ prisma, kv, email: deps.email, config: deps.config, logger }),
+          guards,
+          config: deps.config
+        })
       ];
     }
   });
@@ -66,7 +77,7 @@ export async function createCatalogHarness() {
     if (!services.orders) throw new Error("no order service yet");
     return services.orders;
   };
-  return { ...h, demo, idOf, paymongo, orders };
+  return { ...h, demo, idOf, paymongo, media, orders };
 }
 
 export type CatalogHarness = Awaited<ReturnType<typeof createCatalogHarness>>;

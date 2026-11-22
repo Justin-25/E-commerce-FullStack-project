@@ -62,11 +62,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 45 foreign keys and 32 safety (CHECK) rules", async () => {
+  it("has the 46 foreign keys and 35 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
-    expect(fk.n).toBe(45);
-    expect(chk.n).toBe(32);
+    expect(fk.n).toBe(46);
+    expect(chk.n).toBe(35);
   });
 });
 
@@ -166,6 +166,19 @@ describe("orders, reviews & money", () => {
     const v = await variant(await product(s), s);
     for (const q of [0, 100]) await fails(`INSERT INTO cart_items ("cartId", "variantId", quantity) VALUES ($1, $2, $3)`, [cart.id, v, q], /cart_items_quantity_chk/);
     await fails(`INSERT INTO cart_items ("cartId", "variantId", quantity, "priceAtAddCentavos") VALUES ($1, $2, 1, -1)`, [cart.id, v], /cart_items_price_at_add_chk/);
+  });
+
+  it("starts stores as drafts; a submitted store has a submit time; bank payouts name the bank", async () => {
+    const s = await store(await user());
+    expect((await one<{ status: string }>(`SELECT status FROM stores WHERE id = $1`, [s])).status).toBe("DRAFT");
+    await fails(`UPDATE stores SET status = 'PENDING' WHERE id = $1`, [s], /stores_submitted_chk/);
+    await db.query(`UPDATE stores SET status = 'PENDING', "submittedAt" = now() WHERE id = $1`, [s]);
+    const payout = (method: string, bank: string | null) =>
+      db.query(`INSERT INTO payout_accounts (id, "storeId", method, "bankName", "accountName", "accountNumberEncrypted", last4, "updatedAt") VALUES (gen_random_uuid(), $1, $2, $3, 'Ana', 'v1.x', '4567', now())`, [s, method, bank]);
+    await expect(payout("BANK", null)).rejects.toThrow(/payout_accounts_bank_chk/);
+    await expect(payout("GCASH", "BPI")).rejects.toThrow(/payout_accounts_bank_chk/);
+    await payout("BANK", "BPI");
+    await fails(`INSERT INTO store_documents (id, "storeId", type, "fileKey", bytes) VALUES (gen_random_uuid(), $1, 'GOV_ID', 'k', 0)`, [s], /store_documents_bytes_chk/);
   });
 
   it("allows one default address per shopper, stored in Philippine formats", async () => {

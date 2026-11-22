@@ -18,13 +18,13 @@ export const CATEGORIES: [slug: string, name: string, parent?: string][] = [
 ];
 
 export const STORES = [
-  { slug: "soundcraft-audio", name: "SoundCraft Audio", email: "soundcraft@example.com", shipsFrom: "Manila", followers: 12_400, about: "Headphones and speakers tuned in Manila since 2019." },
-  { slug: "nova-wearables", name: "Nova Wearables", email: "nova@example.com", shipsFrom: "Pasig City", followers: 4_100, about: "Smartwatches and trackers for the whole family." },
-  { slug: "peak-outdoors", name: "Peak Outdoors", email: "peak@example.com", shipsFrom: "Quezon City", followers: 9_800, about: "Gear for runners, hikers and weekend athletes." },
-  { slug: "hearth-home", name: "Hearth & Home", email: "hearth@example.com", shipsFrom: "Makati City", followers: 6_300, about: "Handmade lamps and coffee gear from Filipino makers." },
-  { slug: "glow-lab", name: "Glow Lab", email: "glowlab@example.com", shipsFrom: "Taguig City", followers: 21_000, about: "Skincare and fragrance made for humid weather." },
-  { slug: "northbound-goods", name: "Northbound Goods", email: "northbound@example.com", shipsFrom: "Cebu City", followers: 3_500, about: "Leather and canvas bags built to last." },
-  { slug: "sol-co", name: "Sol & Co.", email: "solco@example.com", shipsFrom: "Davao City", followers: 5_200, about: "Sunglasses, sneakers and summer essentials." }
+  { slug: "soundcraft-audio", category: "electronics", name: "SoundCraft Audio", email: "soundcraft@example.com", shipsFrom: "Manila", followers: 12_400, about: "Headphones and speakers tuned in Manila since 2019." },
+  { slug: "nova-wearables", category: "electronics", name: "Nova Wearables", email: "nova@example.com", shipsFrom: "Pasig City", followers: 4_100, about: "Smartwatches and trackers for the whole family." },
+  { slug: "peak-outdoors", category: "sports-fitness", name: "Peak Outdoors", email: "peak@example.com", shipsFrom: "Quezon City", followers: 9_800, about: "Gear for runners, hikers and weekend athletes." },
+  { slug: "hearth-home", category: "home-kitchen", name: "Hearth & Home", email: "hearth@example.com", shipsFrom: "Makati City", followers: 6_300, about: "Handmade lamps and coffee gear from Filipino makers." },
+  { slug: "glow-lab", category: "beauty", name: "Glow Lab", email: "glowlab@example.com", shipsFrom: "Taguig City", followers: 21_000, about: "Skincare and fragrance made for humid weather." },
+  { slug: "northbound-goods", category: "bags-travel", name: "Northbound Goods", email: "northbound@example.com", shipsFrom: "Cebu City", followers: 3_500, about: "Leather and canvas bags built to last." },
+  { slug: "sol-co", category: "fashion", name: "Sol & Co.", email: "solco@example.com", shipsFrom: "Davao City", followers: 5_200, about: "Sunglasses, sneakers and summer essentials." }
 ];
 
 /** [sku, name, priceCentavos, compareAtCentavos, stock, dealEndsInHours] */
@@ -348,7 +348,8 @@ export async function seedDemoData(prisma: PrismaClient, now = new Date()) {
     const owner = await prisma.user.upsert({ where: { email: s.email }, update: {}, create: { email: s.email, name: s.name, role: "SELLER", emailVerifiedAt: now } });
     // followerCount is a demo counter (no screen lists followers); ratings are computed from reviews below.
     // approvedAt is reset too, so a store is always older than its products and their reviews.
-    const data = { name: s.name, description: s.about, shipsFrom: s.shipsFrom, followerCount: s.followers, approvedAt: new Date(now.getTime() - 400 * DAY) };
+    const approvedAt = new Date(now.getTime() - 400 * DAY);
+    const data = { name: s.name, description: s.about, shipsFrom: s.shipsFrom, categoryId: categoryIds.get(s.category) ?? null, followerCount: s.followers, submittedAt: new Date(approvedAt.getTime() - 2 * DAY), approvedAt };
     const store = await prisma.store.upsert({
       where: { slug: s.slug },
       update: data,

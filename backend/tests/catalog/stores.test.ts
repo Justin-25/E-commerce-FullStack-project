@@ -166,7 +166,7 @@ describe("Follow a store", () => {
 
   it("refuses following your own store", async () => {
     const { browser, user } = await shopper();
-    await h.db.prisma.store.create({ data: { ownerId: user.id, name: "My Little Shop", slug: "my-little-shop", businessType: "INDIVIDUAL", status: "APPROVED", approvedAt: new Date() } });
+    await h.db.prisma.store.create({ data: { ownerId: user.id, name: "My Little Shop", slug: "my-little-shop", businessType: "INDIVIDUAL", status: "APPROVED", submittedAt: new Date(), approvedAt: new Date() } });
     const res = await browser.put(follow("my-little-shop"));
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe("CONFLICT");
