@@ -23,7 +23,10 @@ import { cartRouter } from "./modules/cart/cart.routes.js";
 import { CartService } from "./modules/cart/cart.service.js";
 import { RecommendationService } from "./modules/cart/recommendations.js";
 import { OnboardingService } from "./modules/seller/onboarding.service.js";
+import { SellerProductService } from "./modules/seller/products.service.js";
 import { sellerRouter } from "./modules/seller/seller.routes.js";
+import { notificationsRouter } from "./modules/notifications/notifications.routes.js";
+import { PriceDropService } from "./modules/notifications/priceDrops.service.js";
 import { CloudinaryStorage } from "./lib/media.js";
 import { homeRouter } from "./modules/home/home.routes.js";
 import { ordersRouter } from "./modules/orders/orders.routes.js";
@@ -56,6 +59,7 @@ const guards = createAuthGuards({ tokens, kv, logger });
 const routers: Router[] = [];
 const webhooks: Router[] = [];
 let paymentSweeper: NodeJS.Timeout | undefined;
+let priceDropJob: NodeJS.Timeout | undefined;
 const services: { drain(): Promise<void> }[] = [];
 if (prisma) {
   const email = new DevOutbox(logger); // config refuses this in production; a real provider comes in milestone 9
@@ -91,7 +95,16 @@ if (prisma) {
   if (!media) logger.info("CLOUDINARY_URL is not set — uploads (logos, photos, documents) are off");
   const onboarding = new OnboardingService({ prisma, kv, media, email, config, logger });
   services.push(onboarding);
-  routers.push(sellerRouter({ onboarding, security, guards, config }));
+  routers.push(sellerRouter({ onboarding, products: new SellerProductService({ prisma, kv, media, logger }), security, guards, config }));
+
+  const priceDrops = new PriceDropService({ prisma, email, config, logger });
+  services.push(priceDrops);
+  routers.push(notificationsRouter({ priceDrops, guards }));
+  // Every 15 minutes: email shoppers whose saved items got cheaper (at most one email a day each).
+  priceDropJob = setInterval(() => {
+    priceDrops.run().catch((err: unknown) => logger.error({ err }, "the price-drop emails run failed"));
+  }, 15 * 60_000);
+  priceDropJob.unref();
   routers.push(
     authRouter({
       service: authService,
@@ -132,6 +145,7 @@ function shutdown(signal: string): void {
   stopping = true;
   logger.info({ signal }, "shutting down");
   if (paymentSweeper) clearInterval(paymentSweeper);
+  if (priceDropJob) clearInterval(priceDropJob);
   server.close(() => {
     void Promise.allSettled(services.map((s) => s.drain()))
       .then(() => Promise.allSettled([redis?.quit(), prisma?.$disconnect()]))

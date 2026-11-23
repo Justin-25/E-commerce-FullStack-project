@@ -62,11 +62,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 46 foreign keys and 35 safety (CHECK) rules", async () => {
+  it("has the 46 foreign keys and 39 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
     expect(fk.n).toBe(46);
-    expect(chk.n).toBe(35);
+    expect(chk.n).toBe(39);
   });
 });
 
@@ -104,6 +104,23 @@ describe("catalog & stock", () => {
     await variant(await product(s1), s1, 1, "SC-AURA-PRO-BLK");
     await expect(variant(await product(s1), s1, 1, "SC-AURA-PRO-BLK")).rejects.toThrow(/unique/i);
     await variant(await product(s2), s2, 1, "SC-AURA-PRO-BLK");
+  });
+
+  it("keeps seller product data sane: a variant label, up to 8 photos, one photo per stored file, an edit version", async () => {
+    const s = await store(await user());
+    const p = await product(s);
+    for (const label of ["", "   "]) await fails(`UPDATE products SET "variantLabel" = $2 WHERE id = $1`, [p, label], /products_variant_label_chk/);
+    await fails(`UPDATE products SET version = 0 WHERE id = $1`, [p], /products_version_chk/);
+    const photo = (sortOrder: number, publicId: string | null) =>
+      db.query(`INSERT INTO product_images (id, "productId", url, "publicId", "sortOrder") VALUES (gen_random_uuid(), $1, 'https://x.test/a.jpg', $2, $3)`, [p, publicId, sortOrder]);
+    await expect(photo(8, null)).rejects.toThrow(/product_images_sort_chk/);
+    await expect(photo(-1, null)).rejects.toThrow(/product_images_sort_chk/);
+    await photo(0, "vendora/product-photos/u/aaaaaaaaaaaaaaaa");
+    await expect(photo(1, "vendora/product-photos/u/aaaaaaaaaaaaaaaa")).rejects.toThrow(/unique/i);
+    await photo(1, null);
+    await photo(2, null); // the demo photos have no stored file
+    const u = await user();
+    await fails(`INSERT INTO wishlist_items ("userId", "productId", "priceAtSaveCentavos", "notifiedPriceCentavos") VALUES ($1, $2, 100, -1)`, [u, p], /wishlist_items_notified_chk/);
   });
 
   it("can't oversell: the stock update only succeeds while enough is left", async () => {

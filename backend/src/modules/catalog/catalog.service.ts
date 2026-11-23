@@ -194,6 +194,8 @@ export class CatalogService {
         sellingSince: (p.store.approvedAt ?? p.store.createdAt).getFullYear()
       },
       images: p.images.map((i) => ({ url: i.url, alt: i.alt ?? p.title })),
+      /** What the variants differ by ("Color: Midnight Black", "Size: XL"); with one variant there's nothing to pick. */
+      variantLabel: p.variantLabel,
       variants,
       price: {
         fromCentavos: cheapest.priceCentavos,
@@ -210,6 +212,8 @@ export class CatalogService {
         qualifiesForFreeDelivery: cheapest.priceCentavos >= DELIVERY.freeThresholdCentavos,
         standardFeeCentavos: DELIVERY.standardFeeCentavos,
         expressFeeCentavos: DELIVERY.expressFeeCentavos,
+        /** The seller's "Offer Express delivery" for this product. */
+        expressAvailable: p.expressAvailable,
         standardDays: DELIVERY.standardDays,
         expressDays: DELIVERY.expressDays
       },
@@ -314,7 +318,7 @@ function categoryFacet(tree: CategoryNode[], counts: Map<string, number>): Categ
 }
 
 /** Specs are stored as JSON; only well-formed { label, value } pairs leave the API. */
-function readSpecs(value: unknown): { label: string; value: string }[] {
+export function readSpecs(value: unknown): { label: string; value: string }[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((s: unknown) =>
     s && typeof s === "object" && typeof (s as { label?: unknown }).label === "string" && typeof (s as { value?: unknown }).value === "string"

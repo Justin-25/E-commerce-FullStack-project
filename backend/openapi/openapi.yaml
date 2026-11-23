@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.9.0
+  version: 0.10.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -54,7 +54,9 @@ tags:
   - name: checkout
     description: Checkout, orders and PayMongo payments (milestone 5b); your orders, tracking and buy again (milestone 5c)
   - name: seller
-    description: Seller Center, becoming a seller (milestone 6a)
+    description: Seller Center, becoming a seller (milestone 6a) and products (milestone 6b)
+  - name: notifications
+    description: Email settings and the one-click unsubscribe in price-drop emails (milestone 6b)
 
 paths:
   /health:
@@ -1885,7 +1887,9 @@ paths:
       description: |
         A one-time permission for ONE file at a place chosen by the server, in the allowed formats. POST the
         file to `url` as multipart/form-data with every entry of `fields` plus `file`, then send `publicId`
-        to the logo or documents endpoint. At most 30 tickets an hour per account.
+        to the logo or documents endpoint, or in a product's `photos`. A ticket can never replace a file
+        that's already there. Logos and documents: at most 30 tickets an hour per account; product photos
+        (sellers only, 403 `not_a_seller` otherwise): 120 an hour.
       operationId: createUploadTicket
       tags: [seller]
       security: [{ accessCookie: [], csrfHeader: [] }]
@@ -1893,7 +1897,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { type: object, additionalProperties: false, required: [purpose], properties: { purpose: { type: string, enum: [store_logo, store_document] } } }
+            schema: { type: object, additionalProperties: false, required: [purpose], properties: { purpose: { type: string, enum: [store_logo, store_document, product_photo] } } }
       responses:
         "200":
           description: The ticket.
@@ -1902,9 +1906,147 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/SellerForbidden" }
         "429":
-          description: RATE_LIMITED. More than 30 tickets in an hour.
+          description: RATE_LIMITED. More than 30 tickets (120 for product photos) in an hour.
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "503": { $ref: "#/components/responses/UploadsUnavailable" }
+
+  /api/v1/seller/products:
+    get:
+      summary: My products (Seller Center products list)
+      description: |
+        One row per variant (a draft without variants still gets a row), newest products first, 20 per page.
+        The tabs split the rows: Active (published, in stock), Drafts, Out of stock (published, 0 left); All
+        also has hidden ones (inactive, or removed by Vendora). `counts` are for the whole store. Needs a
+        store submitted for review (403 `not_a_seller`).
+      operationId: listSellerProducts
+      tags: [seller]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: tab, in: query, schema: { type: string, enum: [all, active, drafts, out_of_stock], default: all } }
+        - { name: q, in: query, description: Search by name or SKU., schema: { type: string, maxLength: 100 } }
+        - { name: category, in: query, description: "Category slugs, repeatable (?category=a&category=b); a top-level one includes its sub-categories.", schema: { type: array, items: { type: string }, maxItems: 10 }, style: form, explode: true }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 1 } }
+      responses:
+        "200":
+          description: A page of rows.
+          content: { application/json: { schema: { $ref: "#/components/schemas/SellerProductList" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+    post:
+      summary: Add product (Save draft or Publish)
+      description: |
+        `intent: draft` needs only a title and a category. `intent: publish` also needs a description (20+
+        characters), at least one photo and one variant; with `active: false` it's saved hidden. Shoppers see it
+        once it's published, active and the store is approved. The category must be a sub-category. New photos
+        are uploads with a `product_photo` ticket, checked with the storage service. An empty SKU is made up.
+      operationId: createSellerProduct
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SellerProductInput" } } }
+      responses:
+        "201": { $ref: "#/components/responses/SellerProduct" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "409": { $ref: "#/components/responses/SellerProductConflict" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "503": { $ref: "#/components/responses/UploadsUnavailable" }
+
+  /api/v1/seller/products/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: One of my products (the Edit product form)
+      description: A deal that already ended shows as what shoppers pay now (the regular price, nothing crossed out).
+      operationId: getSellerProduct
+      tags: [seller]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/SellerProduct" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      summary: Save the Edit product form
+      description: |
+        Send the whole form with the `version` it was loaded with; if the product changed since (another tab or
+        person), it's refused (409 `stale`): reload. Existing variants send their `id` and `stockWas` (the stock
+        the form showed): the change is added to what's there now, so units sold meanwhile still count (409
+        `stock_changed` if it would go below 0). Variants and photos left out are removed; a variant that sold is
+        hidden instead of deleted. A published product can't go back to draft (409 `already_published`).
+      operationId: updateSellerProduct
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SellerProductInput" } } }
+      responses:
+        "200": { $ref: "#/components/responses/SellerProduct" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/SellerProductConflict" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "503": { $ref: "#/components/responses/UploadsUnavailable" }
+    delete:
+      summary: Delete a product that never sold
+      description: A product with orders can't be deleted (409 `has_orders`); turn off Active to hide it instead. Its photos are deleted from storage.
+      operationId: deleteSellerProduct
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "200":
+          description: Deleted.
+          content: { application/json: { schema: { type: object, required: [id, deleted], properties: { id: { type: string, format: uuid }, deleted: { type: boolean, const: true } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/SellerProductConflict" }
+
+  /api/v1/notifications/preferences:
+    get:
+      summary: My email settings
+      operationId: getEmailPreferences
+      tags: [notifications]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/EmailPreferences" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      summary: Change my email settings
+      operationId: setEmailPreferences
+      tags: [notifications]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/EmailPreferences" } } }
+      responses:
+        "200": { $ref: "#/components/responses/EmailPreferences" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/notifications/unsubscribe:
+    post:
+      summary: One-click unsubscribe from price-drop emails
+      description: |
+        The link in every price-drop email (and its List-Unsubscribe header, which mail apps POST to themselves,
+        RFC 8058). No sign-in and no CSRF token: the signed `token` is the proof. Doing it twice is fine.
+      operationId: unsubscribePriceDrops
+      tags: [notifications]
+      security: []
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string, example: "0193c0de-…-…-…-….9f86d0…" } }
+      responses:
+        "200":
+          description: Price-drop emails are off.
+          content: { application/json: { schema: { type: object, required: [priceDrops], properties: { priceDrops: { type: boolean, const: false } } } } }
+        "400":
+          description: VALIDATION_ERROR. The link isn't valid.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
   /api/v1/stores/{slug}:
     get:
@@ -2375,6 +2517,7 @@ components:
             verified: { type: boolean }
             sellingSince: { type: integer, example: 2023 }
         images: { type: array, items: { type: object, properties: { url: { type: string }, alt: { type: string } } } }
+        variantLabel: { type: string, example: Color, description: 'What the variants differ by: "Color: Midnight Black", "Size: XL". With one variant there is nothing to pick.' }
         variants:
           type: array
           items:
@@ -2413,6 +2556,7 @@ components:
             qualifiesForFreeDelivery: { type: boolean }
             standardFeeCentavos: { type: integer, example: 4900 }
             expressFeeCentavos: { type: integer, example: 12900 }
+            expressAvailable: { type: boolean, description: "The seller's \"Offer Express delivery\" for this product." }
             standardDays: { type: object, properties: { min: { type: integer }, max: { type: integer } } }
             expressDays: { type: object, properties: { min: { type: integer }, max: { type: integer } } }
         returns: { type: object, properties: { days: { type: integer, example: 30 } } }
@@ -2517,7 +2661,7 @@ components:
         issue: { type: [string, "null"], enum: [unavailable, out_of_stock, not_enough_stock, null], description: What must be fixed before checkout. }
     CartGroup:
       type: object
-      required: [store, items, subtotalCentavos, deliveryCentavos, freeDelivery]
+      required: [store, items, subtotalCentavos, deliveryCentavos, freeDelivery, expressAvailable]
       properties:
         store: { type: object, required: [slug, name], properties: { slug: { type: string }, name: { type: string } } }
         items: { type: array, items: { $ref: "#/components/schemas/CartLine" } }
@@ -2531,6 +2675,7 @@ components:
             thresholdCentavos: { type: integer, example: 99900 }
             qualifies: { type: boolean }
             remainingCentavos: { type: integer }
+        expressAvailable: { type: boolean, description: "Express can be chosen at checkout only if every item here allows it (the seller's \"Offer Express delivery\")." }
     Cart:
       type: object
       required: [groups, summary]
@@ -2608,7 +2753,15 @@ components:
                   option: { type: string, enum: [STANDARD, EXPRESS] }
                   feeCentavos: { type: integer }
                   days: { type: object, properties: { min: { type: integer }, max: { type: integer } } }
-                  options: { type: array, items: { type: object, properties: { option: { type: string }, feeCentavos: { type: integer }, days: { type: object } } } }
+                  options:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        option: { type: string, enum: [STANDARD, EXPRESS] }
+                        feeCentavos: { type: integer }
+                        days: { type: object }
+                        available: { type: boolean, description: "Express is offered only when every item in the package allows it; an unavailable Express choice is quoted as Standard." }
         address: { oneOf: [{ $ref: "#/components/schemas/Address" }, { type: "null" }] }
         paymentMethods:
           type: array
@@ -2866,6 +3019,122 @@ components:
           items: { type: string, enum: [two_factor, store_details, verification, gov_id, business_certificate, payout_account] }
         canSubmit: { type: boolean }
         refreshSession: { type: boolean, const: true, description: 'After submitting: call POST /auth/refresh to get the seller role.' }
+    SellerProductInput:
+      type: object
+      additionalProperties: false
+      required: [intent, title, category]
+      properties:
+        intent: { type: string, enum: [draft, publish], description: Save draft (title + category are enough) or Publish (everything is checked). }
+        version: { type: integer, minimum: 1, description: Edits only, the version the form was loaded with. }
+        title: { type: string, minLength: 3, maxLength: 200 }
+        category: { type: string, description: A sub-category's slug., example: headphones }
+        description: { type: string, maxLength: 5000, default: "", description: At least 20 characters to publish. }
+        variantLabel: { type: string, minLength: 1, maxLength: 30, default: Color, example: Size }
+        variants:
+          type: array
+          maxItems: 30
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, priceCentavos, stock]
+            properties:
+              id: { type: string, format: uuid, description: An existing variant (leave out for a new one). }
+              name: { type: string, minLength: 1, maxLength: 100, example: Midnight Black }
+              sku: { type: [string, "null"], maxLength: 64, description: Empty = made up. Unique in the store. }
+              priceCentavos: { type: integer, minimum: 100, maximum: 100000000 }
+              compareAtCentavos: { type: [integer, "null"], description: The crossed-out price, higher than the price. }
+              stock: { type: integer, minimum: 0, maximum: 100000 }
+              stockWas: { type: integer, description: 'Existing variants: the stock the form showed (the change is applied as a difference).' }
+        photos:
+          type: array
+          maxItems: 8
+          description: In order; the first is the cover.
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              id: { type: string, format: uuid, description: A photo already on the product. }
+              publicId: { type: string, description: A new upload (from a product_photo ticket). }
+              alt: { type: [string, "null"], maxLength: 200 }
+        specs:
+          type: array
+          maxItems: 30
+          items: { type: object, additionalProperties: false, required: [label, value], properties: { label: { type: string, maxLength: 40 }, value: { type: string, maxLength: 200 } } }
+        dealEndsAt: { type: [string, "null"], format: date-time, description: The deal countdown (needs a compare-at price; within 90 days). }
+        weightGrams: { type: [integer, "null"], minimum: 1, maximum: 50000 }
+        active: { type: boolean, default: true, description: Off hides a published product. }
+        expressAvailable: { type: boolean, default: true }
+        lowStockAlert: { type: boolean, default: true }
+    SellerProduct:
+      type: object
+      required: [id, slug, status, version, title, category, description, variantLabel, variants, dealEndsAt, photos, specs, weightGrams, shipsFrom, active, expressAvailable, lowStockAlert, visibleToShoppers, canDelete, publishedAt, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        status: { type: string, enum: [draft, active, inactive, removed] }
+        version: { type: integer }
+        title: { type: string }
+        category:
+          type: object
+          properties: { slug: { type: string }, name: { type: string }, parent: { type: [object, "null"], properties: { slug: { type: string }, name: { type: string } } } }
+        description: { type: string }
+        variantLabel: { type: string }
+        variants:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              name: { type: string }
+              sku: { type: string }
+              priceCentavos: { type: integer }
+              compareAtCentavos: { type: [integer, "null"] }
+              stock: { type: integer }
+        dealEndsAt: { type: [string, "null"], format: date-time }
+        photos: { type: array, items: { type: object, properties: { id: { type: string, format: uuid }, url: { type: string }, alt: { type: [string, "null"] } } } }
+        specs: { type: array, items: { type: object, properties: { label: { type: string }, value: { type: string } } } }
+        weightGrams: { type: [integer, "null"] }
+        shipsFrom: { type: [string, "null"], description: "The store's own setting (read-only here)." }
+        active: { type: boolean }
+        expressAvailable: { type: boolean }
+        lowStockAlert: { type: boolean }
+        visibleToShoppers: { type: boolean, description: Active, something on sale, and the store approved. }
+        canDelete: { type: boolean, description: Only products that never sold. }
+        publishedAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    SellerProductList:
+      type: object
+      required: [items, counts, page, pageSize, totalItems, totalPages]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              productId: { type: string, format: uuid }
+              variantId: { type: [string, "null"], format: uuid, description: Null for a draft without variants. }
+              title: { type: string }
+              variantName: { type: [string, "null"] }
+              sku: { type: [string, "null"] }
+              image: { type: [object, "null"], properties: { url: { type: string }, alt: { type: [string, "null"] } } }
+              priceCentavos: { type: [integer, "null"] }
+              compareAtCentavos: { type: [integer, "null"] }
+              stock: { type: [integer, "null"] }
+              stockLeft: { type: [integer, "null"], description: '"9 left": set when 1–9 are left.' }
+              sold30d: { type: integer }
+              status: { type: string, enum: [active, draft, out_of_stock, inactive, removed] }
+        counts: { type: object, properties: { all: { type: integer }, active: { type: integer }, drafts: { type: integer }, out_of_stock: { type: integer } } }
+        page: { type: integer }
+        pageSize: { type: integer, example: 20 }
+        totalItems: { type: integer }
+        totalPages: { type: integer }
+    EmailPreferences:
+      type: object
+      additionalProperties: false
+      required: [priceDrops]
+      properties:
+        priceDrops: { type: boolean, description: Price-drop emails for wishlist items (at most one a day). }
     RatingSummary:
       type: object
       required: [avg, count, stars]
@@ -3042,8 +3311,22 @@ components:
     SellerOnboarding:
       description: The whole onboarding state after the change.
       content: { application/json: { schema: { $ref: "#/components/schemas/SellerOnboarding" } } }
+    SellerProduct:
+      description: The product, as the Edit product form shows it.
+      content: { application/json: { schema: { type: object, required: [product], properties: { product: { $ref: "#/components/schemas/SellerProduct" } } } } }
+    SellerProductConflict:
+      description: |
+        CONFLICT, with `details.reason`: stale (changed elsewhere; reload), stock_changed (with the variant's
+        `stock` field), already_published, has_orders, already_used (a SKU or photo was just used elsewhere).
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    EmailPreferences:
+      description: The email settings.
+      content: { application/json: { schema: { $ref: "#/components/schemas/EmailPreferences" } } }
     SellerForbidden:
-      description: FORBIDDEN, with `details.reason`; two_factor_required (turn on two-step verification first), admin_account, store_suspended.
+      description: |
+        FORBIDDEN, with `details.reason`; two_factor_required (turn on two-step verification first), admin_account,
+        store_suspended (a suspended store can look but not change anything), not_a_seller (products need a store
+        submitted for review), removed_by_vendora (a product taken down by Vendora can't be changed).
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     UploadsUnavailable:
       description: SERVICE_UNAVAILABLE. The storage service isn't set up or didn't answer; try again.
@@ -3052,7 +3335,7 @@ components:
       description: Unknown route or resource.
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     PayloadTooLarge:
-      description: JSON body larger than the 10 KB limit.
+      description: JSON body larger than the 10 KB limit (64 KB for the product form).
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     TooManyRequests:
       description: Rate limit reached. RateLimit-* headers say when to retry.

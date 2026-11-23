@@ -5,20 +5,24 @@ import { signedInUserId, type AuthGuards } from "../../middleware/auth.js";
 import { clientInfoFrom } from "../auth/events.js";
 import type { SecurityService } from "../auth/security.service.js";
 import type { OnboardingService } from "./onboarding.service.js";
+import { productIdSchema, productInputSchema, sellerProductListSchema } from "./products.schemas.js";
+import type { SellerProductService } from "./products.service.js";
 import { documentIdSchema, documentSchema, logoSchema, payoutAccountSchema, storeDetailsSchema, uploadTicketSchema, verificationSchema } from "./seller.schemas.js";
 
 /**
- * Seller Center: becoming a seller (milestone 6a). Signed in, never cached; changes are
- * CSRF-checked app-wide. Every change answers with the whole onboarding state, so the page
- * always shows what's done and what's missing.
+ * Seller Center: becoming a seller (6a) and products (6b). Signed in, never cached; changes
+ * are CSRF-checked app-wide. Onboarding changes answer with the whole onboarding state, so
+ * the page always shows what's done and what's missing; product changes with the product.
  */
 export function sellerRouter({
   onboarding,
+  products,
   security,
   guards,
   config
 }: {
   onboarding: OnboardingService;
+  products: SellerProductService;
   security: Pick<SecurityService, "requireConfirmed">;
   guards: AuthGuards;
   config: Pick<Config, "GEO_HEADERS">;
@@ -74,7 +78,32 @@ export function sellerRouter({
   });
 
   router.post("/seller/uploads", ...auth, async (req, res) => {
-    res.json({ upload: await onboarding.uploadTicket(signedInUserId(req), uploadTicketSchema.parse(req.body).purpose) });
+    const { purpose } = uploadTicketSchema.parse(req.body);
+    const userId = signedInUserId(req);
+    res.json({ upload: purpose === "product_photo" ? await products.uploadTicket(userId) : await onboarding.uploadTicket(userId, purpose) });
+  });
+
+  // --- products (6b) ---
+
+  router.get("/seller/products", ...auth, async (req, res) => {
+    res.json(await products.list(signedInUserId(req), sellerProductListSchema.parse(req.query)));
+  });
+
+  router.post("/seller/products", ...auth, async (req, res) => {
+    res.status(201).json({ product: await products.create(signedInUserId(req), productInputSchema.parse(req.body)) });
+  });
+
+  router.get("/seller/products/:id", ...auth, async (req, res) => {
+    res.json({ product: await products.view(signedInUserId(req), productIdSchema.parse(req.params).id) });
+  });
+
+  router.put("/seller/products/:id", ...auth, async (req, res) => {
+    const { id } = productIdSchema.parse(req.params);
+    res.json({ product: await products.update(signedInUserId(req), id, productInputSchema.parse(req.body)) });
+  });
+
+  router.delete("/seller/products/:id", ...auth, async (req, res) => {
+    res.json(await products.remove(signedInUserId(req), productIdSchema.parse(req.params).id));
   });
 
   return router;

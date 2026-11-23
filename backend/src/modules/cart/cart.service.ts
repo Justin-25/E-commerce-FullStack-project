@@ -38,6 +38,8 @@ export interface CartGroup {
   deliveryCentavos: number;
   /** "Add ₱X more from this store for free delivery". */
   freeDelivery: { thresholdCentavos: number; qualifies: boolean; remainingCentavos: number };
+  /** Express can be chosen at checkout only if every item here allows it (the seller's "Offer Express delivery"). */
+  expressAvailable: boolean;
 }
 
 export interface CartView {
@@ -200,7 +202,15 @@ export class CartService {
       where: { id: { in: stored.map((l) => l.variantId) } },
       include: {
         product: {
-          select: { id: true, slug: true, title: true, status: true, store: { select: { slug: true, name: true, status: true } }, images: { orderBy: { sortOrder: "asc" }, take: 1, select: { url: true, alt: true } } }
+          select: {
+            id: true,
+            slug: true,
+            title: true,
+            status: true,
+            expressAvailable: true,
+            store: { select: { slug: true, name: true, status: true } },
+            images: { orderBy: { sortOrder: "asc" }, take: 1, select: { url: true, alt: true } }
+          }
         }
       }
     });
@@ -219,6 +229,7 @@ export class CartService {
 
       const group = groups.get(product.store.slug) ?? newGroup(product.store);
       groups.set(product.store.slug, group);
+      if (!issue && !product.expressAvailable) group.expressAvailable = false;
       group.items.push({
         variantId: v.id,
         productId: product.id,
@@ -280,7 +291,8 @@ function newGroup(store: { slug: string; name: string }): CartGroup {
     items: [],
     subtotalCentavos: 0,
     deliveryCentavos: 0,
-    freeDelivery: { thresholdCentavos: DELIVERY.freeThresholdCentavos, qualifies: false, remainingCentavos: DELIVERY.freeThresholdCentavos }
+    freeDelivery: { thresholdCentavos: DELIVERY.freeThresholdCentavos, qualifies: false, remainingCentavos: DELIVERY.freeThresholdCentavos },
+    expressAvailable: true
   };
 }
 

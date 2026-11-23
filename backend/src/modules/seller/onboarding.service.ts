@@ -5,7 +5,7 @@ import { createFieldCipher, type FieldCipher } from "../../lib/encryption.js";
 import { AppError } from "../../lib/errors.js";
 import type { KeyValueStore } from "../../lib/kv.js";
 import type { Logger } from "../../lib/logger.js";
-import { newPublicId, type MediaStorage, type StoredMedia, type UploadTicket } from "../../lib/media.js";
+import type { MediaStorage, UploadTicket } from "../../lib/media.js";
 import { isUniqueViolation } from "../../lib/prismaErrors.js";
 import { recordSecurityEvent, type ClientInfo } from "../auth/events.js";
 import { payoutAccountChangedEmail, storeSubmittedEmail } from "./seller.emails.js";
@@ -13,14 +13,13 @@ import {
   MAX_DOCUMENTS,
   RESERVED_STORE_SLUGS,
   storeSlug,
-  UPLOAD_RULES,
-  UPLOAD_TICKETS_PER_HOUR,
   type DocumentInput,
   type PayoutAccountInput,
   type StoreDetailsInput,
   type UploadPurpose,
   type VerificationInput
 } from "./seller.schemas.js";
+import { SellerUploads } from "./uploads.js";
 
 type Tx = Prisma.TransactionClient;
 type StoreStatus = "DRAFT" | "PENDING" | "APPROVED" | "REJECTED" | "SUSPENDED";
@@ -64,7 +63,6 @@ const conflict = (reason: string, message: string, field?: string) =>
   new AppError(409, "CONFLICT", message, { details: { reason }, ...(field ? { fields: [{ path: field, message }] } : {}) });
 const badField = (path: string, message: string) => new AppError(400, "VALIDATION_ERROR", "Some fields are invalid", { fields: [{ path, message }] });
 const noStore = () => new AppError(404, "NOT_FOUND", "Set up your store details first.");
-const uploadsOff = () => new AppError(503, "SERVICE_UNAVAILABLE", "Uploads are unavailable right now. Please try again later.");
 /** Legal details and documents can't change once submitted (until a rejection asks for changes). */
 const EDITABLE_LEGAL: StoreStatus[] = ["DRAFT", "REJECTED"];
 const tinContext = (storeId: string) => `store:${storeId}:tin`;
@@ -79,6 +77,7 @@ const payoutContext = (storeId: string) => `store:${storeId}:payout`;
 export class OnboardingService {
   private readonly cipher: FieldCipher;
   private readonly mailer: BackgroundMailer;
+  private readonly uploads: SellerUploads;
 
   constructor(
     private readonly deps: {
@@ -94,6 +93,7 @@ export class OnboardingService {
   ) {
     this.cipher = createFieldCipher(deps.config.DATA_ENCRYPTION_KEY);
     this.mailer = new BackgroundMailer(deps.email, deps.logger);
+    this.uploads = new SellerUploads({ kv: deps.kv, media: deps.media, ...(deps.logger ? { logger: deps.logger } : {}) });
   }
 
   private now() {
@@ -203,19 +203,21 @@ export class OnboardingService {
     return this.view(userId);
   }
 
-  /** The store logo: a public image the browser uploaded with a ticket. */
+  /** The store logo: a public image the browser uploaded with a ticket. A replaced logo is deleted from storage. */
   async setLogo(userId: string, publicId: string): Promise<OnboardingView> {
     await this.canEdit(userId);
     const store = await this.storeOf(userId);
-    const media = await this.checkUpload(userId, "store_logo", publicId);
-    await this.deps.prisma.store.update({ where: { id: store.id }, data: { logoUrl: media.url } });
+    const media = await this.uploads.check(userId, "store_logo", publicId);
+    await this.deps.prisma.store.update({ where: { id: store.id }, data: { logoUrl: media.url, logoPublicId: media.publicId } });
+    if (store.logoPublicId && store.logoPublicId !== media.publicId) await this.uploads.discard(store.logoPublicId, "public");
     return this.view(userId);
   }
 
   async removeLogo(userId: string): Promise<OnboardingView> {
     await this.canEdit(userId);
     const store = await this.storeOf(userId);
-    await this.deps.prisma.store.update({ where: { id: store.id }, data: { logoUrl: null } });
+    await this.deps.prisma.store.update({ where: { id: store.id }, data: { logoUrl: null, logoPublicId: null } });
+    if (store.logoPublicId) await this.uploads.discard(store.logoPublicId, "public");
     return this.view(userId);
   }
 
@@ -243,7 +245,7 @@ export class OnboardingService {
     await this.canEdit(userId);
     const store = await this.storeOf(userId);
     if (!EDITABLE_LEGAL.includes(store.status)) throw submitted();
-    const media = await this.checkUpload(userId, "store_document", input.publicId);
+    const media = await this.uploads.check(userId, "store_document", input.publicId);
     await prisma.$transaction(async (tx) => {
       await lockUser(tx, userId);
       if ((await tx.storeDocument.count({ where: { storeId: store.id } })) >= MAX_DOCUMENTS) throw conflict("too_many_documents", `You can upload up to ${MAX_DOCUMENTS} documents. Remove one first.`);
@@ -262,7 +264,7 @@ export class OnboardingService {
     if (!doc) throw new AppError(404, "NOT_FOUND", "This document doesn't exist.");
     await prisma.storeDocument.delete({ where: { id: doc.id } });
     // The private file goes too (best effort: a leftover file is private and unreferenced).
-    await this.deps.media?.remove(doc.fileKey, "private").catch((err: unknown) => this.deps.logger?.warn({ err, documentId }, "couldn't delete a removed document's file"));
+    await this.uploads.discard(doc.fileKey, "private");
     return this.view(userId);
   }
 
@@ -331,37 +333,9 @@ export class OnboardingService {
   // --- uploads ------------------------------------------------------------------
 
   /** A one-time permission for the browser to upload one logo or document (at most 30 an hour per account). */
-  async uploadTicket(userId: string, purpose: UploadPurpose): Promise<UploadTicket> {
+  async uploadTicket(userId: string, purpose: Exclude<UploadPurpose, "product_photo">): Promise<UploadTicket> {
     await this.canEdit(userId);
-    const media = this.deps.media;
-    if (!media) throw uploadsOff();
-    if ((await this.deps.kv.increment(`uploads:tickets:${userId}`, 60 * 60)) > UPLOAD_TICKETS_PER_HOUR) {
-      throw new AppError(429, "RATE_LIMITED", "Too many uploads. Please try again in an hour.");
-    }
-    const rule = UPLOAD_RULES[purpose];
-    return media.ticket({ publicId: newPublicId(prefixFor(purpose, userId)), access: rule.access, allowedFormats: [...rule.allowedFormats], maxBytes: rule.maxBytes });
-  }
-
-  /**
-   * What the browser says it uploaded is only a claim: the place must be one OUR server handed
-   * this account, and the file there must exist with an allowed type and size. A file that
-   * breaks the rules is deleted.
-   */
-  private async checkUpload(userId: string, purpose: UploadPurpose, publicId: string): Promise<StoredMedia> {
-    const media = this.deps.media;
-    if (!media) throw uploadsOff();
-    const rule = UPLOAD_RULES[purpose];
-    if (!publicId.startsWith(`${prefixFor(purpose, userId)}/`) || publicId.split("/").length !== prefixFor(purpose, userId).split("/").length + 1) {
-      throw badField("publicId", "This upload doesn't belong to your account. Please upload the file again.");
-    }
-    const found = await media.find(publicId, rule.access);
-    if (!found) throw badField("publicId", "We couldn't find that upload. Please upload the file again.");
-    const formats: readonly string[] = rule.allowedFormats;
-    if (!formats.includes(found.format) || found.bytes > rule.maxBytes) {
-      await media.remove(publicId, rule.access).catch((err: unknown) => this.deps.logger?.warn({ err }, "couldn't delete a rejected upload"));
-      throw badField("publicId", `Use ${rule.allowedFormats.map((f) => f.toUpperCase()).join(", ")} up to ${rule.maxBytes / 1024 / 1024} MB.`);
-    }
-    return found;
+    return this.uploads.ticket(userId, purpose);
   }
 
   // --- rules --------------------------------------------------------------------
@@ -376,14 +350,12 @@ export class OnboardingService {
   }
 
   private async storeOf(userId: string) {
-    const store = await this.deps.prisma.store.findUnique({ where: { ownerId: userId }, select: { id: true, name: true, status: true } });
+    const store = await this.deps.prisma.store.findUnique({ where: { ownerId: userId }, select: { id: true, name: true, status: true, logoPublicId: true } });
     if (!store) throw noStore();
     return store;
   }
 }
 
-/** "vendora/store-logos/<user id>": one folder per purpose and account. */
-const prefixFor = (purpose: UploadPurpose, userId: string) => `vendora/${UPLOAD_RULES[purpose].folder}/${userId}`;
 const nameTaken = () => conflict("name_taken", "This store name is taken. Please choose another.", "name");
 const submitted = () => conflict("store_submitted", "Your business details can't be changed after submitting. Contact Vendora support if something is wrong.");
 

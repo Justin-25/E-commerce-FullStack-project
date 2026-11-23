@@ -22,7 +22,10 @@ import { FakePaymongo, TEST_WEBHOOK_SECRET } from "./fakePaymongo.js";
 import { FakeMedia } from "./fakeMedia.js";
 import { SecurityService } from "../../src/modules/auth/security.service.js";
 import { OnboardingService } from "../../src/modules/seller/onboarding.service.js";
+import { SellerProductService } from "../../src/modules/seller/products.service.js";
 import { sellerRouter } from "../../src/modules/seller/seller.routes.js";
+import { notificationsRouter } from "../../src/modules/notifications/notifications.routes.js";
+import { PriceDropService } from "../../src/modules/notifications/priceDrops.service.js";
 
 /**
  * The real catalog, reviews and store routes on a fresh test database filled with the
@@ -33,7 +36,9 @@ export async function createCatalogHarness() {
   const paymongo = new FakePaymongo();
   const media = new FakeMedia();
   /** The order service of the most recently built app (tests call its background job directly). */
-  const services: { orders?: OrderService } = {};
+  const services: { orders?: OrderService; priceDrops?: PriceDropService } = {};
+  /** Moves the price-drop job's clock (its once-a-day rule) without waiting a day. */
+  const clock = { offsetMs: 0 };
   // One order service per built app, shared by its routes and its webhook (like server.ts).
   const built = new WeakMap<HarnessDeps, OrderService>();
   const orderService = (deps: HarnessDeps) => {
@@ -50,7 +55,10 @@ export async function createCatalogHarness() {
     routers: (deps) => {
       const { prisma, kv, guards, logger } = deps;
       const catalog = new CatalogService({ prisma, kv, logger });
+      const priceDrops = new PriceDropService({ prisma, email: deps.email, config: deps.config, logger, now: () => new Date(Date.now() + clock.offsetMs) });
+      services.priceDrops = priceDrops;
       return [
+        notificationsRouter({ priceDrops, guards }),
         catalogRouter({ catalog }),
         reviewsRouter({ reviews: new ReviewService({ prisma }), guards }),
         storesRouter({ stores: new StoreService({ prisma }), guards }),
@@ -61,6 +69,7 @@ export async function createCatalogHarness() {
         ordersRouter({ orders: orderService(deps), guards }),
         sellerRouter({
           onboarding: new OnboardingService({ prisma, kv, media, email: deps.email, config: deps.config, logger }),
+          products: new SellerProductService({ prisma, kv, media, logger }),
           security: new SecurityService({ prisma, kv, email: deps.email, config: deps.config, logger }),
           guards,
           config: deps.config
@@ -77,7 +86,11 @@ export async function createCatalogHarness() {
     if (!services.orders) throw new Error("no order service yet");
     return services.orders;
   };
-  return { ...h, demo, idOf, paymongo, media, orders };
+  const priceDrops = () => {
+    if (!services.priceDrops) throw new Error("no price-drop service yet");
+    return services.priceDrops;
+  };
+  return { ...h, demo, idOf, paymongo, media, orders, priceDrops, clock };
 }
 
 export type CatalogHarness = Awaited<ReturnType<typeof createCatalogHarness>>;

@@ -5,6 +5,7 @@ import type { EmailSender } from "../../lib/email.js";
 import { AppError } from "../../lib/errors.js";
 import { platformFeeCentavos } from "../../lib/fees.js";
 import type { KeyValueStore } from "../../lib/kv.js";
+import { likeLiteral } from "../../lib/like.js";
 import type { Logger } from "../../lib/logger.js";
 import type { CheckoutState, OnlineMethod, PaidPayment, PaymentGateway, WebhookEvent } from "../../lib/paymongo.js";
 import { readSession } from "../../lib/paymongo.js";
@@ -48,7 +49,8 @@ export interface PackageQuote {
     option: DeliveryOption;
     feeCentavos: number;
     days: { min: number; max: number };
-    options: { option: DeliveryOption; feeCentavos: number; days: { min: number; max: number } }[];
+    /** Express is offered only when every item in the package allows it (a seller setting per product). */
+    options: { option: DeliveryOption; feeCentavos: number; days: { min: number; max: number }; available: boolean }[];
   };
 }
 
@@ -183,12 +185,6 @@ const TAB_WHERE: Record<OrderListQuery["tab"], Prisma.OrderWhereInput> = {
   delivered: { sellerOrders: { some: { status: "DELIVERED" } } }
 };
 
-/**
- * Prisma turns `contains` into SQL `ILIKE '%…%'` WITHOUT escaping, so a "%" or "_" typed in
- * the search box would match every order (caught by a test). Escape them (and the escape character).
- */
-const likeLiteral = (text: string) => text.replace(/[\\%_]/g, "\\$&");
-
 /** "VD-21458", "#VD-21458" or "21458" finds that order; any text also matches the names of the products bought. */
 function searchOrders(q: string): Prisma.OrderWhereInput {
   const number = /^#?\s*(?:vd\s*-?\s*)?(\d{1,9})$/i.exec(q)?.[1];
@@ -196,16 +192,24 @@ function searchOrders(q: string): Prisma.OrderWhereInput {
   return number ? { OR: [{ orderNumber: Number(number) }, byProduct] } : byProduct;
 }
 
-/** Delivery per store for the cart as it is, with the shopper's Standard/Express choices. */
+/**
+ * Delivery per store for the cart as it is, with the shopper's Standard/Express choices.
+ * Express asked for a package that can't go Express (an item's seller doesn't offer it) is
+ * quoted as Standard and listed in `expressRefused`: the checkout page just shows Standard,
+ * while "Place order" refuses, so nobody pays for a delivery they didn't pick.
+ */
 export function quote(cart: CartView, choices: Record<string, "STANDARD" | "EXPRESS">) {
+  const expressRefused: { slug: string; name: string }[] = [];
   const packages: PackageQuote[] = cart.groups
     .filter((g) => g.subtotalCentavos > 0)
     .map((g) => {
       const standard = g.freeDelivery.qualifies ? 0 : DELIVERY.standardFeeCentavos;
-      const option: DeliveryOption = choices[g.store.slug] ?? "STANDARD";
+      const wanted: DeliveryOption = choices[g.store.slug] ?? "STANDARD";
+      if (wanted === "EXPRESS" && !g.expressAvailable) expressRefused.push(g.store);
+      const option: DeliveryOption = wanted === "EXPRESS" && !g.expressAvailable ? "STANDARD" : wanted;
       const options = [
-        { option: "STANDARD" as const, feeCentavos: standard, days: DELIVERY.standardDays },
-        { option: "EXPRESS" as const, feeCentavos: DELIVERY.expressFeeCentavos, days: DELIVERY.expressDays }
+        { option: "STANDARD" as const, feeCentavos: standard, days: DELIVERY.standardDays, available: true },
+        { option: "EXPRESS" as const, feeCentavos: DELIVERY.expressFeeCentavos, days: DELIVERY.expressDays, available: g.expressAvailable }
       ];
       const chosen = options.find((o) => o.option === option) ?? options[0];
       return {
@@ -217,7 +221,11 @@ export function quote(cart: CartView, choices: Record<string, "STANDARD" | "EXPR
     });
   const subtotal = packages.reduce((s, p) => s + p.subtotalCentavos, 0);
   const delivery = packages.reduce((s, p) => s + p.delivery.feeCentavos, 0);
-  return { packages, totals: { subtotalCentavos: subtotal, deliveryCentavos: delivery, discountCentavos: 0, totalCentavos: subtotal + delivery, savingsCentavos: cart.summary.savingsCentavos } };
+  return {
+    packages,
+    totals: { subtotalCentavos: subtotal, deliveryCentavos: delivery, discountCentavos: 0, totalCentavos: subtotal + delivery, savingsCentavos: cart.summary.savingsCentavos },
+    expressRefused
+  };
 }
 
 /**
@@ -331,6 +339,13 @@ export class OrderService {
       throw new AppError(409, "CONFLICT", empty ? "Your cart is empty." : "Some items in your cart need attention first.", { details: { reason: empty ? "cart_empty" : "cart_issues" } });
     }
     const q = quote(cart, input.delivery);
+    const [refused] = q.expressRefused;
+    if (refused) {
+      throw new AppError(409, "CONFLICT", `Express delivery isn't available for the items from ${refused.name}. Choose Standard delivery.`, {
+        details: { reason: "express_unavailable", store: refused.slug },
+        fields: [{ path: `delivery.${refused.slug}`, message: "Express delivery isn't available for these items" }]
+      });
+    }
     if (q.totals.totalCentavos !== input.expectedTotalCentavos) {
       throw new AppError(409, "CONFLICT", "Prices or delivery changed since you looked. Please check your order again.", {
         details: { reason: "total_changed", totalCentavos: q.totals.totalCentavos }

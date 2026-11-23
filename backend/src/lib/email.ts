@@ -6,6 +6,8 @@ export interface EmailMessage {
   text: string;
   /** What kind of email this is, e.g. "verify-email" (for logs and tests). */
   kind: string;
+  /** Extra headers, e.g. List-Unsubscribe for one-click unsubscribe (the provider in milestone 9 sends them). */
+  headers?: Record<string, string>;
 }
 
 /** Everything that sends email goes through this, so the provider can change without touching sign-in code. */

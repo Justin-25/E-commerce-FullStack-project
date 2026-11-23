@@ -13,6 +13,7 @@ import { healthRouter, type ReadinessChecks } from "./modules/health/health.rout
 
 // Query keys allowed to repeat (?category=a&category=b). Filled in as modules need them.
 const REPEATABLE_QUERY_KEYS: readonly string[] = ["category", "store"];
+export const PRODUCT_FORM_BODY_LIMIT = "64kb";
 
 export interface AppOptions {
   config: Config;
@@ -62,6 +63,10 @@ export function createApp({ config, logger, checks = {}, rateLimitStore, csrf = 
   );
   app.use(cookieParser());
   for (const router of webhooks) app.use("/api/v1", router);
+  // The product form is the one big request (a 5,000-character description, 30 variants, 30
+  // specifications: about 52 KB at worst). Only it gets more room; the general parser then
+  // skips a body that's already parsed.
+  app.use("/api/v1/seller/products", express.json({ limit: PRODUCT_FORM_BODY_LIMIT, strict: true }));
   app.use(express.json({ limit: config.JSON_BODY_LIMIT, strict: true }));
   app.use(originCheck(config.CORS_ORIGINS));
   app.use(csrf.protect);

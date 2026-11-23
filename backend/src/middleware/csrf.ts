@@ -46,7 +46,8 @@ export function createCsrf(config: Pick<Config, "CSRF_SECRET" | "NODE_ENV">): Cs
     cookieOptions: { sameSite: "strict", path: "/", secure, httpOnly: true },
     getCsrfTokenFromRequest: (req) => req.get("x-csrf-token"),
     // Payment providers can't send our token; webhooks are verified by signature instead (milestone 5).
-    skipCsrfProtection: (req) => req.path.startsWith("/api/v1/webhooks/")
+    // Mail apps' one-click unsubscribe can't either; its link carries a signed token instead (6b).
+    skipCsrfProtection: (req) => req.path.startsWith("/api/v1/webhooks/") || req.path === "/api/v1/notifications/unsubscribe"
   });
 
   return {

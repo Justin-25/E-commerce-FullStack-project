@@ -51,6 +51,8 @@ erDiagram
     string twoFactorSecret "AES-256-GCM, bound to the user id"
     datetime twoFactorEnabledAt "null = 2FA off (secret may be pending set-up)"
     datetime lastLoginAt
+    bool priceDropEmails "one-click unsubscribe (6b)"
+    datetime priceDropEmailedAt "one a day (6b)"
   }
   oauth_accounts {
     uuid id PK
@@ -138,8 +140,9 @@ erDiagram
     string slug UK "soundcraft-audio"
     string description
     string logoUrl
+    string logoPublicId "to delete a replaced logo (6b)"
     string bannerUrl
-    enum status "PENDING | APPROVED | REJECTED | SUSPENDED"
+    enum status "DRAFT | PENDING | APPROVED | REJECTED | SUSPENDED"
     enum businessType "INDIVIDUAL | REGISTERED_BUSINESS"
     string legalName
     string registrationNo "DTI / SEC"
@@ -208,6 +211,10 @@ erDiagram
     int soldCount
     jsonb specs "Specifications tab"
     tsvector searchVector "generated, for search"
+    string variantLabel "Color, Size, Model (6b)"
+    bool expressAvailable "6b"
+    bool lowStockAlert "6b"
+    int version "raised by seller edits (6b)"
   }
   product_variants {
     uuid id PK
@@ -225,9 +232,9 @@ erDiagram
     uuid id PK
     uuid productId FK
     string url "Cloudinary"
-    string publicId
+    string publicId UK "null for demo photos"
     string alt
-    int sortOrder "0 = cover"
+    int sortOrder "0 = cover, up to 7"
   }
   reviews {
     uuid id PK
@@ -244,6 +251,7 @@ erDiagram
     uuid userId FK
     uuid productId FK
     int priceAtSaveCentavos "for price-drop alerts"
+    int notifiedPriceCentavos "last emailed price (6b)"
   }
 ```
 
@@ -259,6 +267,13 @@ erDiagram
 - **Tracking** (milestone 5c): a package's milestones are columns on `seller_orders` (`shippedAt` with `courier` and `trackingNumber`, `deliveredAt`, `cancelledAt`), set by the seller in milestone 6. `shipment_events` holds only the extra updates in between ("Arrived at Manila sorting hub · Pasay City"), so the timeline never lists a milestone twice.
 - **Demo reviews** are real rows: 40 demo shoppers with delivered orders (`orders` → `seller_orders` → `order_items`), each review linked to its order item. The seed replaces only those shoppers' orders and reviews.
 - **Wishlist** (milestone 4c): one row per shopper and product (primary key), with `priceAtSaveCentavos` = the price when saved, kept on re-save. A price drop is today's effective price below it, worked out when read. Rows stay when a product stops being sold (shown as unavailable); they go when the shopper removes them or the account is deleted (cascade).
+- **Seller products** (milestone 6b, migration `20261124090000_seller_products`):
+  - `variantLabel` names a product's one variant option (CHECK: 1–30 characters, not blank).
+  - `expressAvailable` decides whether a package with this product can go Express. `lowStockAlert` is the seller's "alert me under 10" (the email comes in 6c).
+  - `version` is raised by every seller edit, so an edit from an out-of-date form is refused (CHECK ≥ 1). Orders (sold count) and reviews (rating) change the row but not the version, so they never block an edit.
+  - Photos: up to 8 per product (CHECK `sortOrder` 0–7), and one stored file is one photo (unique `publicId`; the demo photos have none).
+  - A variant that sold is hidden (`isActive = false`), not deleted, because `order_items` points at it (Restrict); a product that sold can't be deleted.
+- **Price-drop emails** (6b): `wishlist_items.notifiedPriceCentavos` is the price we last emailed about (another email needs a lower one; reset when the drop is over; CHECK ≥ 0). `users.priceDropEmails` is the one-click unsubscribe switch, and `users.priceDropEmailedAt` keeps it to one email a day. `stores.logoPublicId` lets a replaced logo be deleted from Cloudinary.
 
 ## 4 · Cart, orders & payments
 

@@ -4,18 +4,21 @@ import { normalizePhone } from "../addresses/addresses.schemas.js";
 /** Store names that would confuse buyers (or impersonate us), checked on the web address made from the name. */
 export const RESERVED_STORE_SLUGS = ["admin", "administrator", "api", "help", "moderator", "official", "root", "seller", "sellers", "shop", "staff", "store", "stores", "support", "system", "www"];
 
-/** "Hearth & Home" → "hearth-home". The web address of the store page, and what makes names unique. */
-export function storeSlug(name: string): string {
-  return name
+/** "Hearth & Home" → "hearth-home": lowercase letters, digits and dashes, at most `max` characters. */
+export function slugify(text: string, max: number): string {
+  return text
     .normalize("NFKD")
     .replace(/[̀-ͯ]/g, "") // "Café" → "Cafe"
     .toLowerCase()
     .replace(/&/g, " ")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 60)
+    .slice(0, max)
     .replace(/-+$/g, "");
 }
+
+/** The web address of the store page, and what makes store names unique. */
+export const storeSlug = (name: string): string => slugify(name, 60);
 
 /** Banks Vendora pays out to (BANK payouts must name one). */
 export const BANKS = [
@@ -38,14 +41,19 @@ export const BANKS = [
 export const UPLOADABLE_DOCUMENTS = ["GOV_ID", "DTI_CERT", "SEC_CERT", "BIR_2303"] as const;
 export const MAX_DOCUMENTS = 10;
 
-/** What can be uploaded where (sizes from the design: documents 10 MB; images 5 MB). */
+/**
+ * What can be uploaded where (sizes from the design: documents 10 MB; images 5 MB), and how
+ * many upload permissions an account gets per hour (each one lets a single file in). Product
+ * photos have their own, larger allowance: 8 per product, and a seller adds many products.
+ */
 export const UPLOAD_RULES = {
-  store_logo: { access: "public", allowedFormats: ["jpg", "png", "webp"], maxBytes: 5 * 1024 * 1024, folder: "store-logos" },
-  store_document: { access: "private", allowedFormats: ["jpg", "png", "pdf"], maxBytes: 10 * 1024 * 1024, folder: "store-documents" }
+  store_logo: { access: "public", allowedFormats: ["jpg", "png", "webp"], maxBytes: 5 * 1024 * 1024, folder: "store-logos", hourlyLimit: "store" },
+  store_document: { access: "private", allowedFormats: ["jpg", "png", "pdf"], maxBytes: 10 * 1024 * 1024, folder: "store-documents", hourlyLimit: "store" },
+  product_photo: { access: "public", allowedFormats: ["jpg", "png", "webp"], maxBytes: 5 * 1024 * 1024, folder: "product-photos", hourlyLimit: "photos" }
 } as const;
 export type UploadPurpose = keyof typeof UPLOAD_RULES;
-/** Upload permissions per account per hour (each one lets a single file in). */
-export const UPLOAD_TICKETS_PER_HOUR = 30;
+export const UPLOAD_PURPOSES = Object.keys(UPLOAD_RULES) as [UploadPurpose, ...UploadPurpose[]];
+export const UPLOAD_TICKETS_PER_HOUR = { store: 30, photos: 120 } as const;
 
 const text = (label: string, min: number, max: number) =>
   z
@@ -70,8 +78,8 @@ export const storeDetailsSchema = z.strictObject({
   shipsFrom: text("city you ship from", 2, 100)
 });
 
-/** Logos, documents: the place the browser uploaded to (from the upload ticket). */
-const publicIdSchema = z.string({ error: "Upload the file first" }).regex(/^[A-Za-z0-9_/-]{10,200}$/, { error: "Upload the file first" });
+/** Logos, documents, photos: the place the browser uploaded to (from the upload ticket). */
+export const publicIdSchema = z.string({ error: "Upload the file first" }).regex(/^[A-Za-z0-9_/-]{10,200}$/, { error: "Upload the file first" });
 export const logoSchema = z.strictObject({ publicId: publicIdSchema });
 export const documentSchema = z.strictObject({ type: z.enum(UPLOADABLE_DOCUMENTS, { error: "Choose what this document is" }), publicId: publicIdSchema });
 
@@ -134,7 +142,7 @@ export const payoutAccountSchema = z.discriminatedUnion(
   { error: "Choose GCash or bank" }
 );
 
-export const uploadTicketSchema = z.strictObject({ purpose: z.enum(["store_logo", "store_document"], { error: "Unknown upload" }) });
+export const uploadTicketSchema = z.strictObject({ purpose: z.enum(UPLOAD_PURPOSES, { error: "Unknown upload" }) });
 export const documentIdSchema = z.object({ id: z.uuid({ error: "Document not found" }) });
 
 export type StoreDetailsInput = z.infer<typeof storeDetailsSchema>;

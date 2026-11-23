@@ -26,8 +26,10 @@ export type MatchMode = "words" | "similar";
  * Every visible product, with its cheapest active variant ("from ₱…"). A
  * product is visible if it's ACTIVE, its store is APPROVED and at least one
  * variant is on sale (the inner LATERAL join drops products with none).
+ * Aliases: p (product), s (store), cheapest (price, compare_at, sale_ends_at).
+ * Also used by the price-drop emails, so "today's price" means the same everywhere.
  */
-const FROM = Prisma.sql`
+export const VISIBLE_PRODUCTS_FROM = Prisma.sql`
   FROM products p
   JOIN stores s ON s.id = p."storeId" AND s.status = 'APPROVED'
   JOIN LATERAL (
@@ -124,7 +126,7 @@ export function buildSearch(f: SearchFilters, mode: MatchMode = "words") {
   };
 
   return {
-    count: Prisma.sql`SELECT count(*)::int AS total, count(DISTINCT p."storeId")::int AS sellers ${FROM} ${where()}`,
+    count: Prisma.sql`SELECT count(*)::int AS total, count(DISTINCT p."storeId")::int AS sellers ${VISIBLE_PRODUCTS_FROM} ${where()}`,
 
     page: (sort: ListSort, limit: number, offset: number) => Prisma.sql`
       SELECT p.id, p.slug, p.title, p."ratingAvg"::float AS "ratingAvg", p."ratingCount", p."soldCount", p."publishedAt",
@@ -132,19 +134,19 @@ export function buildSearch(f: SearchFilters, mode: MatchMode = "words") {
              cheapest.price, cheapest.compare_at AS "compareAt", cheapest.sale_ends_at AS "saleEndsAt",
              (SELECT coalesce(sum(v2.stock), 0)::int FROM product_variants v2 WHERE v2."productId" = p.id AND v2."isActive") AS "stockOnSale",
              ${rank} AS rank
-      ${FROM} ${where()}
+      ${VISIBLE_PRODUCTS_FROM} ${where()}
       ORDER BY ${SORT_SQL[sort](Boolean(text))}, p.id ASC
       LIMIT ${limit} OFFSET ${offset}`,
 
-    categoryFacet: Prisma.sql`SELECT p."categoryId" AS id, count(*)::int AS n ${FROM} ${where("category")} GROUP BY p."categoryId"`,
+    categoryFacet: Prisma.sql`SELECT p."categoryId" AS id, count(*)::int AS n ${VISIBLE_PRODUCTS_FROM} ${where("category")} GROUP BY p."categoryId"`,
 
     storeFacet: Prisma.sql`
-      SELECT s.slug, s.name, count(*)::int AS n ${FROM} ${where("store")}
+      SELECT s.slug, s.name, count(*)::int AS n ${VISIBLE_PRODUCTS_FROM} ${where("store")}
       GROUP BY s.slug, s.name ORDER BY n DESC, s.name ASC LIMIT 10`,
 
-    storeFacetTotal: Prisma.sql`SELECT count(DISTINCT p."storeId")::int AS n ${FROM} ${where("store")}`,
+    storeFacetTotal: Prisma.sql`SELECT count(DISTINCT p."storeId")::int AS n ${VISIBLE_PRODUCTS_FROM} ${where("store")}`,
 
-    priceFacet: Prisma.sql`SELECT min(cheapest.price)::int AS min, max(cheapest.price)::int AS max ${FROM} ${where("price")}`
+    priceFacet: Prisma.sql`SELECT min(cheapest.price)::int AS min, max(cheapest.price)::int AS max ${VISIBLE_PRODUCTS_FROM} ${where("price")}`
   };
 }
 
@@ -166,4 +168,4 @@ export interface SearchRow {
 }
 
 /** Visible-product counts per category, for the category list (same visibility rules as search). */
-export const VISIBLE_COUNTS_BY_CATEGORY = Prisma.sql`SELECT p."categoryId" AS id, count(*)::int AS n ${FROM} WHERE p.status = 'ACTIVE' GROUP BY p."categoryId"`;
+export const VISIBLE_COUNTS_BY_CATEGORY = Prisma.sql`SELECT p."categoryId" AS id, count(*)::int AS n ${VISIBLE_PRODUCTS_FROM} WHERE p.status = 'ACTIVE' GROUP BY p."categoryId"`;

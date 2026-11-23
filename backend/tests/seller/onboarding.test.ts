@@ -328,6 +328,22 @@ describe("Uploads", () => {
     expect(tooMany.status).toBe(429);
   });
 
+  it("deletes a replaced or removed logo from storage", async () => {
+    const s = await owner();
+    await s.browser.put(`${S}/store`, details(`Logo Swap ${++n}`));
+    const first = await upload(s.browser, "store_logo");
+    const second = await upload(s.browser, "store_logo");
+    expect((await s.browser.put(`${S}/store/logo`, { publicId: first })).status).toBe(200);
+    expect((await s.browser.put(`${S}/store/logo`, { publicId: first })).status).toBe(200); // the same logo again: kept
+    expect(h.media.removed).not.toContain(first);
+    const v = (await s.browser.put(`${S}/store/logo`, { publicId: second })).body as View;
+    expect(v.store?.logoUrl).toBe(`https://media.example.test/${second}.jpg`);
+    expect(h.media.removed).toContain(first);
+    expect(((await s.browser.delete(`${S}/store/logo`)).body as View).store?.logoUrl).toBeNull();
+    expect(h.media.removed).toContain(second);
+    expect(await h.db.prisma.store.findUniqueOrThrow({ where: { ownerId: s.user.id }, select: { logoUrl: true, logoPublicId: true } })).toEqual({ logoUrl: null, logoPublicId: null });
+  });
+
   it("removing a document deletes its private file; other stores' documents can't be touched", async () => {
     const s = await owner();
     const other = await owner("Ben Cruz");
