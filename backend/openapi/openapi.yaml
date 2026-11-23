@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.10.0
+  version: 0.11.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -1557,6 +1557,33 @@ paths:
           description: CONFLICT (`not_paid`). The order is still waiting for payment; its items are still held for it.
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
+  /api/v1/orders/{id}/packages/{packageId}/received:
+    post:
+      summary: Order received (one package)
+      description: |
+        The buyer confirms a shipped package arrived (sellers can't mark their own packages delivered). It
+        becomes DELIVERED, the seller is credited (sale and Vendora's fee, available 7 days later), "Write a
+        review" opens, and once no package is still on its way the order is COMPLETED (a cash-on-delivery
+        payment then counts as paid). If the buyer doesn't confirm, it happens automatically 7 days after
+        shipping (`autoConfirmAt`). Pressing it again, or after the automatic confirmation, changes nothing.
+      operationId: confirmPackageReceived
+      tags: [checkout]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: packageId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The order after the change.
+          content: { application/json: { schema: { type: object, required: [order], properties: { order: { $ref: "#/components/schemas/Order" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT (`not_shipped`). The seller hasn't shipped this package yet (or it was cancelled).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
   /api/v1/webhooks/paymongo:
     post:
       summary: PayMongo → Vendora payment events
@@ -2006,6 +2033,96 @@ paths:
         "403": { $ref: "#/components/responses/SellerForbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/SellerProductConflict" }
+
+  /api/v1/seller/orders:
+    get:
+      summary: My orders (Seller Center orders list)
+      description: |
+        One row per package of this store, once it's paid (or placed with cash on delivery); unpaid orders
+        aren't shown. "To ship" lists the most urgent first (earliest ship-by), the other tabs newest first,
+        20 per page. `counts` are for the whole store, regardless of the search. `alerts` feeds "3 orders are
+        due to ship today by 6:00 PM" (and how many are late). Customers appear as "Maria S." and their city.
+      operationId: listSellerOrders
+      tags: [seller]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: tab, in: query, schema: { type: string, enum: [to_ship, shipped, delivered, all], default: to_ship } }
+        - { name: q, in: query, description: 'Order number ("VD-21458", "21458") or words from a product name.', schema: { type: string, maxLength: 100 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 1 } }
+      responses:
+        "200":
+          description: A page of orders.
+          content: { application/json: { schema: { $ref: "#/components/schemas/SellerOrderList" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+
+  /api/v1/seller/orders/export:
+    get:
+      summary: Export CSV
+      description: |
+        The orders of a tab (and search) as a CSV file, newest first, up to 5,000 rows. UTF-8 with a byte-order
+        mark (for Excel); times in Philippine time; amounts in pesos. Buyers appear as "Maria S." and their city,
+        never with their address or phone. Text that a spreadsheet would run as a formula (starting with = + - @)
+        is written with a leading apostrophe.
+      operationId: exportSellerOrders
+      tags: [seller]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: tab, in: query, schema: { type: string, enum: [to_ship, shipped, delivered, all], default: all } }
+        - { name: q, in: query, schema: { type: string, maxLength: 100 } }
+      responses:
+        "200":
+          description: 'The file ("vendora-orders-2026-11-23.csv", as an attachment).'
+          headers:
+            Content-Disposition: { schema: { type: string }, example: attachment; filename=vendora-orders-2026-11-23.csv }
+          content: { text/csv: { schema: { type: string } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+
+  /api/v1/seller/orders/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid }, description: The package (seller order) id from the list. }
+    get:
+      summary: One order (the seller's order page and packing slip)
+      operationId: getSellerOrder
+      tags: [seller]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/SellerOrder" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/seller/orders/{id}/shipment:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    put:
+      summary: Mark as shipped (or fix the shipping details)
+      description: |
+        "To ship" → SHIPPED with the courier and tracking number, and the buyer is emailed. Sending it again
+        (a double click) changes nothing; sending different details while it's on its way corrects them (the
+        buyer gets the new ones). The tracking number is kept as letters and digits only ("7720 1934-5512" →
+        "772019345512") and is unique per courier. A suspended store can still ship orders already paid.
+      operationId: shipSellerOrder
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ShipmentInput" } } }
+      responses:
+        "200": { $ref: "#/components/responses/SellerOrder" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            CONFLICT, with `details.reason`: tracking_in_use (another package has this courier's tracking number;
+            a `trackingNumber` field error), already_delivered, cancelled.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
   /api/v1/notifications/preferences:
     get:
@@ -2823,10 +2940,13 @@ components:
               deliveryCentavos: { type: integer }
               courier: { type: [string, "null"], example: LBC, description: Set by the seller when shipping (milestone 6). }
               trackingNumber: { type: [string, "null"], example: 8841 2201 }
-              shipBy: { type: [string, "null"], format: date-time, description: The seller's deadline (2 days after payment). }
+              shipBy: { type: [string, "null"], format: date-time, description: "The seller's deadline: 6:00 PM (Manila), 2 days after payment." }
               shippedAt: { type: [string, "null"], format: date-time }
               deliveredAt: { type: [string, "null"], format: date-time }
               cancelledAt: { type: [string, "null"], format: date-time }
+              canConfirmReceived: { type: boolean, description: '"Order received": while the package is shipped.' }
+              autoConfirmAt: { type: [string, "null"], format: date-time, description: 'While shipped: "We''ll confirm it automatically on Nov 30" (7 days after shipping).' }
+              deliveryConfirmedBy: { type: [string, "null"], enum: [buyer, auto, null], description: Who confirmed the delivery. }
               estimatedDelivery: { $ref: "#/components/schemas/DeliveryEstimate" }
               steps:
                 type: array
@@ -2878,7 +2998,7 @@ components:
       required: [type, message, location, at]
       properties:
         type: { type: string, enum: [placed, shipped, update, delivered, cancelled], description: "update = an extra courier update (milestone 6)." }
-        message: { type: string, example: Shipped with LBC · tracking 8841 2201 }
+        message: { type: string, example: Shipped with LBC · tracking 8841 2201, description: 'Also "Delivered · you confirmed you received it" or "Delivered · confirmed automatically 7 days after shipping".' }
         location: { type: [string, "null"], example: Pasay City }
         at: { type: string, format: date-time }
     OrderCard:
@@ -2915,6 +3035,7 @@ components:
               trackingNumber: { type: [string, "null"] }
               shippedAt: { type: [string, "null"], format: date-time }
               deliveredAt: { type: [string, "null"], format: date-time }
+              canConfirmReceived: { type: boolean, description: '"Order received": while the package is shipped.' }
               reviewableItems: { type: integer, description: Delivered items not reviewed yet ("Write a review" when > 0). }
     OrderList:
       type: object
@@ -3129,6 +3250,127 @@ components:
         pageSize: { type: integer, example: 20 }
         totalItems: { type: integer }
         totalPages: { type: integer }
+    SellerOrderList:
+      type: object
+      required: [items, counts, alerts, page, pageSize, totalItems, totalPages]
+      properties:
+        items:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid, description: The package (seller order) id. }
+              number: { type: string, example: VD-21458 }
+              placedAt: { type: string, format: date-time }
+              customer: { type: object, properties: { name: { type: string, example: Maria S. }, city: { type: string, example: Manila } } }
+              items:
+                type: object
+                description: '"AuraSound Pro + 1 more" · "2 items".'
+                properties:
+                  first: { type: object, properties: { title: { type: string }, variantName: { type: string }, imageUrl: { type: [string, "null"] }, quantity: { type: integer } } }
+                  moreLines: { type: integer }
+                  units: { type: integer }
+              subtotalCentavos: { type: integer, description: "This store's items (the delivery fee isn't the seller's)." }
+              deliveryOption: { type: string, enum: [STANDARD, EXPRESS] }
+              paymentMethod: { type: string, enum: [GCASH, MAYA, CARD, COD] }
+              status: { type: string, enum: [PREPARING, SHIPPED, DELIVERED, CANCELLED, RETURN_REQUESTED, RETURNED], description: PREPARING is shown as "To ship". }
+              shipBy: { type: [string, "null"], format: date-time }
+              late: { type: boolean, description: Still to ship after its ship-by time. }
+              courier: { type: [string, "null"] }
+              trackingNumber: { type: [string, "null"] }
+              shippedAt: { type: [string, "null"], format: date-time }
+              deliveredAt: { type: [string, "null"], format: date-time }
+        counts: { type: object, properties: { toShip: { type: integer }, shipped: { type: integer }, delivered: { type: integer }, all: { type: integer } } }
+        alerts:
+          type: object
+          properties:
+            dueToday: { type: integer, description: "To ship by today's 6:00 PM (Manila) and not late yet." }
+            dueBy: { type: string, format: date-time, description: "Today's 6:00 PM in Manila." }
+            late: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer, const: 20 }
+        totalItems: { type: integer }
+        totalPages: { type: integer }
+    SellerOrder:
+      type: object
+      description: "The seller's order page. Only this store's part of the order."
+      required: [id, number, status, late, placedAt, paymentMethod, deliveryOption, shipBy, shippedAt, deliveredAt, deliveryConfirmedBy, autoConfirmAt, shipment, suggestedWeightGrams, canShip, canEditShipment, items, customer, shipTo, earnings, timeline, next, store]
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: string, example: VD-21458 }
+        status: { type: string, enum: [PREPARING, SHIPPED, DELIVERED, CANCELLED, RETURN_REQUESTED, RETURNED] }
+        late: { type: boolean }
+        placedAt: { type: string, format: date-time }
+        paymentMethod: { type: string, enum: [GCASH, MAYA, CARD, COD] }
+        deliveryOption: { type: string, enum: [STANDARD, EXPRESS] }
+        shipBy: { type: [string, "null"], format: date-time }
+        shippedAt: { type: [string, "null"], format: date-time }
+        deliveredAt: { type: [string, "null"], format: date-time }
+        deliveryConfirmedBy: { type: [string, "null"], enum: [buyer, auto, null] }
+        autoConfirmAt: { type: [string, "null"], format: date-time, description: "While shipped, when it's confirmed automatically." }
+        shipment:
+          type: [object, "null"]
+          properties: { courier: { type: string }, trackingNumber: { type: string }, packageWeightGrams: { type: [integer, "null"] } }
+        suggestedWeightGrams: { type: [integer, "null"], description: "The items' weights added up (when every item has one): the form's starting value." }
+        canShip: { type: boolean }
+        canEditShipment: { type: boolean, description: Shipped and not delivered yet (fixing a typo). }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              productId: { type: string, format: uuid }
+              variantId: { type: string, format: uuid }
+              title: { type: string }
+              variantName: { type: string }
+              sku: { type: string }
+              imageUrl: { type: [string, "null"] }
+              unitPriceCentavos: { type: integer }
+              quantity: { type: integer }
+              lineTotalCentavos: { type: integer }
+        customer: { type: object, properties: { name: { type: string, example: Maria S. }, ordersWithStore: { type: integer, description: '"3 orders with your store".' } } }
+        shipTo:
+          type: object
+          description: The full address while it needs shipping; after delivery or cancellation only the name ("Maria S."), city, province and region (`hidden` true).
+          properties:
+            name: { type: string }
+            phone: { type: [string, "null"] }
+            street: { type: [string, "null"] }
+            barangay: { type: [string, "null"] }
+            city: { type: string }
+            province: { type: [string, "null"] }
+            region: { type: string }
+            postalCode: { type: [string, "null"] }
+            hidden: { type: boolean }
+        earnings:
+          type: object
+          description: '"Your earnings": items subtotal − Vendora fee = you receive; released 7 days after delivery.'
+          properties:
+            subtotalCentavos: { type: integer }
+            feeCentavos: { type: integer }
+            feePercent: { type: integer, enum: [0, 5], description: "0 in a store's first 30 days." }
+            netCentavos: { type: integer }
+            status: { type: string, enum: [after_delivery, on_hold, available, cancelled] }
+            availableAt: { type: [string, "null"], format: date-time }
+        timeline:
+          type: array
+          description: Oldest first.
+          items: { type: object, properties: { type: { type: string, enum: [paid, placed, shipped, delivered, cancelled] }, message: { type: string }, at: { type: string, format: date-time } } }
+        next:
+          type: [object, "null"]
+          description: '"Waiting for you to ship" by the ship-by time, "Waiting for the buyer to confirm delivery", or when the earnings are released.'
+          properties: { message: { type: string }, by: { type: string, format: date-time } }
+        store: { type: object, description: For the packing slip., properties: { name: { type: string }, shipsFrom: { type: [string, "null"] } } }
+    ShipmentInput:
+      type: object
+      additionalProperties: false
+      required: [courier, trackingNumber]
+      properties:
+        courier: { type: string, enum: [J&T Express, LBC, Ninja Van, Flash Express, 2GO Express, GoGo Xpress] }
+        trackingNumber: { type: string, maxLength: 60, example: 7720 1934 5512, description: 6–30 letters and digits after spaces and dashes are removed. }
+        packageWeightGrams: { type: [integer, "null"], minimum: 1, maximum: 100000, default: null }
     EmailPreferences:
       type: object
       additionalProperties: false
@@ -3319,14 +3561,18 @@ components:
         CONFLICT, with `details.reason`: stale (changed elsewhere; reload), stock_changed (with the variant's
         `stock` field), already_published, has_orders, already_used (a SKU or photo was just used elsewhere).
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    SellerOrder:
+      description: The order, as the seller's order page shows it.
+      content: { application/json: { schema: { type: object, required: [order], properties: { order: { $ref: "#/components/schemas/SellerOrder" } } } } }
     EmailPreferences:
       description: The email settings.
       content: { application/json: { schema: { $ref: "#/components/schemas/EmailPreferences" } } }
     SellerForbidden:
       description: |
         FORBIDDEN, with `details.reason`; two_factor_required (turn on two-step verification first), admin_account,
-        store_suspended (a suspended store can look but not change anything), not_a_seller (products need a store
-        submitted for review), removed_by_vendora (a product taken down by Vendora can't be changed).
+        store_suspended (a suspended store can look but not change anything; it can still ship paid orders),
+        not_a_seller (Seller Center needs a store submitted for review), removed_by_vendora (a product taken down
+        by Vendora can't be changed).
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     UploadsUnavailable:
       description: SERVICE_UNAVAILABLE. The storage service isn't set up or didn't answer; try again.

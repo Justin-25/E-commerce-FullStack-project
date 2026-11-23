@@ -125,6 +125,12 @@ enum SellerOrderStatus {
   RETURNED
 }
 
+/// Who confirmed a delivery: the buyer ("Order received") or the automatic confirmation 7 days after shipping.
+enum DeliveryConfirmation {
+  BUYER
+  AUTO
+}
+
 enum DeliveryOption {
   STANDARD
   EXPRESS
@@ -525,6 +531,8 @@ model ProductVariant {
   weightGrams       Int?
   isActive          Boolean   @default(true)
   sortOrder         Int       @default(0)
+  /// Low-stock emails: when the seller was told it's below 10 (or set it that low themselves); cleared once restocked.
+  lowStockAlertedAt DateTime? @db.Timestamptz(3)
   createdAt         DateTime  @default(now()) @db.Timestamptz(3)
   updatedAt         DateTime  @updatedAt @db.Timestamptz(3)
 
@@ -663,11 +671,17 @@ model SellerOrder {
   subtotalCentavos    Int
   deliveryCentavos    Int
   platformFeeCentavos Int               @default(0) // 5% (0% in a store's first 30 days)
+  /// Set when shipping (CHECK: every shipped package has courier, tracking number and shippedAt).
   courier             String?           @db.VarChar(60)
+  /// Stored as letters and digits only ("7720 1934-5512" → "772019345512"); unique per courier.
   trackingNumber      String?           @db.VarChar(60)
+  /// Optional, from "Mark as shipped"; printed on the packing slip.
+  packageWeightGrams  Int?
+  /// 6:00 PM Manila, 2 days after payment.
   shipBy              DateTime?         @db.Timestamptz(3)
   shippedAt           DateTime?         @db.Timestamptz(3)
   deliveredAt         DateTime?         @db.Timestamptz(3)
+  deliveryConfirmedBy DeliveryConfirmation?
   cancelledAt         DateTime?         @db.Timestamptz(3)
   createdAt           DateTime          @default(now()) @db.Timestamptz(3)
   updatedAt           DateTime          @updatedAt @db.Timestamptz(3)
@@ -680,7 +694,9 @@ model SellerOrder {
   ledgerEntries  LedgerEntry[]
 
   @@unique([orderId, storeId])
+  @@unique([courier, trackingNumber])
   @@index([storeId, status, createdAt(sort: Desc)])
+  @@index([status, shippedAt])
   @@map("seller_orders")
 }
 
@@ -783,6 +799,7 @@ model ReturnRequest {
 // ==================== 5 · seller money & admin ====================
 
 /// A store's balance = SUM(amountCentavos) of its entries; money becomes available at availableAt.
+/// A package gets one SALE and at most one FEE (partial unique index, in the migration only).
 model LedgerEntry {
   id             String     @id @default(uuid(7)) @db.Uuid
   storeId        String     @db.Uuid

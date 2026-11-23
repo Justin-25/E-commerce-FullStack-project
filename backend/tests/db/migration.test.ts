@@ -62,11 +62,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 46 foreign keys and 39 safety (CHECK) rules", async () => {
+  it("has the 46 foreign keys and 42 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
     expect(fk.n).toBe(46);
-    expect(chk.n).toBe(39);
+    expect(chk.n).toBe(42);
   });
 });
 
@@ -183,6 +183,35 @@ describe("orders, reviews & money", () => {
     const v = await variant(await product(s), s);
     for (const q of [0, 100]) await fails(`INSERT INTO cart_items ("cartId", "variantId", quantity) VALUES ($1, $2, $3)`, [cart.id, v, q], /cart_items_quantity_chk/);
     await fails(`INSERT INTO cart_items ("cartId", "variantId", quantity, "priceAtAddCentavos") VALUES ($1, $2, 1, -1)`, [cart.id, v], /cart_items_price_at_add_chk/);
+  });
+
+  it("keeps shipping and earnings consistent: tracking for shipped packages, one tracking number per package, one sale per package", async () => {
+    const s = await store(await user());
+    const o = await order(await user());
+    const pkg = async () =>
+      (await one<{ id: string }>(`INSERT INTO seller_orders (id, "orderId", "storeId", "subtotalCentavos", "deliveryCentavos", "updatedAt") VALUES (gen_random_uuid(), $1, $2, 749900, 0, now()) RETURNING id`, [o.id, s])).id;
+    const a = await pkg();
+    // Shipped without a courier or tracking number, or delivered without a delivery time: refused.
+    await fails(`UPDATE seller_orders SET status = 'SHIPPED', "shippedAt" = now() WHERE id = $1`, [a], /seller_orders_shipped_chk/);
+    await fails(`UPDATE seller_orders SET status = 'DELIVERED', "shippedAt" = now(), courier = 'LBC', "trackingNumber" = 'LBC123456' WHERE id = $1`, [a], /seller_orders_delivered_chk/);
+    await fails(`UPDATE seller_orders SET "packageWeightGrams" = 0 WHERE id = $1`, [a], /seller_orders_weight_chk/);
+    await db.query(`UPDATE seller_orders SET status = 'SHIPPED', "shippedAt" = now(), courier = 'LBC', "trackingNumber" = 'LBC123456', "packageWeightGrams" = 900 WHERE id = $1`, [a]);
+    // Another package can't use the same courier's tracking number (another courier's is fine).
+    const b = await (async () => {
+      const otherStore = await store(await user());
+      return (await one<{ id: string }>(`INSERT INTO seller_orders (id, "orderId", "storeId", "subtotalCentavos", "deliveryCentavos", "updatedAt") VALUES (gen_random_uuid(), $1, $2, 100, 0, now()) RETURNING id`, [o.id, otherStore])).id;
+    })();
+    await expect(db.query(`UPDATE seller_orders SET courier = 'LBC', "trackingNumber" = 'LBC123456' WHERE id = $1`, [b])).rejects.toThrow(/unique/i);
+    await db.query(`UPDATE seller_orders SET courier = 'Ninja Van', "trackingNumber" = 'LBC123456' WHERE id = $1`, [b]);
+    // One SALE and one FEE line per package; refunds and adjustments may repeat.
+    const line = (type: string, amount: number) =>
+      db.query(`INSERT INTO ledger_entries (id, "storeId", "sellerOrderId", type, "amountCentavos", "availableAt") VALUES (gen_random_uuid(), $1, $2, $3, $4, now())`, [s, a, type, amount]);
+    await line("SALE", 749_900);
+    await expect(line("SALE", 749_900)).rejects.toThrow(/unique/i);
+    await line("FEE", -37_495);
+    await expect(line("FEE", -37_495)).rejects.toThrow(/unique/i);
+    await line("ADJUSTMENT", -100);
+    await line("ADJUSTMENT", -100);
   });
 
   it("starts stores as drafts; a submitted store has a submit time; bank payouts name the bank", async () => {

@@ -40,6 +40,7 @@ export const idempotencyKeySchema = z
 
 export const retryPaymentSchema = z.strictObject({ paymentMethod: z.enum(PAYMENT_METHODS, { error: "Choose a payment method" }) });
 export const orderIdSchema = z.object({ id: z.uuid({ error: "Order not found" }) });
+export const packageIdSchema = z.object({ id: z.uuid({ error: "Order not found" }), packageId: z.uuid({ error: "Package not found" }) });
 
 /** "Your orders" tabs: an order is in a tab when at least one of its packages is. */
 export const ORDER_TABS = ["all", "to_ship", "on_the_way", "delivered"] as const;

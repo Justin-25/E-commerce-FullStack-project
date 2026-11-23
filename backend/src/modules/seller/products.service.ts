@@ -9,11 +9,11 @@ import { isUniqueViolation } from "../../lib/prismaErrors.js";
 import { readSpecs } from "../catalog/catalog.service.js";
 import { variantPricing } from "../catalog/pricing.js";
 import { MAX_DEAL_DAYS, SELLER_LOW_STOCK, SELLER_PAGE_SIZE, type ProductInput, type SellerProductListQuery } from "./products.schemas.js";
+import { sellerStore, type SellerStore } from "./access.js";
 import { slugify } from "./seller.schemas.js";
 import { SellerUploads } from "./uploads.js";
 
 type Tx = Prisma.TransactionClient;
-type StoreStatus = "DRAFT" | "PENDING" | "APPROVED" | "REJECTED" | "SUSPENDED";
 export type SellerProductStatus = "draft" | "active" | "inactive" | "removed";
 
 /** What the seller sees: "Inactive" = published, then hidden with the Active toggle; "Removed" = taken down by Vendora. */
@@ -74,12 +74,6 @@ const conflict = (reason: string, message: string, field?: { path: string; messa
 const badField = (path: string, message: string) => new AppError(400, "VALIDATION_ERROR", "Some fields are invalid", { fields: [{ path, message }] });
 const notFound = () => new AppError(404, "NOT_FOUND", "This product doesn't exist.");
 const removedByVendora = () => forbidden("removed_by_vendora", "Vendora removed this product, so it can't be changed. Contact Vendora support if you think this is a mistake.");
-
-interface SellerStore {
-  id: string;
-  status: StoreStatus;
-  shipsFrom: string | null;
-}
 
 /**
  * Seller Center products (milestone 6b): the products list, Add / Edit product, delete, photo
@@ -241,6 +235,7 @@ export class SellerProductService {
           await tx.productVariant.create({ data: { ...variantData(input, i), productId: product.id, storeId: store.id, sku: v.sku ?? newSku(input.title), stock: v.stock } });
         }
         for (const [i, p] of input.photos.entries()) await tx.productImage.create({ data: photoData(product.id, i, p, uploaded) });
+        await knownLowStock(tx, product.id, now);
         return product.id;
       })
     );
@@ -345,6 +340,7 @@ export class SellerProductService {
             ...(status === "ACTIVE" && !row.publishedAt ? { publishedAt: now } : {})
           }
         });
+        await knownLowStock(tx, productId, now);
         return gone.flatMap((g) => (g.publicId ? [{ publicId: g.publicId, url: g.url }] : []));
       })
     );
@@ -382,22 +378,9 @@ export class SellerProductService {
 
   // --- rules --------------------------------------------------------------------
 
-  /**
-   * Seller Center is for sellers: the account was submitted as a store (role SELLER, checked in
-   * the database on every request, not just in the access pass) and has two-step verification
-   * on. A suspended store can look but not change anything.
-   */
-  private async seller(userId: string, { write }: { write: boolean }): Promise<SellerStore> {
-    const user = await this.deps.prisma.user.findUniqueOrThrow({
-      where: { id: userId },
-      select: { role: true, twoFactorEnabledAt: true, store: { select: { id: true, status: true, shipsFrom: true } } }
-    });
-    if (user.role === "ADMIN") throw forbidden("admin_account", "Admin accounts can't sell.");
-    const store = user.store;
-    if (user.role !== "SELLER" || !store || store.status === "DRAFT") throw forbidden("not_a_seller", "Open your store first: finish the steps and submit it for review.");
-    if (!user.twoFactorEnabledAt) throw forbidden("two_factor_required", "Turn on two-step verification to use Seller Center.");
-    if (write && store.status === "SUSPENDED") throw forbidden("store_suspended", "This store is suspended. Contact Vendora support.");
-    return store;
+  /** Seller Center's door (access.ts): a submitted store, two-step verification on; suspended stores can't change anything. */
+  private seller(userId: string, { write }: { write: boolean }): Promise<SellerStore> {
+    return sellerStore(this.deps.prisma, userId, { write });
   }
 
   /** Products go in a sub-category ("Electronics › Headphones"), never a top-level one. */
@@ -544,6 +527,14 @@ function photoData(productId: string, sortOrder: number, photo: ProductInput["ph
 
 async function lockStore(tx: Tx, storeId: string) {
   await tx.$queryRaw`SELECT 1 FROM stores WHERE id = ${storeId}::uuid FOR UPDATE`;
+}
+
+/**
+ * The seller just saved this product and saw its stock in the form, so a variant that's below
+ * 10 isn't news: no low-stock email about it (until it's restocked and drops again).
+ */
+async function knownLowStock(tx: Tx, productId: string, now: Date) {
+  await tx.productVariant.updateMany({ where: { productId, stock: { lt: SELLER_LOW_STOCK }, lowStockAlertedAt: null }, data: { lowStockAlertedAt: now } });
 }
 
 /** "AuraSound Pro Wireless Headphones" → "aurasound-pro-wireless-headphones", then "-2", "-3"… if the store already has it. */

@@ -227,6 +227,7 @@ erDiagram
     int stock "never below 0"
     int weightGrams
     bool isActive
+    timestamptz lowStockAlertedAt "low-stock email sent (6c)"
   }
   product_images {
     uuid id PK
@@ -320,11 +321,13 @@ erDiagram
     int subtotalCentavos
     int deliveryCentavos
     int platformFeeCentavos "5%, 0% in first 30 days"
-    string courier
-    string trackingNumber
-    datetime shipBy
+    string courier "UK with trackingNumber (6c)"
+    string trackingNumber "letters and digits only"
+    int packageWeightGrams "6c, optional"
+    datetime shipBy "6:00 PM Manila, 2 days after payment"
     datetime shippedAt
     datetime deliveredAt
+    enum deliveryConfirmedBy "BUYER | AUTO (6c)"
   }
   order_items {
     uuid id PK
@@ -369,6 +372,7 @@ erDiagram
 - **Stock can't oversell.** Placing an order takes stock with one atomic update (`stock = stock − qty` only if enough is left), all inside one transaction with the order. A failed or expired payment (15 min) puts the stock back.
 - **Checkout** (milestone 5b, migration `20261122090000_checkout_payments`): `orders.idempotencyKey` is unique per shopper, so "Place order" sent twice can only create one order. Each PayMongo attempt is a `payments` row: `providerRef` = the checkout session (`cs_…`), `providerPaymentId` = the payment that settled it (`pay_…`, used for refunds), `checkoutUrl` = PayMongo's page. An unpaid online order holds its stock until `expiresAt` (15 minutes, stretched while PayMongo is mid-payment, at most 45).
 - **`webhook_events`** (below) stores every PayMongo event ID once, so a repeated webhook can't mark an order paid twice.
+- **Seller orders** (milestone 6c, migration `20261125090000_seller_orders`): a package that left the seller always has its courier, tracking number and `shippedAt`, and a delivered one its `deliveredAt` (CHECKs). A tracking number is unique per courier (`seller_orders_courier_trackingNumber_key`), so a seller can't reuse another package's number. Delivery is confirmed by the buyer or automatically 7 days after shipping (`deliveryConfirmedBy`), found through `(status, shippedAt)`. `product_variants.lowStockAlertedAt` remembers that the seller was told a variant is below 10 (cleared when restocked).
 
 ## 5 · Seller money & admin
 
@@ -385,8 +389,9 @@ erDiagram
     uuid storeId FK
     uuid sellerOrderId FK
     uuid payoutId FK
-    enum type "SALE | FEE | REFUND | PAYOUT"
+    enum type "SALE | FEE | REFUND | PAYOUT | ADJUSTMENT"
     int amountCentavos "+ or −"
+    string description "Sale · VD-21458"
     datetime availableAt "delivery + 7 days"
   }
   payouts {
@@ -426,6 +431,7 @@ erDiagram
 
 - **A seller's balance is the sum of their ledger entries,** not a number that gets overwritten. Every peso can be traced to an order, fee, refund or payout, the way accounting systems do it.
   - Example: a ₱9,998 sale (+999800), the fee (−50000), and later a payout (−949800).
+  - **Written at delivery** (milestone 6c), in the same transaction that marks the package delivered: a `SALE` line and a `FEE` line (none in a store's first 30 days), both available 7 days after delivery. A partial unique index, `(sellerOrderId, type) WHERE type IN ('SALE', 'FEE')`, allows one of each per package, so a package can never be credited twice. The migration wrote these lines for packages delivered before 6c.
 - **Admin actions always write an `audit_logs` row.** That's what the "audit-logged" note on the admin AI panel refers to.
 
 ## 6 · AI assistant (milestone 8)

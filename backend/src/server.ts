@@ -24,6 +24,9 @@ import { CartService } from "./modules/cart/cart.service.js";
 import { RecommendationService } from "./modules/cart/recommendations.js";
 import { OnboardingService } from "./modules/seller/onboarding.service.js";
 import { SellerProductService } from "./modules/seller/products.service.js";
+import { SellerOrderService } from "./modules/seller/orders.service.js";
+import { LowStockService } from "./modules/notifications/lowStock.service.js";
+import { DeliveryService } from "./modules/orders/delivery.js";
 import { sellerRouter } from "./modules/seller/seller.routes.js";
 import { notificationsRouter } from "./modules/notifications/notifications.routes.js";
 import { PriceDropService } from "./modules/notifications/priceDrops.service.js";
@@ -58,9 +61,17 @@ const guards = createAuthGuards({ tokens, kv, logger });
 
 const routers: Router[] = [];
 const webhooks: Router[] = [];
-let paymentSweeper: NodeJS.Timeout | undefined;
-let priceDropJob: NodeJS.Timeout | undefined;
 const services: { drain(): Promise<void> }[] = [];
+/** Background jobs: each runs every `ms`; a failed run is logged and the next one tries again. */
+const jobs: NodeJS.Timeout[] = [];
+function every(ms: number, name: string, run: () => Promise<unknown>) {
+  const timer = setInterval(() => {
+    run().catch((err: unknown) => logger.error({ err }, `${name} failed`));
+  }, ms);
+  timer.unref();
+  jobs.push(timer);
+}
+const FIFTEEN_MINUTES = 15 * 60_000;
 if (prisma) {
   const email = new DevOutbox(logger); // config refuses this in production; a real provider comes in milestone 9
   const authService = new AuthService({ prisma, kv, email, tokens, config, isBreached: createHibpCheck({ logger }), logger });
@@ -81,13 +92,13 @@ if (prisma) {
   if (!gateway) logger.info("PAYMONGO_SECRET_KEY is not set — online payments are off (cash on delivery still works)");
   const orders = new OrderService({ prisma, cart, gateway, email, kv, appUrl: config.APP_URL, logger });
   services.push(orders);
-  routers.push(ordersRouter({ orders, guards }));
+  const delivery = new DeliveryService({ prisma, logger });
+  routers.push(ordersRouter({ orders, delivery, guards }));
   webhooks.push(webhooksRouter({ orders, secret: config.PAYMONGO_WEBHOOK_SECRET, logger }));
   // Every minute: cancel unpaid orders whose 15-minute window is over, and return their stock.
-  paymentSweeper = setInterval(() => {
-    orders.expireDue().catch((err: unknown) => logger.error({ err }, "the payment-window check failed"));
-  }, 60_000);
-  paymentSweeper.unref();
+  every(60_000, "the payment-window check", () => orders.expireDue());
+  // Shipped 7+ days ago and not confirmed by the buyer: confirm it (the seller is credited).
+  every(FIFTEEN_MINUTES, "the automatic delivery confirmation", () => delivery.confirmDue());
   routers.push(reviewsRouter({ reviews: new ReviewService({ prisma }), guards }));
   routers.push(storesRouter({ stores: new StoreService({ prisma }), guards }));
 
@@ -95,16 +106,19 @@ if (prisma) {
   if (!media) logger.info("CLOUDINARY_URL is not set — uploads (logos, photos, documents) are off");
   const onboarding = new OnboardingService({ prisma, kv, media, email, config, logger });
   services.push(onboarding);
-  routers.push(sellerRouter({ onboarding, products: new SellerProductService({ prisma, kv, media, logger }), security, guards, config }));
+  const sellerOrders = new SellerOrderService({ prisma, email, appUrl: config.APP_URL, logger });
+  services.push(sellerOrders);
+  routers.push(sellerRouter({ onboarding, products: new SellerProductService({ prisma, kv, media, logger }), orders: sellerOrders, security, guards, config }));
+  const lowStock = new LowStockService({ prisma, email, config, logger });
+  services.push(lowStock);
+  // Variants that dropped below 10: one email per store (each variant once until it's restocked).
+  every(FIFTEEN_MINUTES, "the low-stock emails run", () => lowStock.run());
 
   const priceDrops = new PriceDropService({ prisma, email, config, logger });
   services.push(priceDrops);
   routers.push(notificationsRouter({ priceDrops, guards }));
-  // Every 15 minutes: email shoppers whose saved items got cheaper (at most one email a day each).
-  priceDropJob = setInterval(() => {
-    priceDrops.run().catch((err: unknown) => logger.error({ err }, "the price-drop emails run failed"));
-  }, 15 * 60_000);
-  priceDropJob.unref();
+  // Shoppers whose saved items got cheaper (at most one email a day each).
+  every(FIFTEEN_MINUTES, "the price-drop emails run", () => priceDrops.run());
   routers.push(
     authRouter({
       service: authService,
@@ -144,8 +158,7 @@ function shutdown(signal: string): void {
   if (stopping) return;
   stopping = true;
   logger.info({ signal }, "shutting down");
-  if (paymentSweeper) clearInterval(paymentSweeper);
-  if (priceDropJob) clearInterval(priceDropJob);
+  for (const job of jobs) clearInterval(job);
   server.close(() => {
     void Promise.allSettled(services.map((s) => s.drain()))
       .then(() => Promise.allSettled([redis?.quit(), prisma?.$disconnect()]))

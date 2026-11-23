@@ -26,6 +26,9 @@ import { SellerProductService } from "../../src/modules/seller/products.service.
 import { sellerRouter } from "../../src/modules/seller/seller.routes.js";
 import { notificationsRouter } from "../../src/modules/notifications/notifications.routes.js";
 import { PriceDropService } from "../../src/modules/notifications/priceDrops.service.js";
+import { LowStockService } from "../../src/modules/notifications/lowStock.service.js";
+import { DeliveryService } from "../../src/modules/orders/delivery.js";
+import { SellerOrderService } from "../../src/modules/seller/orders.service.js";
 
 /**
  * The real catalog, reviews and store routes on a fresh test database filled with the
@@ -36,9 +39,10 @@ export async function createCatalogHarness() {
   const paymongo = new FakePaymongo();
   const media = new FakeMedia();
   /** The order service of the most recently built app (tests call its background job directly). */
-  const services: { orders?: OrderService; priceDrops?: PriceDropService } = {};
-  /** Moves the price-drop job's clock (its once-a-day rule) without waiting a day. */
+  const services: { orders?: OrderService; priceDrops?: PriceDropService; delivery?: DeliveryService; sellerOrders?: SellerOrderService; lowStock?: LowStockService } = {};
+  /** Moves the clock of the background jobs and Seller Center orders (a day, a week) without waiting. */
   const clock = { offsetMs: 0 };
+  const now = () => new Date(Date.now() + clock.offsetMs);
   // One order service per built app, shared by its routes and its webhook (like server.ts).
   const built = new WeakMap<HarnessDeps, OrderService>();
   const orderService = (deps: HarnessDeps) => {
@@ -55,8 +59,13 @@ export async function createCatalogHarness() {
     routers: (deps) => {
       const { prisma, kv, guards, logger } = deps;
       const catalog = new CatalogService({ prisma, kv, logger });
-      const priceDrops = new PriceDropService({ prisma, email: deps.email, config: deps.config, logger, now: () => new Date(Date.now() + clock.offsetMs) });
+      const priceDrops = new PriceDropService({ prisma, email: deps.email, config: deps.config, logger, now });
       services.priceDrops = priceDrops;
+      const delivery = new DeliveryService({ prisma, logger, now });
+      services.delivery = delivery;
+      const sellerOrders = new SellerOrderService({ prisma, email: deps.email, appUrl: deps.config.APP_URL, logger, now });
+      services.sellerOrders = sellerOrders;
+      services.lowStock = new LowStockService({ prisma, email: deps.email, config: deps.config, logger, now });
       return [
         notificationsRouter({ priceDrops, guards }),
         catalogRouter({ catalog }),
@@ -66,10 +75,11 @@ export async function createCatalogHarness() {
         wishlistRouter({ wishlist: new WishlistService({ prisma, catalog }), guards }),
         cartRouter({ cart: new CartService({ prisma }), recommendations: new RecommendationService({ prisma, catalog }), guards }),
         addressesRouter({ addresses: new AddressService({ prisma }), guards }),
-        ordersRouter({ orders: orderService(deps), guards }),
+        ordersRouter({ orders: orderService(deps), delivery, guards }),
         sellerRouter({
           onboarding: new OnboardingService({ prisma, kv, media, email: deps.email, config: deps.config, logger }),
           products: new SellerProductService({ prisma, kv, media, logger }),
+          orders: sellerOrders,
           security: new SecurityService({ prisma, kv, email: deps.email, config: deps.config, logger }),
           guards,
           config: deps.config
@@ -90,7 +100,12 @@ export async function createCatalogHarness() {
     if (!services.priceDrops) throw new Error("no price-drop service yet");
     return services.priceDrops;
   };
-  return { ...h, demo, idOf, paymongo, media, orders, priceDrops, clock };
+  const service = <K extends keyof typeof services>(name: K) => () => {
+    const s = services[name];
+    if (!s) throw new Error(`no ${name} service yet`);
+    return s as NonNullable<(typeof services)[K]>;
+  };
+  return { ...h, demo, idOf, paymongo, media, orders, priceDrops, clock, delivery: service("delivery"), sellerOrders: service("sellerOrders"), lowStock: service("lowStock") };
 }
 
 export type CatalogHarness = Awaited<ReturnType<typeof createCatalogHarness>>;

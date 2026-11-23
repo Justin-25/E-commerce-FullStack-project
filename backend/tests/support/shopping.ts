@@ -7,16 +7,17 @@ export const HOME_ADDRESS = { label: "Home", fullName: "Maria Santos", phone: "0
 
 /**
  * Shopping steps for tests: a shopper with an address, a cart, placed orders, and the
- * seller's and courier's steps (shipping and delivering come with the Seller Center in
- * milestone 6, so tests set them directly in the database, as the seller's actions will).
+ * seller's and courier's steps for the demo stores (whose owners can't sign in): `ship` sets
+ * the package as "Mark as shipped" would; `deliver` runs the real delivery step (the seller is
+ * credited, cash on delivery is collected, the order completes). Seller Center tests use the API.
  */
 export function shopping(h: CatalogHarness) {
   const variantId = async (sku: string) => (await h.db.prisma.productVariant.findFirstOrThrow({ where: { sku }, select: { id: true } })).id;
 
-  /** A signed-in shopper with a saved address. */
+  /** A signed-in shopper with a saved address (in their name). */
   async function shopper(name = "Maria Santos") {
     const s = await h.signUp({ email: `shopper-${randomUUID().slice(0, 8)}@example.com`, name });
-    const res = await s.browser.post("/api/v1/addresses", HOME_ADDRESS);
+    const res = await s.browser.post("/api/v1/addresses", { ...HOME_ADDRESS, fullName: name });
     expect(res.status).toBe(201);
     return { ...s, addressId: res.body.address.id as string };
   }
@@ -43,24 +44,25 @@ export function shopping(h: CatalogHarness) {
     return res.body.order as { id: string; number: string; packages: { id: string; store: { slug: string } }[] };
   }
 
-  /** The seller ships a package (milestone 6: "Mark as shipped" with courier and tracking number). */
+  /** A demo store ships a package ("Mark as shipped": courier and a tracking number, unique per courier). */
   async function ship(packageId: string, opts: { courier?: string; trackingNumber?: string; at?: Date } = {}) {
     await h.db.prisma.sellerOrder.update({
       where: { id: packageId },
-      data: { status: "SHIPPED", shippedAt: opts.at ?? new Date(), courier: opts.courier ?? "LBC", trackingNumber: opts.trackingNumber ?? "8841 2201" }
+      data: { status: "SHIPPED", shippedAt: opts.at ?? new Date(), courier: opts.courier ?? "LBC", trackingNumber: opts.trackingNumber ?? trackingNumber() }
     });
   }
 
-  /** The courier delivers every package of an order: cash is collected, and the order is complete. */
+  /** Every package of an order arrives and the buyer taps "Order received" (packages not shipped yet are shipped first). */
   async function deliver(orderId: string, at = new Date()) {
-    const { prisma } = h.db;
-    const packages = await prisma.sellerOrder.findMany({ where: { orderId }, select: { id: true, shippedAt: true } });
+    const packages = await h.db.prisma.sellerOrder.findMany({ where: { orderId }, select: { id: true, status: true } });
     for (const p of packages) {
-      await prisma.sellerOrder.update({ where: { id: p.id }, data: { status: "DELIVERED", shippedAt: p.shippedAt ?? new Date(at.getTime() - 60_000), deliveredAt: at, courier: "LBC", trackingNumber: "8841 2201" } });
+      if (p.status === "PREPARING") await ship(p.id, { at: new Date(at.getTime() - 60_000) });
+      expect(await h.delivery().deliver(p.id, at, "BUYER")).toBe(true);
     }
-    await prisma.payment.updateMany({ where: { orderId, method: "COD", status: "PENDING" }, data: { status: "PAID", paidAt: at } });
-    await prisma.order.update({ where: { id: orderId }, data: { status: "COMPLETED" } });
   }
 
   return { variantId, shopper, addToCart, order, ship, deliver };
 }
+
+/** A made-up tracking number ("LBC7F3K29QD10AB"), different every time. */
+export const trackingNumber = (prefix = "LBC") => `${prefix}${randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase()}`;

@@ -1,11 +1,12 @@
 import { Router, type RequestHandler } from "express";
 import { privateNoStore } from "../../lib/httpCache.js";
 import { signedInUserId, type AuthGuards } from "../../middleware/auth.js";
-import { idempotencyKeySchema, orderIdSchema, orderListSchema, placeOrderSchema, retryPaymentSchema, summarySchema } from "./orders.schemas.js";
+import type { DeliveryService } from "./delivery.js";
+import { idempotencyKeySchema, orderIdSchema, orderListSchema, packageIdSchema, placeOrderSchema, retryPaymentSchema, summarySchema } from "./orders.schemas.js";
 import type { OrderService } from "./orders.service.js";
 
 /** Checkout and the shopper's orders. Signed in, never cached; changes are CSRF-checked app-wide. */
-export function ordersRouter({ orders, guards }: { orders: OrderService; guards: AuthGuards }): Router {
+export function ordersRouter({ orders, delivery, guards }: { orders: OrderService; delivery: DeliveryService; guards: AuthGuards }): Router {
   const router = Router();
   const live: RequestHandler = (_req, res, next) => {
     privateNoStore(res);
@@ -41,6 +42,14 @@ export function ordersRouter({ orders, guards }: { orders: OrderService; guards:
 
   router.post("/orders/:id/cancel", ...guards.requireAuth, live, async (req, res) => {
     res.json({ order: await orders.cancel(signedInUserId(req), orderIdSchema.parse(req.params).id) });
+  });
+
+  // "Order received" for one package (milestone 6c): it's delivered, and the seller is credited.
+  router.post("/orders/:id/packages/:packageId/received", ...guards.requireAuth, live, async (req, res) => {
+    const { id, packageId } = packageIdSchema.parse(req.params);
+    const userId = signedInUserId(req);
+    await delivery.confirmReceived(userId, id, packageId);
+    res.json({ order: await orders.get(userId, id) });
   });
 
   return router;

@@ -266,6 +266,28 @@ How it works:
 
 **Price-drop emails.** A job runs every 15 minutes and looks at the data, not at events: a saved item whose price today (cheapest variant, ended deals don't count) is below the price when it was saved AND below the price we last emailed about. So it doesn't matter what caused the drop (a seller's edit, a deal starting), and a missed run catches up on the next one. At most one email a day per shopper (later drops wait and come together, biggest saving first); a drop that's over (the price went back up) makes the next one news again. Only active, visible products, and only shoppers with a verified email who haven't turned them off. Each shopper's email is "claimed" with a conditional update on their own row, so two runs or two servers at once still send one. Every email has an unsubscribe link and the `List-Unsubscribe` / `List-Unsubscribe-Post` headers mail apps use for their own one-click button (RFC 8058); the link carries a signed token (HMAC with the server's code key and its own purpose prefix), so it needs no sign-in or CSRF token and can't be forged for another account.
 
+## Orders in Seller Center (milestone 6c)
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/v1/seller/orders?tab=&q=&page=` | The orders list: tabs To ship / Shipped / Delivered / All with counts, 20 a page, "3 orders are due to ship today by 6:00 PM" |
+| `GET /api/v1/seller/orders/export?tab=&q=` | Export CSV (up to 5,000 orders) |
+| `GET /api/v1/seller/orders/{id}` | One order: items, Ship to, the timeline, what the seller earns (also the packing slip's data) |
+| `PUT /api/v1/seller/orders/{id}/shipment` | "Mark as shipped" with courier and tracking number (and fixing a typo until delivery) |
+| `POST /api/v1/orders/{id}/packages/{packageId}/received` | The buyer's "Order received" |
+
+How it works:
+- **A seller sees only what's theirs to ship:** their own store's packages, once paid (or placed with cash on delivery), never another store's items or the buyer's whole total. "To ship" lists the most urgent first.
+- **Ship by 6:00 PM (Manila), 2 days after payment**, like a courier's daily pickup cutoff, so "due today by 6:00 PM" is one time for every order. Late ones are marked late.
+- **Mark as shipped** takes a courier from a list and the tracking number, kept as letters and digits only ("7720 1934-5512" → "772019345512"). A tracking number is unique per courier (a database index), so a package can't be "shipped" with another package's number. The change only happens if the package is still "to ship", checked in the same statement, so a double click or two tabs ship it once and the buyer gets one email. Until delivery, a typo can be fixed (the buyer gets the new number). A suspended store can still ship orders that are already paid.
+- **Delivery is confirmed by the buyer** ("Order received" on the tracking page), or automatically 7 days after shipping by a job every 15 minutes (how Shopee and Lazada work: sellers can't mark their own packages delivered, and there's no courier connection to ask).
+- **Confirming is one transaction:** the package becomes delivered (only if it's still shipped, so the buyer's tap and the job at the same moment count once), the seller is credited in the **ledger**, and once no package of the order is on its way the order is completed and a cash-on-delivery payment counts as paid. The order row is locked first, as in checkout, so two packages of one order delivered at the same moment still complete it exactly once.
+- **The ledger** holds the seller's money as lines, never as one balance that's overwritten: a sale (+ the items) and Vendora's fee (−5%, none in a store's first 30 days), both available 7 days after delivery. The delivery fee isn't the seller's (Vendora pays the couriers). A partial unique index allows one sale and one fee per package, so a package can't be credited twice. Packages delivered before this milestone got their lines from the migration. Payouts come in 6d.
+- **Buyers' privacy:** the list and the CSV show "Maria S." and the city. The full address and phone are on the order page only while the package still has to reach the buyer; after delivery, only the name and city. Search finds order numbers and product names, not customers.
+- **The CSV** is UTF-8 with a byte-order mark (so Excel reads ₱ and ñ), times in Philippine time, amounts in pesos. A cell that starts with `=`, `+`, `-` or `@` gets a leading apostrophe: otherwise a buyer could put a formula in their name (`=HYPERLINK(…)`) and it would run when the seller opens the file (CSV injection, tested).
+- **Emails:** the seller gets "New order VD-21458: ship by Nov 25, 6:00 PM" once the order is paid (right away for cash on delivery), exactly once even when the payment is reported twice; the buyer gets the courier and tracking number when it ships.
+- **Low-stock emails** (the product form's stock alert): a job every 15 minutes finds active variants below 10 the seller hasn't been told about, and sends one email per store (lowest stock first, sold-out included). Each variant is announced once, until it's restocked to 10 or more. A low number the seller typed in the form isn't news. Variants are "claimed" with a conditional update, so two runs at once send one email.
+
 ## If Redis (Upstash) goes down
 
 Redis commands give up after 1 second instead of waiting, and each part of the API then does what's safest for it:
@@ -294,6 +316,7 @@ Measured with Redis pointed at an unreachable address: before this, every API re
 - `tests/checkout/my-orders.test.ts` checks "Your orders" (tabs and counts, packages in two tabs, search by number and product name with `%` and `_` as plain text, pages, unpaid and cancelled orders, privacy), tracking (the 4 steps, arrival dates for Standard and Express, the timeline with courier updates) and Buy again (stock, sold-out and removed items). `recommendations.test.ts` checks the cart's "Recommended for you" (cart categories first, never cart items, sold-out or draft products, the wishlist and followed stores, top-ups, "See all"). `tests/catalog/write-reviews.test.ts` checks writing, editing and deleting reviews (only after delivery, one per item even when sent twice at once, only your own, field rules) and that the stored ratings always equal what the reviews say, also when several shoppers review one store at the same moment.
 - `tests/seller/onboarding.test.ts` walks through becoming a seller against a fake Cloudinary: 2FA first, drafts, submit and approval, encrypted TIN and payout number, registered businesses, unique and reserved names (also claimed at the same moment), locked details after submitting, re-auth and an email for payout changes, uploads (someone else's file, missing, too big, wrong type, the same file twice, limits, outages) and privacy. `media.test.ts` checks the real Cloudinary client (signatures against Cloudinary's documented example, requests, outages).
 - `tests/seller/products.test.ts` checks Seller Center products: who may sell (shoppers, draft stores, missing 2FA, suspended stores, admins), Save draft and every Publish rule, photos (someone else's, missing, too big, one file per photo, the 120-an-hour allowance), SKUs, the 64 KB form, out-of-date forms, stock as a difference while orders come in, variants and photos that past orders still use, the Active toggle (carts too), deals before and after they end, delete, the list (tabs that add up, search with `%` and `_` as plain text, categories, sold in 30 days, low stock, pages) and Express delivery at checkout. `tests/notifications/price-drops.test.ts` checks price-drop emails: once per price, at most one a day, drops that end, deals, hidden products, opted-out and unverified shoppers, the unsubscribe link (forged and tampered tokens) and simultaneous runs.
+- `tests/seller/orders.test.ts` checks Seller Center orders: only my paid packages, To ship by urgency, today's 6:00 PM deadline and late ones, search, the order page (my items only, address while it needs shipping, earnings, what's next), Mark as shipped (every field rule, the tracking number format, two clicks at once, fixing a typo, someone else's tracking number, after delivery, suspended stores), the new-order email (cash on delivery and online, a payment reported twice), privacy after delivery and Export CSV (formula injection from a buyer's name). `tests/checkout/delivery.test.ts` checks "Order received" (ledger lines and dates, the order completing, cash collected, pressing twice, not shipped yet, someone else's), the automatic confirmation after 7 days, and the buyer and the job at the same moment. `tests/notifications/low-stock.test.ts` checks low-stock emails (once until restocked, typed-in numbers, the alert off, one email per store, simultaneous runs). `tests/deadlines.test.ts` checks ship-by times in Manila, CSV escaping and "Maria S.".
 - `tests/db/migration.test.ts` checks that every table, index, foreign key and safety rule really exists. CI also migrates and seeds a real PostgreSQL 18 server, the same major version as Neon.
 
 ## Structure
@@ -305,7 +328,7 @@ src/
   config/env.ts          validates environment variables at startup
   lib/                   logger, Redis/Prisma clients, key-value store, password hashing, crypto helpers,
                          email outbox, breached-password check, money helpers, error types, query parser,
-                         cache (fails open), delivery rules (free over ₱999)
+                         cache (fails open), delivery rules (free over ₱999), CSV files (formula-safe)
   middleware/            security headers + CORS, rate limit, CSRF + Origin check, auth guards, request IDs, errors
   modules/health/        GET /health (alive) and GET /ready (dependencies OK)
   modules/auth/          sign-in: routes → service (rules) → tokens, lockout, one-time codes, emails
@@ -317,9 +340,11 @@ src/
   modules/cart/          the cart (signed in and guest), merged at sign-in; Recommended for you
   lib/media.ts           file storage (Cloudinary): upload tickets, checking and deleting files
   modules/addresses/     saved Philippine delivery addresses
-  modules/orders/        checkout, orders, PayMongo payments and webhooks, the 15-minute window; your orders, tracking, buy again
-  modules/seller/        Seller Center: becoming a seller (onboarding, documents, payout account), products, uploads
-  modules/notifications/ price-drop emails (a 15-minute job), email settings, one-click unsubscribe
+  modules/orders/        checkout, orders, PayMongo payments and webhooks, the 15-minute window; your orders, tracking, buy again;
+                         delivery ("Order received", automatic after 7 days) and the order deadlines
+  modules/seller/        Seller Center: becoming a seller (onboarding, documents, payout account), products, uploads,
+                         orders (ship, CSV), the earnings ledger
+  modules/notifications/ price-drop and low-stock emails (15-minute jobs), email settings, one-click unsubscribe
   generated/prisma/      Prisma client (generated by `npm run db:generate`, not committed)
 prisma/
   schema.prisma          the 31 tables
@@ -357,6 +382,8 @@ openapi/openapi.yaml     the API contract
 | No error details to clients | One error format. Users see safe messages; stack traces go to the log under the same request ID. Logs redact cookies, passwords and tokens, and hide one-time values in URLs (e.g. Google's `code` and `state`). |
 | File uploads | Files go straight to Cloudinary with a one-time signed ticket for a place the server chose, which can never replace an existing file; the server then checks the owner's folder, type and size with Cloudinary before using a file (and deletes rejected ones). ID documents are private (`authenticated`) files. File names and links come only from the server; one stored file is one photo (a unique index). Files nobody uses any more (replaced logos, removed photos) are deleted. |
 | Evil regular expressions | Only simple, linear patterns. |
+| CSV injection | Exported CSV cells that start with `=`, `+`, `-`, `@` (or a tab / carriage return) get a leading apostrophe, so a formula in a buyer's name or city shows as text in Excel instead of running. |
+| Data minimisation | Sellers see a buyer's full address and phone only while the package still has to reach them; lists, exports and delivered orders show "Maria S." and the city. |
 | No secrets in git | `.env` is git-ignored; `npm run secrets` writes keys without printing them; config errors name a variable but never its value. |
 | HTTPS | Production requires https origins and `APP_URL`, sets HSTS, and uses `__Host-`/`__Secure-` Secure cookies. |
 

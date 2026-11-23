@@ -29,6 +29,8 @@ import type { OrderService } from "../src/modules/orders/orders.service.js";
 import { webhooksRouter } from "../src/modules/orders/webhooks.routes.js";
 import type { OnboardingService } from "../src/modules/seller/onboarding.service.js";
 import type { SellerProductService } from "../src/modules/seller/products.service.js";
+import type { SellerOrderService } from "../src/modules/seller/orders.service.js";
+import type { DeliveryService } from "../src/modules/orders/delivery.js";
 import { sellerRouter } from "../src/modules/seller/seller.routes.js";
 import { notificationsRouter } from "../src/modules/notifications/notifications.routes.js";
 import type { PriceDropService } from "../src/modules/notifications/priceDrops.service.js";
@@ -84,9 +86,9 @@ describe("openapi.yaml", () => {
       wishlistRouter({ wishlist: {} as WishlistService, guards }),
       cartRouter({ cart: {} as CartService, recommendations: {} as RecommendationService, guards }),
       addressesRouter({ addresses: {} as AddressService, guards }),
-      ordersRouter({ orders: {} as OrderService, guards }),
+      ordersRouter({ orders: {} as OrderService, delivery: {} as DeliveryService, guards }),
       webhooksRouter({ orders: {} as OrderService, secret: undefined }),
-      sellerRouter({ onboarding: {} as OnboardingService, products: {} as SellerProductService, security: {} as SecurityService, guards, config }),
+      sellerRouter({ onboarding: {} as OnboardingService, products: {} as SellerProductService, orders: {} as SellerOrderService, security: {} as SecurityService, guards, config }),
       notificationsRouter({ priceDrops: {} as PriceDropService, guards })
     ];
     const inCode = routers.flatMap((r) => routesOf(r, "/api/v1"));

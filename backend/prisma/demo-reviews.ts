@@ -10,6 +10,7 @@
 import { randomUUID } from "node:crypto";
 import type { Prisma, PrismaClient } from "../src/generated/prisma/client.js";
 import { DELIVERY } from "../src/lib/delivery.js";
+import { earningsAvailableAt } from "../src/modules/orders/deadlines.js";
 import { recomputeRatings } from "../src/modules/reviews/ratings.js";
 import type { DemoProduct } from "./demo-data.js";
 
@@ -323,6 +324,7 @@ export async function seedDemoReviews(prisma: PrismaClient, products: DemoProduc
   const sellerOrders: Prisma.SellerOrderCreateManyInput[] = [];
   const items: Prisma.OrderItemCreateManyInput[] = [];
   const reviews: Prisma.ReviewCreateManyInput[] = [];
+  const ledger: { orderId: string; line: Prisma.LedgerEntryCreateManyInput }[] = [];
 
   for (const demo of products) {
     const product = rows.find((r) => r.slug === demo.slug && r.store.slug === demo.store);
@@ -359,6 +361,7 @@ export async function seedDemoReviews(prisma: PrismaClient, products: DemoProduc
       const deliveredAt = shippedAt + (reviewedAt - shippedAt) * 0.6;
 
       const subtotal = variant.priceCentavos;
+      const fee = Math.round(subtotal * 0.05);
       const delivery = subtotal >= DELIVERY.freeThresholdCentavos ? 0 : DELIVERY.standardFeeCentavos;
       const address = pick(ADDRESSES, shopperNo);
       const orderId = randomUUID();
@@ -374,10 +377,15 @@ export async function seedDemoReviews(prisma: PrismaClient, products: DemoProduc
       });
       sellerOrders.push({
         id: sellerOrderId, orderId, storeId: product.storeId, status: "DELIVERED", subtotalCentavos: subtotal, deliveryCentavos: delivery,
-        platformFeeCentavos: Math.round(subtotal * 0.05), courier: pick(COURIERS, Math.floor(random() * COURIERS.length)),
+        platformFeeCentavos: fee, courier: pick(COURIERS, Math.floor(random() * COURIERS.length)),
         trackingNumber: `VD${String(Math.floor(random() * 1e10)).padStart(10, "0")}`, shipBy: at(placedAt + 2 * DAY),
-        shippedAt: at(shippedAt), deliveredAt: at(deliveredAt), createdAt: at(placedAt), updatedAt: at(deliveredAt)
+        shippedAt: at(shippedAt), deliveredAt: at(deliveredAt), deliveryConfirmedBy: "BUYER", createdAt: at(placedAt), updatedAt: at(deliveredAt)
       });
+      // What the store earned from it (see src/modules/seller/ledger.ts): the sale and Vendora's fee
+      // (the order's number is only known once it's saved, so the descriptions are added then).
+      const availableAt = earningsAvailableAt(at(deliveredAt));
+      ledger.push({ orderId, line: { storeId: product.storeId, sellerOrderId, type: "SALE", amountCentavos: subtotal, description: "Sale", availableAt, createdAt: at(deliveredAt) } });
+      if (fee > 0) ledger.push({ orderId, line: { storeId: product.storeId, sellerOrderId, type: "FEE", amountCentavos: -fee, description: "Vendora fee", availableAt, createdAt: at(deliveredAt) } });
       items.push({
         id: orderItemId, sellerOrderId, variantId: variant.id, productId: product.id, productTitle: product.title, variantName: variant.name,
         imageUrl: product.images[0]?.url ?? null, unitPriceCentavos: subtotal, quantity: 1, createdAt: at(placedAt)
@@ -395,11 +403,14 @@ export async function seedDemoReviews(prisma: PrismaClient, products: DemoProduc
     async (tx) => {
       // Replace the demo shoppers' previous run (their order items go with their seller orders).
       await tx.review.deleteMany({ where: { userId: { in: shopperIds } } });
+      await tx.ledgerEntry.deleteMany({ where: { sellerOrder: { order: { userId: { in: shopperIds } } } } });
       await tx.sellerOrder.deleteMany({ where: { order: { userId: { in: shopperIds } } } });
       await tx.order.deleteMany({ where: { userId: { in: shopperIds } } });
       await tx.order.createMany({ data: orders });
       await tx.sellerOrder.createMany({ data: sellerOrders });
       await tx.orderItem.createMany({ data: items });
+      const numbers = new Map((await tx.order.findMany({ where: { id: { in: orders.map((o) => o.id ?? "") } }, select: { id: true, orderNumber: true } })).map((o) => [o.id, o.orderNumber]));
+      await tx.ledgerEntry.createMany({ data: ledger.map(({ orderId, line }) => ({ ...line, description: `${line.description} · VD-${numbers.get(orderId) ?? "?"}` })) });
       await tx.review.createMany({ data: reviews });
       await recomputeRatings(tx, "all");
     },

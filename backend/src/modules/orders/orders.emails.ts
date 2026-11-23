@@ -1,4 +1,5 @@
 import type { EmailMessage } from "../../lib/email.js";
+import { manilaDate } from "./deadlines.js";
 import type { OrderView } from "./orders.service.js";
 
 const peso = (centavos: number) => `₱${(centavos / 100).toLocaleString("en-PH", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
@@ -37,5 +38,35 @@ export function paymentRefundedEmail(to: string, orderNumber: string, amountCent
     kind: "payment-refunded",
     subject: `We're refunding ${peso(amountCentavos)} for order ${orderNumber}`,
     text: [why, "", `We've refunded the full ${peso(amountCentavos)}. Depending on your bank or e-wallet, it can take a few days to appear.`, "", "Sorry for the trouble."].join("\n")
+  };
+}
+
+export interface ShippedPackage {
+  orderId: string;
+  number: string;
+  storeName: string;
+  courier: string;
+  trackingNumber: string;
+  items: { title: string; variantName: string; quantity: number }[];
+  autoConfirmAt: Date;
+}
+
+/** "Your package from SoundCraft is on its way", or the corrected tracking details (`updated`). */
+export function packageShippedEmail(to: string, p: ShippedPackage, appUrl: string, updated = false): EmailMessage {
+  return {
+    to,
+    kind: updated ? "package-tracking-updated" : "package-shipped",
+    subject: updated ? `New tracking details for your ${p.storeName} package (${p.number})` : `Your package from ${p.storeName} is on its way (${p.number})`,
+    text: [
+      updated ? `${p.storeName} corrected the tracking details of your package from order ${p.number}.` : `Good news: ${p.storeName} shipped your package from order ${p.number}.`,
+      "",
+      ...p.items.map((i) => `  ${i.quantity} × ${i.title} · ${i.variantName}`),
+      "",
+      `Courier: ${p.courier}`,
+      `Tracking number: ${p.trackingNumber}`,
+      "",
+      `When it arrives, tap "Order received" on the order page. If you don't, we'll confirm it for you on ${manilaDate.format(p.autoConfirmAt)}.`,
+      `Track it: ${appUrl}/orders/${p.orderId}`
+    ].join("\n")
   };
 }

@@ -11,6 +11,8 @@ import type { CheckoutState, OnlineMethod, PaidPayment, PaymentGateway, WebhookE
 import { readSession } from "../../lib/paymongo.js";
 import { isUniqueViolation } from "../../lib/prismaErrors.js";
 import type { CartService, CartView } from "../cart/cart.service.js";
+import { newOrderEmail } from "../seller/seller.emails.js";
+import { AUTO_CONFIRM_DAYS, autoConfirmAt, shipByFor } from "./deadlines.js";
 import { orderConfirmedEmail, paymentRefundedEmail } from "./orders.emails.js";
 import {
   COD_MAX_OPEN_ORDERS,
@@ -25,8 +27,6 @@ import {
 } from "./orders.schemas.js";
 
 const MINUTE = 60 * 1000;
-/** Sellers have 2 days to ship a paid order. */
-const SHIP_WITHIN_MS = 2 * 24 * 60 * MINUTE;
 /** PayMongo refuses to expire a session while a payment is processing: wait this much longer... */
 const BUSY_EXTENSION_MS = 5 * MINUTE;
 /** ...but never keep stock held longer than this; a payment after that is handled as a late payment. */
@@ -87,6 +87,12 @@ export interface OrderView {
     shippedAt: string | null;
     deliveredAt: string | null;
     cancelledAt: string | null;
+    /** "Order received": shown while the package is shipped. */
+    canConfirmReceived: boolean;
+    /** While shipped: "We'll confirm it automatically on Nov 30". */
+    autoConfirmAt: string | null;
+    /** Who confirmed the delivery (null before milestone 6c and until delivered). */
+    deliveryConfirmedBy: "buyer" | "auto" | null;
     /** "Arrives Nov 24 – Nov 27": the delivery promise counted from the paid date, while it's on its way. */
     estimatedDelivery: DeliveryEstimate | null;
     /** The tracking stepper: Ordered → Preparing → Shipped → Delivered, with when each was reached. */
@@ -150,6 +156,8 @@ export interface OrderSummary {
     trackingNumber: string | null;
     shippedAt: string | null;
     deliveredAt: string | null;
+    /** "Order received": shown while the package is shipped. */
+    canConfirmReceived: boolean;
     /** Items delivered and not reviewed yet ("Write a review" shows when > 0). */
     reviewableItems: number;
   }[];
@@ -406,7 +414,7 @@ export class OrderService {
                 subtotalCentavos: p.subtotalCentavos,
                 deliveryCentavos: p.delivery.feeCentavos,
                 platformFeeCentavos: platformFeeCentavos(p.subtotalCentavos, store.approvedAt, now),
-                ...(method === "COD" ? { shipBy: new Date(now.getTime() + SHIP_WITHIN_MS) } : {}),
+                ...(method === "COD" ? { shipBy: shipByFor(now) } : {}),
                 items: {
                   create: p.items.map((i) => ({
                     variantId: i.variantId,
@@ -441,7 +449,7 @@ export class OrderService {
 
     if (method === "COD") {
       const order = await this.view(orderId);
-      this.mailer.send(orderConfirmedEmail(user.email, order, this.deps.appUrl));
+      await this.announce(order, user.email);
       return { order, nextAction: null, replayed: false };
     }
     try {
@@ -550,6 +558,7 @@ export class OrderService {
         trackingNumber: so.trackingNumber,
         shippedAt: so.shippedAt?.toISOString() ?? null,
         deliveredAt: so.deliveredAt?.toISOString() ?? null,
+        canConfirmReceived: so.status === "SHIPPED",
         reviewableItems: so.deliveredAt ? so.items.filter((i) => !i.review).length : 0
       }))
     }));
@@ -630,7 +639,7 @@ export class OrderService {
         await this.afterConfirmed(tx, orderId, userId);
       });
       const view = await this.view(orderId);
-      this.mailer.send(orderConfirmedEmail(user.email, view, this.deps.appUrl));
+      await this.announce(view, user.email);
       return { order: view, nextAction: null };
     }
 
@@ -722,7 +731,7 @@ export class OrderService {
 
     if (outcome.kind === "placed") {
       const user = await prisma.user.findUniqueOrThrow({ where: { id: outcome.userId }, select: { email: true } });
-      this.mailer.send(orderConfirmedEmail(user.email, await this.view(outcome.orderId), this.deps.appUrl));
+      await this.announce(await this.view(outcome.orderId), user.email);
       // Any other open attempt for this order mustn't be paid too.
       await this.stopAttempts(outcome.orderId).catch((err) => this.deps.logger?.warn({ err, orderId: outcome.orderId }, "stopping the other payment attempts failed"));
     } else if (outcome.kind === "refund") {
@@ -847,10 +856,43 @@ export class OrderService {
     });
   }
 
+  /**
+   * An order was just confirmed (paid, or placed with cash on delivery): the buyer gets the
+   * confirmation, and each store "New order VD-21458: ship by …" for its own package. Runs once
+   * per order, after the transaction (`settle` reports "placed" only the first time).
+   */
+  private async announce(order: OrderView, buyerEmail: string): Promise<void> {
+    this.mailer.send(orderConfirmedEmail(buyerEmail, order, this.deps.appUrl));
+    const packages = await this.deps.prisma.sellerOrder.findMany({
+      where: { orderId: order.id, status: "PREPARING" },
+      select: { id: true, subtotalCentavos: true, deliveryOption: true, shipBy: true, store: { select: { name: true, owner: { select: { email: true } } } } }
+    });
+    for (const p of packages) {
+      const view = order.packages.find((v) => v.id === p.id);
+      if (!view || !p.shipBy) continue;
+      this.mailer.send(
+        newOrderEmail(
+          p.store.owner.email,
+          p.store.name,
+          {
+            id: p.id,
+            number: order.number,
+            items: view.items.map((i) => ({ title: i.title, variantName: i.variantName, quantity: i.quantity })),
+            subtotalCentavos: p.subtotalCentavos,
+            deliveryOption: p.deliveryOption,
+            paymentMethod: order.payment.method,
+            shipBy: p.shipBy
+          },
+          this.deps.appUrl
+        )
+      );
+    }
+  }
+
   /** Paid (or cash on delivery): the order is placed and each package goes to its seller. */
   private async confirmOrder(tx: Tx, orderId: string, at: Date) {
     await tx.order.update({ where: { id: orderId }, data: { status: "PLACED", placedAt: at, expiresAt: null, cancelledAt: null } });
-    await tx.sellerOrder.updateMany({ where: { orderId }, data: { status: "PREPARING", shipBy: new Date(at.getTime() + SHIP_WITHIN_MS), cancelledAt: null } });
+    await tx.sellerOrder.updateMany({ where: { orderId }, data: { status: "PREPARING", shipBy: shipByFor(at), cancelledAt: null } });
   }
 
   /** After an order is confirmed: "sold" counts go up and the bought items leave the cart. */
@@ -917,6 +959,9 @@ export class OrderService {
         shippedAt: so.shippedAt?.toISOString() ?? null,
         deliveredAt: so.deliveredAt?.toISOString() ?? null,
         cancelledAt: so.cancelledAt?.toISOString() ?? null,
+        canConfirmReceived: so.status === "SHIPPED",
+        autoConfirmAt: so.status === "SHIPPED" && so.shippedAt ? autoConfirmAt(so.shippedAt).toISOString() : null,
+        deliveryConfirmedBy: so.deliveryConfirmedBy === "BUYER" ? "buyer" : so.deliveryConfirmedBy === "AUTO" ? "auto" : null,
         estimatedDelivery: estimateDelivery(o.placedAt, so.deliveryOption, so.status),
         steps: [
           { step: "ORDERED" as const, at: o.createdAt.toISOString() },
@@ -956,7 +1001,15 @@ export class OrderService {
  */
 function trackingEvents(
   order: { createdAt: Date; placedAt: Date | null; paymentMethod: PaymentMethodChoice },
-  so: { courier: string | null; trackingNumber: string | null; shippedAt: Date | null; deliveredAt: Date | null; cancelledAt: Date | null; events: { message: string; location: string | null; occurredAt: Date }[] }
+  so: {
+    courier: string | null;
+    trackingNumber: string | null;
+    shippedAt: Date | null;
+    deliveredAt: Date | null;
+    deliveryConfirmedBy: "BUYER" | "AUTO" | null;
+    cancelledAt: Date | null;
+    events: { message: string; location: string | null; occurredAt: Date }[];
+  }
 ): TrackingEvent[] {
   const events: (Omit<TrackingEvent, "at"> & { at: Date })[] = [];
   if (order.placedAt) {
@@ -970,7 +1023,10 @@ function trackingEvents(
     events.push({ type: "shipped", message: `Shipped${via}`, location: null, at: so.shippedAt });
   }
   for (const e of so.events) events.push({ type: "update", message: e.message, location: e.location, at: e.occurredAt });
-  if (so.deliveredAt) events.push({ type: "delivered", message: "Delivered", location: null, at: so.deliveredAt });
+  if (so.deliveredAt) {
+    const how = so.deliveryConfirmedBy === "BUYER" ? " · you confirmed you received it" : so.deliveryConfirmedBy === "AUTO" ? ` · confirmed automatically ${AUTO_CONFIRM_DAYS} days after shipping` : "";
+    events.push({ type: "delivered", message: `Delivered${how}`, location: null, at: so.deliveredAt });
+  }
   if (so.cancelledAt) events.push({ type: "cancelled", message: "Order cancelled", location: null, at: so.cancelledAt });
   // Oldest first (a stable sort keeps the order above for equal times), then reversed: newest first.
   return events

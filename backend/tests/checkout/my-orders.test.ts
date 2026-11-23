@@ -3,7 +3,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DELIVERY } from "../../src/lib/delivery.js";
 import { Browser } from "../support/browser.js";
 import { createCatalogHarness, type CatalogHarness } from "../support/catalogHarness.js";
-import { HOME_ADDRESS, shopping } from "../support/shopping.js";
+import { shipByFor } from "../../src/modules/orders/deadlines.js";
+import { HOME_ADDRESS, shopping, trackingNumber } from "../support/shopping.js";
 
 let h: CatalogHarness;
 let shop: ReturnType<typeof shopping>;
@@ -146,6 +147,9 @@ describe("Your orders", () => {
               status: "DELIVERED",
               subtotalCentavos: 59_900,
               deliveryCentavos: 4_900,
+              courier: "LBC",
+              trackingNumber: trackingNumber(),
+              shippedAt: new Date(start + i * 60_000 + 60_000),
               deliveredAt: new Date(),
               items: { create: { variantId: v.id, productId: v.productId, productTitle: v.product.title, variantName: v.name, unitPriceCentavos: 59_900, quantity: 1 } }
             }
@@ -215,9 +219,10 @@ describe("Order tracking", () => {
       { step: "SHIPPED", at: null },
       { step: "DELIVERED", at: null }
     ]);
-    // Express: 1–2 days from when it was placed; the seller must ship within 2 days.
+    // Express: 1–2 days from when it was placed; the seller must ship by 6:00 PM (Manila) 2 days later.
     expect(p?.estimatedDelivery).toEqual({ earliest: plusDays(placedAt, DELIVERY.expressDays.min), latest: plusDays(placedAt, DELIVERY.expressDays.max) });
-    expect(p?.shipBy).toBe(plusDays(placedAt, 2));
+    expect(p?.shipBy).toBe(shipByFor(new Date(placedAt)).toISOString());
+    expect(new Date(p?.shipBy ?? "").getUTCHours()).toBe(10); // 6:00 PM in Manila = 10:00 UTC
     expect(p?.events).toEqual([{ type: "placed", message: "Order placed · pay cash on delivery", location: null, at: placedAt }]);
     expect(p?.items[0]).toMatchObject({ review: null, canReview: false });
 

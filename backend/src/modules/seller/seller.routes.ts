@@ -5,24 +5,29 @@ import { signedInUserId, type AuthGuards } from "../../middleware/auth.js";
 import { clientInfoFrom } from "../auth/events.js";
 import type { SecurityService } from "../auth/security.service.js";
 import type { OnboardingService } from "./onboarding.service.js";
+import { sellerOrderExportSchema, sellerOrderIdSchema, sellerOrderListSchema, shipmentSchema } from "./orders.schemas.js";
+import type { SellerOrderService } from "./orders.service.js";
 import { productIdSchema, productInputSchema, sellerProductListSchema } from "./products.schemas.js";
 import type { SellerProductService } from "./products.service.js";
 import { documentIdSchema, documentSchema, logoSchema, payoutAccountSchema, storeDetailsSchema, uploadTicketSchema, verificationSchema } from "./seller.schemas.js";
 
 /**
- * Seller Center: becoming a seller (6a) and products (6b). Signed in, never cached; changes
- * are CSRF-checked app-wide. Onboarding changes answer with the whole onboarding state, so
- * the page always shows what's done and what's missing; product changes with the product.
+ * Seller Center: becoming a seller (6a), products (6b) and orders (6c). Signed in, never cached;
+ * changes are CSRF-checked app-wide. Onboarding changes answer with the whole onboarding state,
+ * so the page always shows what's done and what's missing; product and order changes with the
+ * product or order.
  */
 export function sellerRouter({
   onboarding,
   products,
+  orders,
   security,
   guards,
   config
 }: {
   onboarding: OnboardingService;
   products: SellerProductService;
+  orders: SellerOrderService;
   security: Pick<SecurityService, "requireConfirmed">;
   guards: AuthGuards;
   config: Pick<Config, "GEO_HEADERS">;
@@ -104,6 +109,27 @@ export function sellerRouter({
 
   router.delete("/seller/products/:id", ...auth, async (req, res) => {
     res.json(await products.remove(signedInUserId(req), productIdSchema.parse(req.params).id));
+  });
+
+  // --- orders (6c) ---
+
+  router.get("/seller/orders", ...auth, async (req, res) => {
+    res.json(await orders.list(signedInUserId(req), sellerOrderListSchema.parse(req.query)));
+  });
+
+  // Before /seller/orders/:id, so "export" isn't read as an order id.
+  router.get("/seller/orders/export", ...auth, async (req, res) => {
+    const { filename, csv } = await orders.exportCsv(signedInUserId(req), sellerOrderExportSchema.parse(req.query));
+    res.type("text/csv; charset=utf-8").attachment(filename).send(csv);
+  });
+
+  router.get("/seller/orders/:id", ...auth, async (req, res) => {
+    res.json({ order: await orders.view(signedInUserId(req), sellerOrderIdSchema.parse(req.params).id) });
+  });
+
+  router.put("/seller/orders/:id/shipment", ...auth, async (req, res) => {
+    const { id } = sellerOrderIdSchema.parse(req.params);
+    res.json({ order: await orders.ship(signedInUserId(req), id, shipmentSchema.parse(req.body)) });
   });
 
   return router;
