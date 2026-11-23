@@ -47,10 +47,10 @@ describe("Cloudinary signatures", () => {
 });
 
 describe("CloudinaryStorage", () => {
-  it("issues a signed upload ticket for exactly one place, type and set of formats", () => {
+  it("issues a signed upload ticket for exactly one place, type and set of formats, that can never replace a file", () => {
     const ticket = new CloudinaryStorage(URL_, undefined, () => NOW).ticket({ publicId: "vendora/store-documents/u1/abc", access: "private", allowedFormats: ["jpg", "pdf"], maxBytes: 10 });
     expect(ticket.url).toBe("https://api.cloudinary.com/v1_1/vendora-test/image/upload");
-    const signed = { allowed_formats: "jpg,pdf", public_id: "vendora/store-documents/u1/abc", timestamp: TS, type: "authenticated" };
+    const signed = { allowed_formats: "jpg,pdf", overwrite: "false", public_id: "vendora/store-documents/u1/abc", timestamp: TS, type: "authenticated" };
     expect(ticket.fields).toEqual({ ...signed, api_key: "123456789012345", signature: cloudinarySignature(signed, "abcdefghijklmnopqrstuvwxyz1") });
     expect(ticket.expiresAt).toBe(new Date(NOW.getTime() + 3_600_000).toISOString());
     expect(JSON.stringify(ticket)).not.toContain("abcdefghijklmnopqrstuvwxyz1"); // the secret never leaves the server

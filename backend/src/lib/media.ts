@@ -90,7 +90,9 @@ export class CloudinaryStorage implements MediaStorage {
 
   ticket({ publicId, access, allowedFormats, maxBytes }: { publicId: string; access: MediaAccess; allowedFormats: string[]; maxBytes: number }): UploadTicket {
     const timestamp = Math.floor(this.now().getTime() / 1000);
-    const params = { allowed_formats: allowedFormats.join(","), public_id: publicId, timestamp: String(timestamp), type: TYPE[access] };
+    // overwrite=false: a signature stays valid for an hour, and without this a second upload with the
+    // same ticket REPLACED the file (seen on the live account), after our server had already checked it.
+    const params = { allowed_formats: allowedFormats.join(","), overwrite: "false", public_id: publicId, timestamp: String(timestamp), type: TYPE[access] };
     return {
       url: `https://api.cloudinary.com/v1_1/${this.cloudName}/image/upload`,
       fields: { ...params, api_key: this.apiKey, signature: cloudinarySignature(params, this.apiSecret) },

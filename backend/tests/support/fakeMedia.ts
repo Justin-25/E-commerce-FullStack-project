@@ -30,6 +30,9 @@ export class FakeMedia implements MediaStorage {
     const ticket = this.tickets.get(publicId);
     if (!ticket) throw new Error(`no ticket for ${publicId}`);
     if (!ticket.allowedFormats.includes(format)) throw new Error(`the storage service refuses ${format}`);
+    // Like overwrite=false: a second upload with the same ticket keeps the first file.
+    const existing = this.files.get(`${ticket.access}:${publicId}`);
+    if (existing) return existing;
     return this.put({ publicId, access: ticket.access, format, bytes, url: ticket.access === "public" ? `https://media.example.test/${publicId}.${format}` : null });
   }
 
