@@ -38,12 +38,35 @@ export interface CheckoutState {
   paid: PaidPayment | null;
 }
 
+/** PayMongo's refund reasons (they also accept "fraudulent"). */
+export type RefundReasonCode = "duplicate" | "requested_by_customer" | "others";
+
+export interface RefundRequest {
+  paymentId: string;
+  amountCentavos: number;
+  reason: RefundReasonCode;
+  /** Shown in PayMongo's dashboard (at most 255 characters). */
+  notes?: string;
+  /** Our own references (string values only); `vendoraRefundId` lets a retry find a refund that already went through. */
+  metadata: Record<string, string>;
+}
+
+/** A refund as PayMongo reports it (status "pending" until it's processed, then "succeeded"). */
+export interface ProviderRefund {
+  id: string;
+  amountCentavos: number;
+  status: string;
+  metadata: Record<string, string>;
+}
+
 export interface PaymentGateway {
   createCheckout(request: CheckoutRequest): Promise<CheckoutSession>;
   getCheckout(sessionId: string): Promise<CheckoutState>;
   /** "refused": PayMongo won't expire it because a payment is paid, pending or processing. */
   expireCheckout(sessionId: string): Promise<"expired" | "refused">;
-  refund(paymentId: string, amountCentavos: number, reason: "duplicate" | "others"): Promise<{ refundId: string }>;
+  refund(request: RefundRequest): Promise<ProviderRefund>;
+  /** The refunds already made on a payment. */
+  listRefunds(paymentId: string): Promise<ProviderRefund[]>;
 }
 
 /** Our method names → PayMongo's `payment_method_types`. */
@@ -53,8 +76,8 @@ const API = "https://api.paymongo.com";
 const TIMEOUT_MS = 10_000;
 
 /**
- * PayMongo's REST API (docs.paymongo.com, read 2026-11-22): Hosted Checkout sessions (v2 to
- * create, v1 to read and expire) and refunds. The secret key is the Basic-auth username.
+ * PayMongo's REST API (docs.paymongo.com, read 2026-11-22 and 2026-11-24): Hosted Checkout sessions
+ * (v2 to create, v1 to read and expire) and refunds. The secret key is the Basic-auth username.
  */
 export class PayMongoGateway implements PaymentGateway {
   private readonly auth: string;
@@ -103,11 +126,28 @@ export class PayMongoGateway implements PaymentGateway {
     }
   }
 
-  async refund(paymentId: string, amountCentavos: number, reason: "duplicate" | "others"): Promise<{ refundId: string }> {
-    const body = await this.call("POST", "/v1/refunds", { data: { attributes: { amount: amountCentavos, payment_id: paymentId, reason } } });
-    const id = (body as { data?: { id?: unknown } }).data?.id;
-    if (typeof id !== "string") throw new Error("PayMongo: unexpected refund response");
-    return { refundId: id };
+  async refund(r: RefundRequest): Promise<ProviderRefund> {
+    const body = await this.call("POST", "/v1/refunds", {
+      data: { attributes: { amount: r.amountCentavos, payment_id: r.paymentId, reason: r.reason, ...(r.notes ? { notes: r.notes.slice(0, 255) } : {}), metadata: r.metadata } }
+    });
+    const refund = readRefund((body as { data?: unknown }).data);
+    if (!refund) throw new Error("PayMongo: unexpected refund response");
+    return refund;
+  }
+
+  /**
+   * GET /v1/refunds?payment_id=…. (The reference documents the filter as `data.attributes.payment_id`,
+   * but the live API refuses that with 400 parameter_invalid; plain `payment_id` works, checked 2026-11-24.)
+   * A payment has at most a few refunds (one per cancelled package), well under the page of 100.
+   */
+  async listRefunds(paymentId: string): Promise<ProviderRefund[]> {
+    const body = await this.call("GET", `/v1/refunds?payment_id=${encodeURIComponent(paymentId)}&limit=100`);
+    const data = (body as { data?: unknown }).data;
+    if (!Array.isArray(data)) throw new Error("PayMongo: unexpected refund list response");
+    return data.flatMap((d) => {
+      const r = readRefund(d);
+      return r ? [r] : [];
+    });
   }
 
   private async call(method: "GET" | "POST", path: string, json?: object): Promise<unknown> {
@@ -127,7 +167,7 @@ export class PayMongoGateway implements PaymentGateway {
     if (!res.ok) {
       // Their error details help us fix requests; they never contain card data.
       const detail = (body as { errors?: { code?: string; detail?: string }[] } | null)?.errors?.[0];
-      this.logger?.warn({ status: res.status, path: path.replace(/cs_\w+|pay_\w+/g, ":id"), code: detail?.code, detail: detail?.detail }, "PayMongo refused a request");
+      this.logger?.warn({ status: res.status, path: path.replace(/cs_\w+|pay_\w+|ref_\w+/g, ":id"), code: detail?.code, detail: detail?.detail }, "PayMongo refused a request");
       throw new PayMongoError(res.status, detail?.code ?? "unknown", detail?.detail ?? `PayMongo ${res.status}`);
     }
     return body;
@@ -143,6 +183,14 @@ export class PayMongoError extends Error {
     super(message);
     this.name = "PayMongoError";
   }
+}
+
+/** A refund resource → what we need. */
+function readRefund(data: unknown): ProviderRefund | null {
+  const d = data as { id?: unknown; attributes?: { amount?: unknown; status?: unknown; metadata?: unknown } } | undefined;
+  if (typeof d?.id !== "string" || typeof d.attributes?.amount !== "number") return null;
+  const metadata = d.attributes.metadata && typeof d.attributes.metadata === "object" ? (d.attributes.metadata as Record<string, string>) : {};
+  return { id: d.id, amountCentavos: d.attributes.amount, status: typeof d.attributes.status === "string" ? d.attributes.status : "pending", metadata };
 }
 
 /** A checkout session resource (from GET or inside a webhook) → what we need. */

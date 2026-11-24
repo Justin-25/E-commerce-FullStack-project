@@ -1,4 +1,6 @@
 import type { EmailMessage } from "../../lib/email.js";
+import type { CancelReason } from "../../generated/prisma/client.js";
+import { BUYER_EMAIL_REASON } from "./cancelReasons.js";
 import { manilaDate } from "./deadlines.js";
 import type { OrderView } from "./orders.service.js";
 
@@ -67,6 +69,69 @@ export function packageShippedEmail(to: string, p: ShippedPackage, appUrl: strin
       "",
       `When it arrives, tap "Order received" on the order page. If you don't, we'll confirm it for you on ${manilaDate.format(p.autoConfirmAt)}.`,
       `Track it: ${appUrl}/orders/${p.orderId}`
+    ].join("\n")
+  };
+}
+
+export interface CancelledPackage {
+  orderId: string;
+  number: string;
+  storeName: string;
+  reason: CancelReason;
+  items: { title: string; variantName: string; quantity: number }[];
+  /** null: nothing to refund (cash on delivery). */
+  refundCentavos: number | null;
+  paymentMethod: string;
+}
+
+/** A paid package was cancelled (by the seller, by the buyer, or automatically): why, and what happens to the money. */
+export function packageCancelledEmail(to: string, p: CancelledPackage, appUrl: string): EmailMessage {
+  const money =
+    p.refundCentavos === null
+      ? "You chose cash on delivery, so there's nothing to pay for these items."
+      : `We're refunding ${peso(p.refundCentavos)} (the items and their delivery fee) to your ${METHOD_NAME[p.paymentMethod] ?? p.paymentMethod}. We'll email you when it's sent; it can then take a few days to appear.`;
+  return {
+    to,
+    kind: "package-cancelled",
+    subject: `Your package from ${p.storeName} was cancelled (${p.number})`,
+    text: [
+      `Your package from ${p.storeName} (order ${p.number}) was cancelled because ${BUYER_EMAIL_REASON[p.reason]}.`,
+      "",
+      ...p.items.map((i) => `  ${i.quantity} × ${i.title} · ${i.variantName}`),
+      "",
+      money,
+      "",
+      `Your order: ${appUrl}/orders/${p.orderId}`
+    ].join("\n")
+  };
+}
+
+/** A cancelled package's refund went through. */
+export function refundSentEmail(to: string, r: { orderId: string; number: string; storeName: string; amountCentavos: number; paymentMethod: string }, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "refund-sent",
+    subject: `Refund sent: ${peso(r.amountCentavos)} for order ${r.number}`,
+    text: [
+      `We've sent ${peso(r.amountCentavos)} back to your ${METHOD_NAME[r.paymentMethod] ?? r.paymentMethod} for the cancelled package from ${r.storeName} (order ${r.number}).`,
+      "Depending on your bank or e-wallet, it can take a few days to appear.",
+      "",
+      `Your order: ${appUrl}/orders/${r.orderId}`
+    ].join("\n")
+  };
+}
+
+/** PayMongo kept refusing the refund for 3 days: a person sends it by hand. */
+export function refundDelayedEmail(to: string, r: { orderId: string; number: string; amountCentavos: number }, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "refund-delayed",
+    subject: `Your refund for order ${r.number} is taking longer`,
+    text: [
+      `We couldn't send your refund of ${peso(r.amountCentavos)} for order ${r.number} automatically. Our team is sending it by hand, and we'll email you when it's done.`,
+      "Sorry for the wait.",
+      "",
+      `Your order: ${appUrl}/orders/${r.orderId}`
     ].join("\n")
   };
 }

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.11.0
+  version: 0.12.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -1514,8 +1514,12 @@ paths:
 
   /api/v1/orders/{id}/cancel:
     post:
-      summary: Cancel an order that's still waiting for payment ("Back to cart")
-      description: The stock is returned. Placed orders are cancelled through the seller or support (later milestones).
+      summary: Cancel order (unpaid, or paid less than an hour ago)
+      description: |
+        Waiting for payment ("Back to cart"): cancelled and the stock returned. Paid (or cash on delivery) less than an
+        hour ago (`canCancel`, `cancelUntil`): every package not shipped yet is cancelled, its stock returned and its
+        items and delivery fee refunded through PayMongo (nothing to refund for cash on delivery); a package already
+        shipped stays on its way. Each seller is emailed not to ship. After the hour, the seller can cancel it.
       operationId: cancelOrder
       tags: [checkout]
       security: [{ accessCookie: [], csrfHeader: [] }]
@@ -1530,7 +1534,9 @@ paths:
         "403": { $ref: "#/components/responses/CsrfInvalid" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: CONFLICT. Not waiting for payment (not_pending), or a payment is in progress (payment_in_progress).
+          description: |
+            CONFLICT, with `details.reason`: payment_in_progress, cancel_window_over (paid more than an hour ago), already_shipped
+            (nothing left to cancel), not_pending / not_cancellable (already cancelled or completed).
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
   /api/v1/orders/{id}/buy-again:
@@ -2122,6 +2128,33 @@ paths:
           description: |
             CONFLICT, with `details.reason`: tracking_in_use (another package has this courier's tracking number;
             a `trackingNumber` field error), already_delivered, cancelled.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/seller/orders/{id}/cancel:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Cancel order (still to ship), with a reason
+      description: |
+        The package is cancelled; its stock goes back (OUT_OF_STOCK sets the variants to 0 instead: the seller just
+        said they aren't there); the buyer is refunded its items and delivery fee through PayMongo (cash on delivery:
+        the courier collects less) and emailed why. Sending it again changes nothing. A suspended store can still
+        cancel. Recorded with who and why (no automatic penalty). Packages not shipped 3 days after ship-by are
+        cancelled automatically (`autoCancelAt`).
+      operationId: cancelSellerOrder
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SellerCancelInput" } } }
+      responses:
+        "200": { $ref: "#/components/responses/SellerOrder" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT (`already_shipped`). It has shipped; it can't be cancelled.
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
   /api/v1/notifications/preferences:
@@ -2909,6 +2942,8 @@ components:
         createdAt: { type: string, format: date-time }
         placedAt: { type: [string, "null"], format: date-time }
         cancelledAt: { type: [string, "null"], format: date-time }
+        canCancel: { type: boolean, description: '"Cancel order": paid less than an hour ago and something not shipped yet.' }
+        cancelUntil: { type: [string, "null"], format: date-time, description: An hour after paying (while canCancel). }
         payment:
           type: object
           required: [method, status, checkoutUrl, expiresAt, paidAt]
@@ -2947,6 +2982,20 @@ components:
               canConfirmReceived: { type: boolean, description: '"Order received": while the package is shipped.' }
               autoConfirmAt: { type: [string, "null"], format: date-time, description: 'While shipped: "We''ll confirm it automatically on Nov 30" (7 days after shipping).' }
               deliveryConfirmedBy: { type: [string, "null"], enum: [buyer, auto, null], description: Who confirmed the delivery. }
+              cancellation:
+                type: [object, "null"]
+                description: A paid package that was cancelled.
+                properties:
+                  by: { type: string, enum: [seller, buyer, system] }
+                  reason: { type: string, enum: [OUT_OF_STOCK, CANNOT_SHIP_TO_ADDRESS, BUYER_ASKED, BUYER_CANCELLED, NOT_SHIPPED_IN_TIME] }
+                  message: { type: string, example: Cancelled by the seller · out of stock }
+              refund:
+                type: [object, "null"]
+                description: 'The money for a cancelled package: processing (PayMongo has not taken it yet), sent, or delayed (a person is sending it by hand).'
+                properties:
+                  amountCentavos: { type: integer }
+                  status: { type: string, enum: [processing, sent, delayed] }
+                  sentAt: { type: [string, "null"], format: date-time }
               estimatedDelivery: { $ref: "#/components/schemas/DeliveryEstimate" }
               steps:
                 type: array
@@ -2997,7 +3046,7 @@ components:
       type: object
       required: [type, message, location, at]
       properties:
-        type: { type: string, enum: [placed, shipped, update, delivered, cancelled], description: "update = an extra courier update (milestone 6)." }
+        type: { type: string, enum: [placed, shipped, update, delivered, cancelled, refund], description: "update = an extra courier update; refund = \"Refund of ₱549 sent to your GCash\"." }
         message: { type: string, example: Shipped with LBC · tracking 8841 2201, description: 'Also "Delivered · you confirmed you received it" or "Delivered · confirmed automatically 7 days after shipping".' }
         location: { type: [string, "null"], example: Pasay City }
         at: { type: string, format: date-time }
@@ -3295,7 +3344,7 @@ components:
     SellerOrder:
       type: object
       description: "The seller's order page. Only this store's part of the order."
-      required: [id, number, status, late, placedAt, paymentMethod, deliveryOption, shipBy, shippedAt, deliveredAt, deliveryConfirmedBy, autoConfirmAt, shipment, suggestedWeightGrams, canShip, canEditShipment, items, customer, shipTo, earnings, timeline, next, store]
+      required: [id, number, status, late, placedAt, paymentMethod, deliveryOption, shipBy, shippedAt, deliveredAt, deliveryConfirmedBy, autoConfirmAt, shipment, suggestedWeightGrams, canShip, canEditShipment, canCancel, autoCancelAt, cancellation, items, customer, shipTo, earnings, timeline, next, store]
       properties:
         id: { type: string, format: uuid }
         number: { type: string, example: VD-21458 }
@@ -3315,6 +3364,15 @@ components:
         suggestedWeightGrams: { type: [integer, "null"], description: "The items' weights added up (when every item has one): the form's starting value." }
         canShip: { type: boolean }
         canEditShipment: { type: boolean, description: Shipped and not delivered yet (fixing a typo). }
+        canCancel: { type: boolean, description: '"Cancel order": still to ship.' }
+        autoCancelAt: { type: [string, "null"], format: date-time, description: "While to ship: when it's cancelled automatically (3 days after ship-by)." }
+        cancellation:
+          type: [object, "null"]
+          properties:
+            by: { type: string, enum: [seller, buyer, system] }
+            reason: { type: string, enum: [OUT_OF_STOCK, CANNOT_SHIP_TO_ADDRESS, BUYER_ASKED, BUYER_CANCELLED, NOT_SHIPPED_IN_TIME] }
+            message: { type: string, example: You cancelled it · out of stock }
+            at: { type: string, format: date-time }
         items:
           type: array
           items:
@@ -3363,6 +3421,12 @@ components:
           description: '"Waiting for you to ship" by the ship-by time, "Waiting for the buyer to confirm delivery", or when the earnings are released.'
           properties: { message: { type: string }, by: { type: string, format: date-time } }
         store: { type: object, description: For the packing slip., properties: { name: { type: string }, shipsFrom: { type: [string, "null"] } } }
+    SellerCancelInput:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, enum: [OUT_OF_STOCK, CANNOT_SHIP_TO_ADDRESS, BUYER_ASKED], description: 'The Modal''s reasons: "Out of stock" (the stock is set to 0), "Can''t ship to this address", "Buyer asked to cancel".' }
     ShipmentInput:
       type: object
       additionalProperties: false

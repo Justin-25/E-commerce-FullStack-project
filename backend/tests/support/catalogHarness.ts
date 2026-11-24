@@ -29,6 +29,8 @@ import { PriceDropService } from "../../src/modules/notifications/priceDrops.ser
 import { LowStockService } from "../../src/modules/notifications/lowStock.service.js";
 import { DeliveryService } from "../../src/modules/orders/delivery.js";
 import { SellerOrderService } from "../../src/modules/seller/orders.service.js";
+import { CancellationService } from "../../src/modules/orders/cancellation.js";
+import { RefundService } from "../../src/modules/orders/refunds.js";
 
 /**
  * The real catalog, reviews and store routes on a fresh test database filled with the
@@ -39,21 +41,33 @@ export async function createCatalogHarness() {
   const paymongo = new FakePaymongo();
   const media = new FakeMedia();
   /** The order service of the most recently built app (tests call its background job directly). */
-  const services: { orders?: OrderService; priceDrops?: PriceDropService; delivery?: DeliveryService; sellerOrders?: SellerOrderService; lowStock?: LowStockService } = {};
+  const services: {
+    orders?: OrderService;
+    priceDrops?: PriceDropService;
+    delivery?: DeliveryService;
+    sellerOrders?: SellerOrderService;
+    lowStock?: LowStockService;
+    refunds?: RefundService;
+    cancellation?: CancellationService;
+  } = {};
   /** Moves the clock of the background jobs and Seller Center orders (a day, a week) without waiting. */
   const clock = { offsetMs: 0 };
   const now = () => new Date(Date.now() + clock.offsetMs);
-  // One order service per built app, shared by its routes and its webhook (like server.ts).
-  const built = new WeakMap<HarnessDeps, OrderService>();
-  const orderService = (deps: HarnessDeps) => {
+  // One set of order services per built app, shared by its routes, its webhook and the jobs (like server.ts).
+  const built = new WeakMap<HarnessDeps, { orders: OrderService; refunds: RefundService; cancellation: CancellationService }>();
+  const orderServices = (deps: HarnessDeps) => {
     const existing = built.get(deps);
     if (existing) return existing;
     const { prisma, kv, logger, email, config } = deps;
-    const orders = new OrderService({ prisma, cart: new CartService({ prisma }), gateway: paymongo, email, kv, appUrl: config.APP_URL, logger });
-    built.set(deps, orders);
-    services.orders = orders;
-    return orders;
+    const refunds = new RefundService({ prisma, gateway: paymongo, email, appUrl: config.APP_URL, logger, now });
+    const cancellation = new CancellationService({ prisma, refunds, email, appUrl: config.APP_URL, logger, now });
+    const orders = new OrderService({ prisma, cart: new CartService({ prisma }), gateway: paymongo, email, kv, appUrl: config.APP_URL, refunds, cancellation, logger, now });
+    const bundle = { orders, refunds, cancellation };
+    built.set(deps, bundle);
+    Object.assign(services, bundle);
+    return bundle;
   };
+  const orderService = (deps: HarnessDeps) => orderServices(deps).orders;
   const h = await createAuthHarness({ PAYMONGO_WEBHOOK_SECRET: TEST_WEBHOOK_SECRET }, {
     webhooks: (deps) => [webhooksRouter({ orders: orderService(deps), secret: deps.config.PAYMONGO_WEBHOOK_SECRET, logger: deps.logger })],
     routers: (deps) => {
@@ -63,7 +77,7 @@ export async function createCatalogHarness() {
       services.priceDrops = priceDrops;
       const delivery = new DeliveryService({ prisma, logger, now });
       services.delivery = delivery;
-      const sellerOrders = new SellerOrderService({ prisma, email: deps.email, appUrl: deps.config.APP_URL, logger, now });
+      const sellerOrders = new SellerOrderService({ prisma, email: deps.email, appUrl: deps.config.APP_URL, cancellation: orderServices(deps).cancellation, logger, now });
       services.sellerOrders = sellerOrders;
       services.lowStock = new LowStockService({ prisma, email: deps.email, config: deps.config, logger, now });
       return [
@@ -105,7 +119,7 @@ export async function createCatalogHarness() {
     if (!s) throw new Error(`no ${name} service yet`);
     return s as NonNullable<(typeof services)[K]>;
   };
-  return { ...h, demo, idOf, paymongo, media, orders, priceDrops, clock, delivery: service("delivery"), sellerOrders: service("sellerOrders"), lowStock: service("lowStock") };
+  return { ...h, demo, idOf, paymongo, media, orders, priceDrops, clock, delivery: service("delivery"), sellerOrders: service("sellerOrders"), lowStock: service("lowStock"), refunds: service("refunds"), cancellation: service("cancellation") };
 }
 
 export type CatalogHarness = Awaited<ReturnType<typeof createCatalogHarness>>;

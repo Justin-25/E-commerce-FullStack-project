@@ -52,9 +52,9 @@ export function shopping(h: CatalogHarness) {
     });
   }
 
-  /** Every package of an order arrives and the buyer taps "Order received" (packages not shipped yet are shipped first). */
+  /** Every package of an order arrives and the buyer taps "Order received" (packages not shipped yet are shipped first; cancelled ones stay cancelled). */
   async function deliver(orderId: string, at = new Date()) {
-    const packages = await h.db.prisma.sellerOrder.findMany({ where: { orderId }, select: { id: true, status: true } });
+    const packages = await h.db.prisma.sellerOrder.findMany({ where: { orderId, status: { in: ["PREPARING", "SHIPPED"] } }, select: { id: true, status: true } });
     for (const p of packages) {
       if (p.status === "PREPARING") await ship(p.id, { at: new Date(at.getTime() - 60_000) });
       expect(await h.delivery().deliver(p.id, at, "BUYER")).toBe(true);

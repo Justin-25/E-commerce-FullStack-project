@@ -1,6 +1,15 @@
 import { createHmac } from "node:crypto";
 import { DependencyUnavailableError } from "../../src/lib/errors.js";
-import { PayMongoError, type CheckoutRequest, type CheckoutSession, type CheckoutState, type PaidPayment, type PaymentGateway } from "../../src/lib/paymongo.js";
+import {
+  PayMongoError,
+  type CheckoutRequest,
+  type CheckoutSession,
+  type CheckoutState,
+  type PaidPayment,
+  type PaymentGateway,
+  type ProviderRefund,
+  type RefundRequest
+} from "../../src/lib/paymongo.js";
 
 /** The webhook secret the test app is configured with. */
 export const TEST_WEBHOOK_SECRET = "whsk_testsecret1234567890";
@@ -21,9 +30,13 @@ interface Session {
  */
 export class FakePaymongo implements PaymentGateway {
   readonly sessions = new Map<string, Session>();
-  readonly refunds: { paymentId: string; amountCentavos: number; reason: string }[] = [];
+  readonly refunds: (ProviderRefund & { paymentId: string; reason: string })[] = [];
   /** Simulate PayMongo being unreachable. */
   down = false;
+  /** Refunds are refused with this (like "available_balance_insufficient" in a test account). */
+  refundRefusal: PayMongoError | null = null;
+  /** The refund goes through, but the answer never arrives (a timeout after PayMongo did it). */
+  loseRefundAnswer = false;
   private seq = 0;
 
   async createCheckout(request: CheckoutRequest): Promise<CheckoutSession> {
@@ -47,10 +60,23 @@ export class FakePaymongo implements PaymentGateway {
     return "expired";
   }
 
-  async refund(paymentId: string, amountCentavos: number, reason: "duplicate" | "others"): Promise<{ refundId: string }> {
+  async refund(r: RefundRequest): Promise<ProviderRefund> {
     this.check();
-    this.refunds.push({ paymentId, amountCentavos, reason });
-    return { refundId: `ref_test_${++this.seq}` };
+    if (this.refundRefusal) throw this.refundRefusal;
+    // Like PayMongo: all of a payment's refunds add up to at most what was paid.
+    const paid = [...this.sessions.values()].find((x) => x.paid?.paymentId === r.paymentId)?.paid;
+    if (!paid) throw new PayMongoError(404, "resource_not_found", "No such payment");
+    const already = this.refunds.filter((x) => x.paymentId === r.paymentId).reduce((sum, x) => sum + x.amountCentavos, 0);
+    if (already + r.amountCentavos > paid.amountCentavos) throw new PayMongoError(400, "parameter_above_maximum", "The refund is more than what's left of the payment");
+    const refund = { id: `ref_test_${++this.seq}`, amountCentavos: r.amountCentavos, status: "pending", metadata: { ...r.metadata } };
+    this.refunds.push({ ...refund, paymentId: r.paymentId, reason: r.reason });
+    if (this.loseRefundAnswer) throw new DependencyUnavailableError("paymongo", new Error("fake PayMongo: the answer was lost"));
+    return refund;
+  }
+
+  async listRefunds(paymentId: string): Promise<ProviderRefund[]> {
+    this.check();
+    return this.refunds.filter((r) => r.paymentId === paymentId).map(({ id, amountCentavos, status, metadata }) => ({ id, amountCentavos, status, metadata }));
   }
 
   // --- test buttons -------------------------------------------------------------

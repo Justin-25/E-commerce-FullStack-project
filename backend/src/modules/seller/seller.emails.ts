@@ -100,3 +100,50 @@ export function lowStockEmail(to: string, storeName: string, variants: LowStockV
     ].join("\n")
   };
 }
+
+/** At the ship-by time: the order is late (one email per order). */
+export function orderLateEmail(to: string, p: { id: string; number: string; cancelAt: Date }, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "seller-order-late",
+    subject: `${p.number} is late: please ship it today`,
+    text: [
+      `Order ${p.number} passed its ship-by time and hasn't been marked as shipped.`,
+      `Ship it as soon as you can. If it's still not shipped by ${manilaTime.format(p.cancelAt)} (Philippine time), it's cancelled automatically and the buyer is refunded.`,
+      "If you can't ship it, cancel it now so the buyer isn't kept waiting.",
+      "",
+      `Open the order: ${appUrl}/seller/orders/${p.id}`
+    ].join("\n")
+  };
+}
+
+/** A day before the automatic cancel (one email per order). */
+export function orderCancelWarningEmail(to: string, p: { id: string; number: string; cancelAt: Date }, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "seller-order-cancel-warning",
+    subject: `${p.number} will be cancelled tomorrow unless you ship it`,
+    text: [
+      `Order ${p.number} still isn't shipped. It will be cancelled automatically on ${manilaTime.format(p.cancelAt)} (Philippine time), and the buyer refunded.`,
+      "Mark it as shipped with the courier's tracking number to keep it.",
+      "",
+      `Open the order: ${appUrl}/seller/orders/${p.id}`
+    ].join("\n")
+  };
+}
+
+/** The buyer cancelled (within the hour) or it was cancelled automatically: don't ship it. */
+export function orderCancelledForSellerEmail(to: string, p: { id: string; number: string; by: "BUYER" | "SYSTEM" }, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "seller-order-cancelled",
+    subject: `${p.number} was cancelled: don't ship it`,
+    text: [
+      p.by === "BUYER"
+        ? `The buyer cancelled order ${p.number} within an hour of paying. Please don't ship it; its stock is back in your store.`
+        : `Order ${p.number} was cancelled automatically because it wasn't shipped within 3 days of its ship-by time. The buyer is being refunded and its stock is back in your store.`,
+      "",
+      `Open the order: ${appUrl}/seller/orders/${p.id}`
+    ].join("\n")
+  };
+}

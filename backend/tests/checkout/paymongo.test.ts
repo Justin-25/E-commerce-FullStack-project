@@ -93,10 +93,27 @@ describe("PayMongoGateway", () => {
     await expect(gateway.createCheckout(request)).rejects.toBeInstanceOf(DependencyUnavailableError);
   });
 
-  it("refunds a payment by id, in centavos", async () => {
-    const calls = stubFetch({ status: 200, json: { data: { id: "ref_1" } } });
-    expect(await new PayMongoGateway("sk_test_abcdefghij1234").refund("pay_good1", 754_800, "duplicate")).toEqual({ refundId: "ref_1" });
-    expect(calls[0]).toMatchObject({ url: "https://api.paymongo.com/v1/refunds", body: { data: { attributes: { amount: 754_800, payment_id: "pay_good1", reason: "duplicate" } } } });
+  it("lists a payment's refunds with plain ?payment_id= (the documented data.attributes.payment_id is refused live)", async () => {
+    const calls = stubFetch({
+      status: 200,
+      json: { data: [{ id: "ref_9", type: "refund", attributes: { amount: 4_900, status: "succeeded", metadata: { vendoraRefundId: "r-9" } } }, { id: "junk" }], has_more: false }
+    });
+    expect(await new PayMongoGateway("sk_test_abcdefghij1234").listRefunds("pay_good1")).toEqual([{ id: "ref_9", amountCentavos: 4_900, status: "succeeded", metadata: { vendoraRefundId: "r-9" } }]);
+    expect(calls[0]).toMatchObject({ url: "https://api.paymongo.com/v1/refunds?payment_id=pay_good1&limit=100", method: "GET" });
+  });
+
+  it("refunds a payment by id, in centavos, with our refund id in its metadata", async () => {
+    const calls = stubFetch({ status: 200, json: { data: { id: "ref_1", type: "refund", attributes: { amount: 754_800, status: "pending", metadata: { vendoraRefundId: "r-1" } } } } });
+    expect(await new PayMongoGateway("sk_test_abcdefghij1234").refund({ paymentId: "pay_good1", amountCentavos: 754_800, reason: "duplicate", notes: "Vendora VD-21458: duplicate", metadata: { vendoraRefundId: "r-1" } })).toEqual({
+      id: "ref_1",
+      amountCentavos: 754_800,
+      status: "pending",
+      metadata: { vendoraRefundId: "r-1" }
+    });
+    expect(calls[0]).toMatchObject({
+      url: "https://api.paymongo.com/v1/refunds",
+      body: { data: { attributes: { amount: 754_800, payment_id: "pay_good1", reason: "duplicate", notes: "Vendora VD-21458: duplicate", metadata: { vendoraRefundId: "r-1" } } } }
+    });
   });
 });
 

@@ -5,6 +5,8 @@ import { MemoryKv } from "../../src/lib/kv.js";
 import { DevOutbox } from "../../src/lib/email.js";
 import { CartService } from "../../src/modules/cart/cart.service.js";
 import { OrderService } from "../../src/modules/orders/orders.service.js";
+import { CancellationService } from "../../src/modules/orders/cancellation.js";
+import { RefundService } from "../../src/modules/orders/refunds.js";
 import type { Browser } from "../support/browser.js";
 import { createCatalogHarness, type CatalogHarness } from "../support/catalogHarness.js";
 import { sign } from "../support/fakePaymongo.js";
@@ -365,7 +367,8 @@ describe("Failed payments and the 15-minute window", () => {
       const paid = h.paymongo.pay(session.id);
       await deliver(h.paymongo.webhook(session.id));
       expect((await getOrder(s.browser, order.id)).status).toBe("CANCELLED");
-      expect(h.paymongo.refunds).toContainEqual({ paymentId: paid.paymentId, amountCentavos: order.totals.totalCentavos, reason: "others" });
+      expect(h.paymongo.refunds).toContainEqual(expect.objectContaining({ paymentId: paid.paymentId, amountCentavos: order.totals.totalCentavos, reason: "others" }));
+      expect(await h.db.prisma.refund.findFirst({ where: { payment: { providerRef: session.id } } })).toMatchObject({ reason: "LATE_PAYMENT_SOLD_OUT", status: "SENT", attempts: 1 });
       expect((await h.db.prisma.payment.findFirstOrThrow({ where: { providerRef: session.id } })).status).toBe("REFUNDED");
       expect(h.outbox.lastTo(s.user.email)?.kind).toBe("payment-refunded");
     } finally {
@@ -385,7 +388,8 @@ describe("Failed payments and the 15-minute window", () => {
     // PayMongo race: the first page got paid just as we stopped it.
     const late = h.paymongo.pay(first.id, { force: true });
     await deliver(h.paymongo.webhook(first.id));
-    expect(h.paymongo.refunds).toContainEqual({ paymentId: late.paymentId, amountCentavos: order.totals.totalCentavos, reason: "duplicate" });
+    expect(h.paymongo.refunds).toContainEqual(expect.objectContaining({ paymentId: late.paymentId, amountCentavos: order.totals.totalCentavos, reason: "duplicate" }));
+    expect(await h.db.prisma.refund.findFirst({ where: { payment: { providerPaymentId: late.paymentId } } })).toMatchObject({ reason: "DUPLICATE_PAYMENT", status: "SENT" });
     expect(await h.db.prisma.payment.count({ where: { orderId: order.id, status: "PAID" } })).toBe(1);
   });
 
@@ -441,7 +445,10 @@ describe("Orders are private", () => {
 describe("Without a PayMongo key", () => {
   it("offers cash on delivery only, and refuses online payment clearly", async () => {
     const s = await shopperWith([["GL-TONER-150", 1]]);
-    const orders = new OrderService({ prisma: h.db.prisma, cart: new CartService({ prisma: h.db.prisma }), gateway: null, email: new DevOutbox(), kv: new MemoryKv(), appUrl: "http://localhost:5173" });
+    const email = new DevOutbox();
+    const refunds = new RefundService({ prisma: h.db.prisma, gateway: null, email, appUrl: "http://localhost:5173" });
+    const cancellation = new CancellationService({ prisma: h.db.prisma, refunds, email, appUrl: "http://localhost:5173" });
+    const orders = new OrderService({ prisma: h.db.prisma, cart: new CartService({ prisma: h.db.prisma }), gateway: null, email, kv: new MemoryKv(), appUrl: "http://localhost:5173", refunds, cancellation });
     const view = await orders.summary(s.user.id, { delivery: {} });
     expect(view.paymentMethods.filter((m) => m.available).map((m) => m.method)).toEqual(["COD"]);
     await expect(orders.place(s.user.id, randomUUID(), { addressId: s.addressId, delivery: {}, paymentMethod: "GCASH", expectedTotalCentavos: view.totals.totalCentavos })).rejects.toMatchObject({ status: 503 });

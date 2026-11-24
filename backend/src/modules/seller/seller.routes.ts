@@ -5,7 +5,7 @@ import { signedInUserId, type AuthGuards } from "../../middleware/auth.js";
 import { clientInfoFrom } from "../auth/events.js";
 import type { SecurityService } from "../auth/security.service.js";
 import type { OnboardingService } from "./onboarding.service.js";
-import { sellerOrderExportSchema, sellerOrderIdSchema, sellerOrderListSchema, shipmentSchema } from "./orders.schemas.js";
+import { sellerCancelSchema, sellerOrderExportSchema, sellerOrderIdSchema, sellerOrderListSchema, shipmentSchema } from "./orders.schemas.js";
 import type { SellerOrderService } from "./orders.service.js";
 import { productIdSchema, productInputSchema, sellerProductListSchema } from "./products.schemas.js";
 import type { SellerProductService } from "./products.service.js";
@@ -130,6 +130,11 @@ export function sellerRouter({
   router.put("/seller/orders/:id/shipment", ...auth, async (req, res) => {
     const { id } = sellerOrderIdSchema.parse(req.params);
     res.json({ order: await orders.ship(signedInUserId(req), id, shipmentSchema.parse(req.body)) });
+  });
+
+  router.post("/seller/orders/:id/cancel", ...auth, async (req, res) => {
+    const { id } = sellerOrderIdSchema.parse(req.params);
+    res.json({ order: await orders.cancel(signedInUserId(req), id, sellerCancelSchema.parse(req.body)) });
   });
 
   return router;

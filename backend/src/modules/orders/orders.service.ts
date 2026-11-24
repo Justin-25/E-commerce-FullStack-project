@@ -12,8 +12,11 @@ import { readSession } from "../../lib/paymongo.js";
 import { isUniqueViolation } from "../../lib/prismaErrors.js";
 import type { CartService, CartView } from "../cart/cart.service.js";
 import { newOrderEmail } from "../seller/seller.emails.js";
-import { AUTO_CONFIRM_DAYS, autoConfirmAt, shipByFor } from "./deadlines.js";
-import { orderConfirmedEmail, paymentRefundedEmail } from "./orders.emails.js";
+import { buyerCancelMessage } from "./cancelReasons.js";
+import type { CancellationService } from "./cancellation.js";
+import { AUTO_CONFIRM_DAYS, autoConfirmAt, buyerCancelUntil, shipByFor } from "./deadlines.js";
+import { orderConfirmedEmail } from "./orders.emails.js";
+import { recordRefund, type RefundService } from "./refunds.js";
 import {
   COD_MAX_OPEN_ORDERS,
   COD_MAX_TOTAL_CENTAVOS,
@@ -62,6 +65,10 @@ export interface OrderView {
   createdAt: string;
   placedAt: string | null;
   cancelledAt: string | null;
+  /** "Cancel order" on the tracking page: paid less than an hour ago and something hasn't shipped yet. */
+  canCancel: boolean;
+  /** Until when the buyer can cancel (an hour after paying); null when they can't. */
+  cancelUntil: string | null;
   payment: {
     method: PaymentMethodChoice;
     status: string;
@@ -93,6 +100,10 @@ export interface OrderView {
     autoConfirmAt: string | null;
     /** Who confirmed the delivery (null before milestone 6c and until delivered). */
     deliveryConfirmedBy: "buyer" | "auto" | null;
+    /** A paid package that was cancelled: by whom and why ("Cancelled by the seller · out of stock"). */
+    cancellation: { by: "seller" | "buyer" | "system"; reason: string; message: string } | null;
+    /** The money for a cancelled package: processing (PayMongo hasn't taken it yet), sent, or delayed (being refunded by hand). */
+    refund: { amountCentavos: number; status: "processing" | "sent" | "delayed"; sentAt: string | null } | null;
     /** "Arrives Nov 24 – Nov 27": the delivery promise counted from the paid date, while it's on its way. */
     estimatedDelivery: DeliveryEstimate | null;
     /** The tracking stepper: Ordered → Preparing → Shipped → Delivered, with when each was reached. */
@@ -126,7 +137,7 @@ export interface DeliveryEstimate {
   latest: string;
 }
 export interface TrackingEvent {
-  type: "placed" | "shipped" | "update" | "delivered" | "cancelled";
+  type: "placed" | "shipped" | "update" | "delivered" | "cancelled" | "refund";
   message: string;
   location: string | null;
   at: string;
@@ -257,6 +268,10 @@ export class OrderService {
       email: EmailSender;
       kv: KeyValueStore;
       appUrl: string;
+      /** Sends refunds (and retries them); the order code only records them. */
+      refunds: RefundService;
+      /** The buyer's "Cancel order" on a paid order (within the hour). */
+      cancellation: CancellationService;
       logger?: Logger;
       now?: () => Date;
     }
@@ -648,11 +663,18 @@ export class OrderService {
     return { order: await this.view(orderId), nextAction: { type: "redirect", url } };
   }
 
-  /** The shopper gives up on an unpaid order ("Back to cart"): the stock is returned. */
+  /**
+   * "Cancel order". Unpaid ("Back to cart"): the stock is returned. Paid less than an hour ago:
+   * every package not shipped yet is cancelled and refunded (milestone 6c).
+   */
   async cancel(userId: string, orderId: string): Promise<OrderView> {
     const order = await this.deps.prisma.order.findFirst({ where: { id: orderId, userId }, select: { status: true } });
     if (!order) throw notFound();
-    if (order.status !== "PENDING_PAYMENT") throw new AppError(409, "CONFLICT", "Only an order that's still waiting for payment can be cancelled here.", { details: { reason: "not_pending" } });
+    if (order.status === "PLACED") {
+      await this.deps.cancellation.cancelByBuyer(userId, orderId);
+      return this.view(orderId);
+    }
+    if (order.status !== "PENDING_PAYMENT") throw new AppError(409, "CONFLICT", "This order can't be cancelled.", { details: { reason: "not_pending" } });
     const stopped = await this.stopAttempts(orderId);
     if (stopped === "busy") throw new AppError(409, "CONFLICT", "A payment for this order is still being processed. Please wait a moment.", { details: { reason: "payment_in_progress" } });
     if (stopped !== "paid") await this.cancelUnpaid(orderId, "Cancelled by the shopper");
@@ -691,7 +713,7 @@ export class OrderService {
   async settle(sessionId: string, paid: PaidPayment): Promise<void> {
     const { prisma } = this.deps;
     const outcome = await prisma.$transaction(
-      async (tx): Promise<{ kind: "none" } | { kind: "placed"; orderId: string; userId: string } | { kind: "refund"; orderId: string; userId: string; paymentRowId: string; reason: "out_of_stock" | "duplicate" }> => {
+      async (tx): Promise<{ kind: "none" } | { kind: "placed"; orderId: string; userId: string } | { kind: "refund"; refundId: string }> => {
         const attempt = await tx.payment.findUnique({ where: { providerRef: sessionId }, select: { id: true, orderId: true } });
         if (!attempt) {
           this.deps.logger?.warn({ sessionId }, "PayMongo reported a payment for an unknown checkout session");
@@ -714,7 +736,11 @@ export class OrderService {
           await this.afterConfirmed(tx, order.id, order.userId);
           return { kind: "placed", ...base };
         }
-        if (order.status === "CANCELLED") {
+        const refund = (reason: "DUPLICATE_PAYMENT" | "LATE_PAYMENT_SOLD_OUT") =>
+          recordRefund(tx, { paymentId: payment.id, amountCentavos: paid.amountCentavos, reason }, this.now()).then((refundId) => ({ kind: "refund" as const, refundId }));
+        // Cancelled while unpaid (the window closed): take the stock again if it's all there. An order
+        // that was paid and later cancelled (placedAt set) is never revived: that payment is a duplicate.
+        if (order.status === "CANCELLED" && !order.placedAt) {
           const lines = order.sellerOrders.flatMap((so) => so.items.map((i) => ({ variantId: i.variantId, quantity: i.quantity })));
           if (!(await takeStock(tx, lines))) {
             await tx.order.update({ where: { id: order.id }, data: { paymentMethod: payment.method } });
@@ -722,9 +748,9 @@ export class OrderService {
             await this.afterConfirmed(tx, order.id, order.userId);
             return { kind: "placed", ...base };
           }
-          return { kind: "refund", ...base, paymentRowId: payment.id, reason: "out_of_stock" };
+          return refund("LATE_PAYMENT_SOLD_OUT");
         }
-        return { kind: "refund", ...base, paymentRowId: payment.id, reason: "duplicate" };
+        return refund("DUPLICATE_PAYMENT");
       },
       { timeout: 30_000, maxWait: 10_000 }
     );
@@ -735,24 +761,7 @@ export class OrderService {
       // Any other open attempt for this order mustn't be paid too.
       await this.stopAttempts(outcome.orderId).catch((err) => this.deps.logger?.warn({ err, orderId: outcome.orderId }, "stopping the other payment attempts failed"));
     } else if (outcome.kind === "refund") {
-      await this.refund(outcome.paymentRowId, paid, outcome.reason, outcome.orderId, outcome.userId);
-    }
-  }
-
-  private async refund(paymentRowId: string, paid: PaidPayment, reason: "out_of_stock" | "duplicate", orderId: string, userId: string) {
-    const { prisma, gateway, logger } = this.deps;
-    try {
-      if (!gateway) throw new Error("no PayMongo key");
-      await gateway.refund(paid.paymentId, paid.amountCentavos, reason === "duplicate" ? "duplicate" : "others");
-      await prisma.payment.update({ where: { id: paymentRowId }, data: { status: "REFUNDED", failureReason: reason === "duplicate" ? "Refunded: second payment for a paid order" : "Refunded: paid after the window, items sold out" } });
-      const [order, user] = await Promise.all([
-        prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { orderNumber: true } }),
-        prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { email: true } })
-      ]);
-      this.mailer.send(paymentRefundedEmail(user.email, orderNumber(order.orderNumber), paid.amountCentavos, reason));
-    } catch (err) {
-      logger?.error({ err, orderId, paymentId: paid.paymentId }, "automatic refund failed: refund it by hand in the PayMongo dashboard");
-      await prisma.payment.update({ where: { id: paymentRowId }, data: { failureReason: "Refund failed: needs a manual refund" } });
+      await this.deps.refunds.send(outcome.refundId); // if PayMongo refuses, the job retries it
     }
   }
 
@@ -922,7 +931,8 @@ export class OrderService {
               orderBy: [{ createdAt: "asc" }, { id: "asc" }],
               include: { review: { select: { id: true, rating: true, title: true, body: true, status: true, createdAt: true, updatedAt: true } } }
             },
-            events: { orderBy: [{ occurredAt: "asc" }, { id: "asc" }] }
+            events: { orderBy: [{ occurredAt: "asc" }, { id: "asc" }] },
+            refund: { select: { amountCentavos: true, status: true, sentAt: true } }
           },
           orderBy: [{ createdAt: "asc" }, { id: "asc" }]
         },
@@ -931,6 +941,8 @@ export class OrderService {
     });
     const latest = o.payments[0];
     const waiting = o.status === "PENDING_PAYMENT";
+    const cancelUntil = o.status === "PLACED" && o.placedAt && o.sellerOrders.some((so) => so.status === "PREPARING") ? buyerCancelUntil(o.placedAt) : null;
+    const canCancel = cancelUntil !== null && this.now() <= cancelUntil;
     return {
       id: o.id,
       number: orderNumber(o.orderNumber),
@@ -938,6 +950,8 @@ export class OrderService {
       createdAt: o.createdAt.toISOString(),
       placedAt: o.placedAt?.toISOString() ?? null,
       cancelledAt: o.cancelledAt?.toISOString() ?? null,
+      canCancel,
+      cancelUntil: canCancel ? (cancelUntil?.toISOString() ?? null) : null,
       payment: {
         method: o.paymentMethod,
         status: latest?.status ?? "PENDING",
@@ -962,6 +976,13 @@ export class OrderService {
         canConfirmReceived: so.status === "SHIPPED",
         autoConfirmAt: so.status === "SHIPPED" && so.shippedAt ? autoConfirmAt(so.shippedAt).toISOString() : null,
         deliveryConfirmedBy: so.deliveryConfirmedBy === "BUYER" ? "buyer" : so.deliveryConfirmedBy === "AUTO" ? "auto" : null,
+        cancellation:
+          so.cancelledBy && so.cancelReason
+            ? { by: so.cancelledBy === "SELLER" ? "seller" : so.cancelledBy === "BUYER" ? "buyer" : "system", reason: so.cancelReason, message: buyerCancelMessage(so.cancelledBy, so.cancelReason) }
+            : null,
+        refund: so.refund
+          ? { amountCentavos: so.refund.amountCentavos, status: so.refund.status === "SENT" ? "sent" : so.refund.status === "FAILED" ? "delayed" : "processing", sentAt: so.refund.sentAt?.toISOString() ?? null }
+          : null,
         estimatedDelivery: estimateDelivery(o.placedAt, so.deliveryOption, so.status),
         steps: [
           { step: "ORDERED" as const, at: o.createdAt.toISOString() },
@@ -1008,6 +1029,9 @@ function trackingEvents(
     deliveredAt: Date | null;
     deliveryConfirmedBy: "BUYER" | "AUTO" | null;
     cancelledAt: Date | null;
+    cancelledBy: "SELLER" | "BUYER" | "SYSTEM" | null;
+    cancelReason: Parameters<typeof buyerCancelMessage>[1];
+    refund: { amountCentavos: number; status: string; sentAt: Date | null } | null;
     events: { message: string; location: string | null; occurredAt: Date }[];
   }
 ): TrackingEvent[] {
@@ -1027,7 +1051,11 @@ function trackingEvents(
     const how = so.deliveryConfirmedBy === "BUYER" ? " · you confirmed you received it" : so.deliveryConfirmedBy === "AUTO" ? ` · confirmed automatically ${AUTO_CONFIRM_DAYS} days after shipping` : "";
     events.push({ type: "delivered", message: `Delivered${how}`, location: null, at: so.deliveredAt });
   }
-  if (so.cancelledAt) events.push({ type: "cancelled", message: "Order cancelled", location: null, at: so.cancelledAt });
+  if (so.cancelledAt) events.push({ type: "cancelled", message: buyerCancelMessage(so.cancelledBy, so.cancelReason), location: null, at: so.cancelledAt });
+  if (so.refund?.sentAt) {
+    const to = order.paymentMethod === "COD" ? "" : ` to your ${METHOD_NAME[order.paymentMethod]}`;
+    events.push({ type: "refund", message: `Refund of ₱${(so.refund.amountCentavos / 100).toLocaleString("en-PH", { maximumFractionDigits: 2 })} sent${to}`, location: null, at: so.refund.sentAt });
+  }
   // Oldest first (a stable sort keeps the order above for equal times), then reversed: newest first.
   return events
     .sort((a, b) => a.at.getTime() - b.at.getTime())

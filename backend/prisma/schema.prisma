@@ -125,6 +125,36 @@ enum SellerOrderStatus {
   RETURNED
 }
 
+/// Who cancelled a paid package (unpaid orders that simply expired have none).
+enum CancelledBy {
+  SELLER
+  BUYER
+  SYSTEM
+}
+
+/// Why a paid package was cancelled. NOT_SHIPPED_IN_TIME is the automatic one (3 days after ship-by).
+enum CancelReason {
+  OUT_OF_STOCK
+  CANNOT_SHIP_TO_ADDRESS
+  BUYER_ASKED
+  BUYER_CANCELLED
+  NOT_SHIPPED_IN_TIME
+}
+
+/// Why money goes back: a cancelled package, a second payment for a paid order, or a late payment for sold-out items.
+enum RefundReason {
+  PACKAGE_CANCELLED
+  DUPLICATE_PAYMENT
+  LATE_PAYMENT_SOLD_OUT
+}
+
+/// PENDING: waiting to be sent (or retried) · SENT: PayMongo accepted it · FAILED: gave up after 3 days, needs a manual refund.
+enum RefundStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
 /// Who confirmed a delivery: the buyer ("Order received") or the automatic confirmation 7 days after shipping.
 enum DeliveryConfirmation {
   BUYER
@@ -683,6 +713,12 @@ model SellerOrder {
   deliveredAt         DateTime?         @db.Timestamptz(3)
   deliveryConfirmedBy DeliveryConfirmation?
   cancelledAt         DateTime?         @db.Timestamptz(3)
+  /// Who cancelled a paid package and why (both or neither; only on CANCELLED packages: CHECK).
+  cancelledBy         CancelledBy?
+  cancelReason        CancelReason?
+  /// The seller was emailed "VD-21458 is late" (at ship-by) / "cancelled tomorrow" (a day before the automatic cancel).
+  lateNotifiedAt      DateTime?         @db.Timestamptz(3)
+  cancelWarnedAt      DateTime?         @db.Timestamptz(3)
   createdAt           DateTime          @default(now()) @db.Timestamptz(3)
   updatedAt           DateTime          @updatedAt @db.Timestamptz(3)
 
@@ -692,11 +728,13 @@ model SellerOrder {
   events         ShipmentEvent[]
   returnRequests ReturnRequest[]
   ledgerEntries  LedgerEntry[]
+  refund         Refund?
 
   @@unique([orderId, storeId])
   @@unique([courier, trackingNumber])
   @@index([storeId, status, createdAt(sort: Desc)])
   @@index([status, shippedAt])
+  @@index([status, shipBy])
   @@map("seller_orders")
 }
 
@@ -755,10 +793,39 @@ model Payment {
   createdAt         DateTime        @default(now()) @db.Timestamptz(3)
   updatedAt         DateTime        @updatedAt @db.Timestamptz(3)
 
-  order Order @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  order   Order    @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  refunds Refund[]
 
   @@index([orderId])
   @@map("payments")
+}
+
+/// Money going back to a shopper through PayMongo. Saved BEFORE it's sent, with its id in PayMongo's
+/// metadata, so a retry first asks PayMongo whether it already went through (never sent twice).
+model Refund {
+  id               String       @id @default(uuid(7)) @db.Uuid
+  paymentId        String       @db.Uuid
+  /// The cancelled package (one refund per package); null for whole-payment refunds.
+  sellerOrderId    String?      @unique @db.Uuid
+  amountCentavos   Int // > 0 (CHECK); all of a payment's refunds add up to at most what was paid
+  reason           RefundReason
+  status           RefundStatus @default(PENDING)
+  /// PayMongo's refund id (ref_…) once sent.
+  providerRefundId String?      @unique @db.VarChar(100)
+  attempts         Int          @default(0)
+  /// When to (re)try; a claim moves it an hour ahead first, so two runs never send it at once.
+  nextAttemptAt    DateTime?    @db.Timestamptz(3)
+  lastError        String?      @db.VarChar(255)
+  sentAt           DateTime?    @db.Timestamptz(3)
+  createdAt        DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime     @updatedAt @db.Timestamptz(3)
+
+  payment     Payment      @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  sellerOrder SellerOrder? @relation(fields: [sellerOrderId], references: [id], onDelete: Restrict)
+
+  @@index([paymentId])
+  @@index([status, nextAttemptAt])
+  @@map("refunds")
 }
 
 /// Every payment webhook is stored once — a repeated delivery can't be processed twice.

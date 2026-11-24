@@ -27,6 +27,8 @@ import { SellerProductService } from "./modules/seller/products.service.js";
 import { SellerOrderService } from "./modules/seller/orders.service.js";
 import { LowStockService } from "./modules/notifications/lowStock.service.js";
 import { DeliveryService } from "./modules/orders/delivery.js";
+import { CancellationService } from "./modules/orders/cancellation.js";
+import { RefundService } from "./modules/orders/refunds.js";
 import { sellerRouter } from "./modules/seller/seller.routes.js";
 import { notificationsRouter } from "./modules/notifications/notifications.routes.js";
 import { PriceDropService } from "./modules/notifications/priceDrops.service.js";
@@ -90,8 +92,10 @@ if (prisma) {
 
   const gateway = config.PAYMONGO_SECRET_KEY ? new PayMongoGateway(config.PAYMONGO_SECRET_KEY, logger) : null;
   if (!gateway) logger.info("PAYMONGO_SECRET_KEY is not set — online payments are off (cash on delivery still works)");
-  const orders = new OrderService({ prisma, cart, gateway, email, kv, appUrl: config.APP_URL, logger });
-  services.push(orders);
+  const refunds = new RefundService({ prisma, gateway, email, appUrl: config.APP_URL, logger });
+  const cancellation = new CancellationService({ prisma, refunds, email, appUrl: config.APP_URL, logger });
+  const orders = new OrderService({ prisma, cart, gateway, email, kv, appUrl: config.APP_URL, refunds, cancellation, logger });
+  services.push(orders, refunds, cancellation);
   const delivery = new DeliveryService({ prisma, logger });
   routers.push(ordersRouter({ orders, delivery, guards }));
   webhooks.push(webhooksRouter({ orders, secret: config.PAYMONGO_WEBHOOK_SECRET, logger }));
@@ -99,6 +103,10 @@ if (prisma) {
   every(60_000, "the payment-window check", () => orders.expireDue());
   // Shipped 7+ days ago and not confirmed by the buyer: confirm it (the seller is credited).
   every(FIFTEEN_MINUTES, "the automatic delivery confirmation", () => delivery.confirmDue());
+  // Not shipped 3 days after ship-by: cancel and refund; warn the seller when late and the day before.
+  every(FIFTEEN_MINUTES, "the automatic cancel and late warnings", () => cancellation.runDue());
+  // Refunds PayMongo refused (or that were never sent): try again, hourly for 3 days.
+  every(FIFTEEN_MINUTES, "the refund retries", () => refunds.sendDue());
   routers.push(reviewsRouter({ reviews: new ReviewService({ prisma }), guards }));
   routers.push(storesRouter({ stores: new StoreService({ prisma }), guards }));
 
@@ -106,7 +114,7 @@ if (prisma) {
   if (!media) logger.info("CLOUDINARY_URL is not set — uploads (logos, photos, documents) are off");
   const onboarding = new OnboardingService({ prisma, kv, media, email, config, logger });
   services.push(onboarding);
-  const sellerOrders = new SellerOrderService({ prisma, email, appUrl: config.APP_URL, logger });
+  const sellerOrders = new SellerOrderService({ prisma, email, appUrl: config.APP_URL, cancellation, logger });
   services.push(sellerOrders);
   routers.push(sellerRouter({ onboarding, products: new SellerProductService({ prisma, kv, media, logger }), orders: sellerOrders, security, guards, config }));
   const lowStock = new LowStockService({ prisma, email, config, logger });

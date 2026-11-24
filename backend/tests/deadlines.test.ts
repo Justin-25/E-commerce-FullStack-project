@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { csvCell, toCsv } from "../src/lib/csv.js";
-import { autoConfirmAt, earningsAvailableAt, manilaCutoff, manilaDayStart, shipByFor } from "../src/modules/orders/deadlines.js";
+import { buyerCancelMessage, sellerCancelMessage } from "../src/modules/orders/cancelReasons.js";
+import { autoCancelAt, autoConfirmAt, buyerCancelUntil, earningsAvailableAt, manilaCutoff, manilaDayStart, shipByFor } from "../src/modules/orders/deadlines.js";
 import { shortName } from "../src/modules/seller/orders.service.js";
 
 describe("order deadlines (Philippine time, UTC+8)", () => {
@@ -13,6 +14,21 @@ describe("order deadlines (Philippine time, UTC+8)", () => {
     expect(shipByFor(new Date("2026-11-23T16:00:00.000Z")).toISOString()).toBe("2026-11-26T10:00:00.000Z");
     expect(manilaDayStart(new Date("2026-11-23T03:00:00.000Z")).toISOString()).toBe("2026-11-22T16:00:00.000Z");
     expect(manilaCutoff(new Date("2026-11-23T03:00:00.000Z")).toISOString()).toBe("2026-11-23T10:00:00.000Z");
+  });
+
+  it("lets the buyer cancel for an hour after paying, and cancels unshipped packages 3 days after ship-by", () => {
+    expect(buyerCancelUntil(new Date("2026-11-23T05:30:00.000Z")).toISOString()).toBe("2026-11-23T06:30:00.000Z");
+    expect(autoCancelAt(new Date("2026-11-25T10:00:00.000Z")).toISOString()).toBe("2026-11-28T10:00:00.000Z");
+  });
+
+  it("says who cancelled and why, in the buyer's and the seller's words", () => {
+    expect(buyerCancelMessage("SELLER", "OUT_OF_STOCK")).toBe("Cancelled by the seller · out of stock");
+    expect(buyerCancelMessage("SELLER", "BUYER_ASKED")).toBe("Cancelled by the seller · you asked to cancel");
+    expect(buyerCancelMessage("BUYER", "BUYER_CANCELLED")).toBe("You cancelled this order");
+    expect(buyerCancelMessage("SYSTEM", "NOT_SHIPPED_IN_TIME")).toBe("Cancelled automatically · the seller didn't ship in time");
+    expect(buyerCancelMessage(null, null)).toBe("Order cancelled"); // an unpaid order that expired
+    expect(sellerCancelMessage("SELLER", "CANNOT_SHIP_TO_ADDRESS")).toBe("You cancelled it · can't ship to this address");
+    expect(sellerCancelMessage("SYSTEM", "NOT_SHIPPED_IN_TIME")).toBe("Cancelled automatically · not shipped in time");
   });
 
   it("confirms delivery 7 days after shipping, and releases earnings 7 days after delivery", () => {

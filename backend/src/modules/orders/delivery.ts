@@ -2,6 +2,7 @@ import type { DeliveryConfirmation, PrismaClient } from "../../generated/prisma/
 import { AppError } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import { creditDelivery } from "../seller/ledger.js";
+import { closeOrderIfDone } from "./closing.js";
 import { AUTO_CONFIRM_DAYS } from "./deadlines.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -82,11 +83,7 @@ export class DeliveryService {
       });
       await creditDelivery(tx, done, `VD-${done.order.orderNumber}`, at);
 
-      const open = await tx.sellerOrder.count({ where: { orderId: pkg.orderId, status: { in: ["AWAITING_PAYMENT", "PREPARING", "SHIPPED"] } } });
-      if (open === 0) {
-        await tx.order.updateMany({ where: { id: pkg.orderId, status: "PLACED" }, data: { status: "COMPLETED" } });
-        await tx.payment.updateMany({ where: { orderId: pkg.orderId, method: "COD", status: "PENDING" }, data: { status: "PAID", paidAt: at } });
-      }
+      await closeOrderIfDone(tx, pkg.orderId, at);
       return true;
     });
   }

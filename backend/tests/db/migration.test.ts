@@ -43,9 +43,9 @@ beforeAll(async () => {
 afterAll(async () => db?.close());
 
 describe("migration structure", () => {
-  it("creates all 31 tables (30 from milestone 2 + trusted_devices)", async () => {
+  it("creates all 32 tables (30 from milestone 2 + trusted_devices + refunds)", async () => {
     const { n } = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`);
-    expect(n).toBe(31);
+    expect(n).toBe(32);
   });
 
   it("really builds every index the migration declares", async () => {
@@ -62,11 +62,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 46 foreign keys and 42 safety (CHECK) rules", async () => {
+  it("has the 48 foreign keys and 46 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
-    expect(fk.n).toBe(46);
-    expect(chk.n).toBe(42);
+    expect(fk.n).toBe(48);
+    expect(chk.n).toBe(46);
   });
 });
 
@@ -183,6 +183,22 @@ describe("orders, reviews & money", () => {
     const v = await variant(await product(s), s);
     for (const q of [0, 100]) await fails(`INSERT INTO cart_items ("cartId", "variantId", quantity) VALUES ($1, $2, $3)`, [cart.id, v, q], /cart_items_quantity_chk/);
     await fails(`INSERT INTO cart_items ("cartId", "variantId", quantity, "priceAtAddCentavos") VALUES ($1, $2, 1, -1)`, [cart.id, v], /cart_items_price_at_add_chk/);
+  });
+
+  it("keeps cancellations and refunds consistent: who and why together, one refund per package, a sent refund has PayMongo's id", async () => {
+    const s = await store(await user());
+    const o = await order(await user());
+    const pkg = (await one<{ id: string }>(`INSERT INTO seller_orders (id, "orderId", "storeId", "subtotalCentavos", "deliveryCentavos", "updatedAt") VALUES (gen_random_uuid(), $1, $2, 749900, 0, now()) RETURNING id`, [o.id, s])).id;
+    await fails(`UPDATE seller_orders SET "cancelledBy" = 'SELLER' WHERE id = $1`, [pkg], /seller_orders_cancel_chk/); // a reason too
+    await fails(`UPDATE seller_orders SET "cancelledBy" = 'SELLER', "cancelReason" = 'OUT_OF_STOCK' WHERE id = $1`, [pkg], /seller_orders_cancel_chk/); // only when cancelled
+    await db.query(`UPDATE seller_orders SET status = 'CANCELLED', "cancelledAt" = now(), "cancelledBy" = 'SELLER', "cancelReason" = 'OUT_OF_STOCK' WHERE id = $1`, [pkg]);
+    const payment = (await one<{ id: string }>(`INSERT INTO payments (id, "orderId", provider, method, "amountCentavos", status, "updatedAt") VALUES (gen_random_uuid(), $1, 'PAYMONGO', 'GCASH', 749900, 'PAID', now()) RETURNING id`, [o.id])).id;
+    const refund = (amount: number, extra = "", values: unknown[] = []) =>
+      db.query(`INSERT INTO refunds (id, "paymentId", "sellerOrderId", "amountCentavos", reason, "updatedAt"${extra ? `, ${extra}` : ""}) VALUES (gen_random_uuid(), $1, $2, $3, 'PACKAGE_CANCELLED', now()${values.map((_, i) => `, $${i + 4}`).join("")})`, [payment, pkg, amount, ...values]);
+    await expect(refund(0)).rejects.toThrow(/refunds_amount_chk/);
+    await expect(refund(749_900, `status, "sentAt"`, ["SENT", new Date()])).rejects.toThrow(/refunds_sent_chk/);
+    await refund(749_900);
+    await expect(refund(100)).rejects.toThrow(/unique/i); // one refund per package
   });
 
   it("keeps shipping and earnings consistent: tracking for shipped packages, one tracking number per package, one sale per package", async () => {

@@ -40,3 +40,18 @@ export function earningsAvailableAt(deliveredAt: Date): Date {
 
 export const manilaTime = new Intl.DateTimeFormat("en-PH", { timeZone: "Asia/Manila", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 export const manilaDate = new Intl.DateTimeFormat("en-PH", { timeZone: "Asia/Manila", month: "short", day: "numeric" });
+
+/** A buyer can cancel a paid order themselves for this long after paying (while nothing has shipped). */
+export const BUYER_CANCEL_MINUTES = 60;
+/** A package still not shipped this many days after its ship-by time is cancelled automatically... */
+export const AUTO_CANCEL_DAYS = 3;
+/** ...and the seller is warned this many days after ship-by (the day before). */
+export const CANCEL_WARNING_DAYS = 2;
+
+export function buyerCancelUntil(paidAt: Date): Date {
+  return new Date(paidAt.getTime() + BUYER_CANCEL_MINUTES * 60 * 1000);
+}
+
+export function autoCancelAt(shipBy: Date): Date {
+  return new Date(shipBy.getTime() + AUTO_CANCEL_DAYS * DAY_MS);
+}

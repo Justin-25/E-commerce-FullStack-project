@@ -291,6 +291,8 @@ erDiagram
   seller_orders ||--o{ shipment_events : "tracking timeline"
   orders ||--o{ payments : "paid by"
   seller_orders ||--o{ return_requests : "returns"
+  payments ||--o{ refunds : "refunded by"
+  seller_orders ||--o| refunds : "cancelled package"
   carts {
     uuid id PK
     uuid userId FK,UK
@@ -328,6 +330,10 @@ erDiagram
     datetime shippedAt
     datetime deliveredAt
     enum deliveryConfirmedBy "BUYER | AUTO (6c)"
+    enum cancelledBy "SELLER | BUYER | SYSTEM (6c-2)"
+    enum cancelReason "OUT_OF_STOCK | … | NOT_SHIPPED_IN_TIME"
+    datetime lateNotifiedAt "seller warned"
+    datetime cancelWarnedAt "seller warned"
   }
   order_items {
     uuid id PK
@@ -357,6 +363,17 @@ erDiagram
     string failureReason
     datetime paidAt
   }
+  refunds {
+    uuid id PK
+    uuid paymentId FK
+    uuid sellerOrderId FK "UK: one per cancelled package"
+    int amountCentavos "> 0"
+    enum reason "PACKAGE_CANCELLED | DUPLICATE_PAYMENT | LATE_PAYMENT_SOLD_OUT"
+    enum status "PENDING | SENT | FAILED"
+    string providerRefundId UK "PayMongo ref_…"
+    int attempts
+    datetime nextAttemptAt "hourly retries, 3 days"
+  }
   return_requests {
     uuid id PK
     uuid sellerOrderId FK
@@ -372,6 +389,7 @@ erDiagram
 - **Stock can't oversell.** Placing an order takes stock with one atomic update (`stock = stock − qty` only if enough is left), all inside one transaction with the order. A failed or expired payment (15 min) puts the stock back.
 - **Checkout** (milestone 5b, migration `20261122090000_checkout_payments`): `orders.idempotencyKey` is unique per shopper, so "Place order" sent twice can only create one order. Each PayMongo attempt is a `payments` row: `providerRef` = the checkout session (`cs_…`), `providerPaymentId` = the payment that settled it (`pay_…`, used for refunds), `checkoutUrl` = PayMongo's page. An unpaid online order holds its stock until `expiresAt` (15 minutes, stretched while PayMongo is mid-payment, at most 45).
 - **`webhook_events`** (below) stores every PayMongo event ID once, so a repeated webhook can't mark an order paid twice.
+- **Cancellations and refunds** (milestone 6c-2, migration `20261126090000_cancellations_refunds`): a cancelled paid package records `cancelledBy` and `cancelReason` (both or neither, only on CANCELLED: CHECK). `refunds` holds every refund before it's sent: one per cancelled package (unique `sellerOrderId`), the reason, `status` PENDING / SENT / FAILED, `attempts` and `nextAttemptAt` for the hourly retries, and PayMongo's id once sent (CHECK: a SENT refund has it). The code locks the payment row and keeps a payment's refunds within what was paid.
 - **Seller orders** (milestone 6c, migration `20261125090000_seller_orders`): a package that left the seller always has its courier, tracking number and `shippedAt`, and a delivered one its `deliveredAt` (CHECKs). A tracking number is unique per courier (`seller_orders_courier_trackingNumber_key`), so a seller can't reuse another package's number. Delivery is confirmed by the buyer or automatically 7 days after shipping (`deliveryConfirmedBy`), found through `(status, shippedAt)`. `product_variants.lowStockAlertedAt` remembers that the seller was told a variant is below 10 (cleared when restocked).
 
 ## 5 · Seller money & admin

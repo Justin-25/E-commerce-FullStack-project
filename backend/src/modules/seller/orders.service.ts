@@ -7,10 +7,20 @@ import { PLATFORM_FEE_RATE } from "../../lib/fees.js";
 import { likeLiteral } from "../../lib/like.js";
 import type { Logger } from "../../lib/logger.js";
 import { isUniqueViolation } from "../../lib/prismaErrors.js";
-import { AUTO_CONFIRM_DAYS, autoConfirmAt, earningsAvailableAt, manilaCutoff } from "../orders/deadlines.js";
+import { sellerCancelMessage } from "../orders/cancelReasons.js";
+import type { CancellationService } from "../orders/cancellation.js";
+import { AUTO_CONFIRM_DAYS, autoCancelAt, autoConfirmAt, earningsAvailableAt, manilaCutoff } from "../orders/deadlines.js";
 import { packageShippedEmail } from "../orders/orders.emails.js";
 import { sellerStore, type SellerStore } from "./access.js";
-import { EXPORT_MAX_ROWS, SELLER_ORDERS_PAGE_SIZE, type SellerOrderExportQuery, type SellerOrderListQuery, type SellerOrderTab, type ShipmentInput } from "./orders.schemas.js";
+import {
+  EXPORT_MAX_ROWS,
+  SELLER_ORDERS_PAGE_SIZE,
+  type SellerCancelInput,
+  type SellerOrderExportQuery,
+  type SellerOrderListQuery,
+  type SellerOrderTab,
+  type ShipmentInput
+} from "./orders.schemas.js";
 
 const HOUR_MS = 60 * 60 * 1000;
 const notFound = () => new AppError(404, "NOT_FOUND", "This order doesn't exist.");
@@ -63,6 +73,12 @@ export interface SellerOrderView {
   suggestedWeightGrams: number | null;
   canShip: boolean;
   canEditShipment: boolean;
+  /** "Cancel order": still to ship. */
+  canCancel: boolean;
+  /** While to ship: when it's cancelled automatically if it isn't shipped (3 days after ship-by). */
+  autoCancelAt: string | null;
+  /** Who cancelled it and why. */
+  cancellation: { by: "seller" | "buyer" | "system"; reason: string; message: string; at: string } | null;
   items: {
     id: string;
     productId: string;
@@ -161,6 +177,8 @@ export class SellerOrderService {
       prisma: PrismaClient;
       email: EmailSender;
       appUrl: string;
+      /** "Cancel order" (shared with the buyer's cancel and the automatic one). */
+      cancellation: CancellationService;
       logger?: Logger;
       now?: () => Date;
     }
@@ -302,7 +320,7 @@ export class SellerOrderService {
       const how = so.deliveryConfirmedBy === "BUYER" ? " · the buyer confirmed it" : so.deliveryConfirmedBy === "AUTO" ? ` · confirmed automatically ${AUTO_CONFIRM_DAYS} days after shipping` : "";
       timeline.push({ type: "delivered", message: `Delivered${how}`, at: so.deliveredAt.toISOString() });
     }
-    if (so.cancelledAt) timeline.push({ type: "cancelled", message: "Cancelled", at: so.cancelledAt.toISOString() });
+    if (so.cancelledAt) timeline.push({ type: "cancelled", message: sellerCancelMessage(so.cancelledBy, so.cancelReason), at: so.cancelledAt.toISOString() });
 
     const autoAt = so.status === "SHIPPED" && so.shippedAt ? autoConfirmAt(so.shippedAt) : null;
     const next =
@@ -331,6 +349,17 @@ export class SellerOrderService {
       suggestedWeightGrams,
       canShip: so.status === "PREPARING",
       canEditShipment: so.status === "SHIPPED",
+      canCancel: so.status === "PREPARING",
+      autoCancelAt: so.status === "PREPARING" && so.shipBy ? autoCancelAt(so.shipBy).toISOString() : null,
+      cancellation:
+        so.cancelledBy && so.cancelReason && so.cancelledAt
+          ? {
+              by: so.cancelledBy === "SELLER" ? "seller" : so.cancelledBy === "BUYER" ? "buyer" : "system",
+              reason: so.cancelReason,
+              message: sellerCancelMessage(so.cancelledBy, so.cancelReason),
+              at: so.cancelledAt.toISOString()
+            }
+          : null,
       items: so.items.map((i) => ({
         id: i.id,
         productId: i.productId,
@@ -427,6 +456,24 @@ export class SellerOrderService {
         updated
       )
     );
+  }
+
+  // --- Cancel order ---------------------------------------------------------------
+
+  /**
+   * "Cancel order" with a reason, while it's still to ship: the stock goes back (or to 0 for "out of
+   * stock"), the buyer is refunded and told why. Sending it again changes nothing. A suspended store
+   * can still cancel what it can't ship.
+   */
+  async cancel(userId: string, id: string, input: SellerCancelInput): Promise<SellerOrderView> {
+    const { prisma } = this.deps;
+    const store = await sellerStore(prisma, userId, { write: false });
+    const found = await prisma.sellerOrder.findFirst({ where: { id, storeId: store.id, order: { placedAt: { not: null } } }, select: { status: true } });
+    if (!found) throw notFound();
+    if (found.status === "PREPARING") await this.deps.cancellation.cancelPackage(id, "SELLER", input.reason);
+    const now = await prisma.sellerOrder.findUniqueOrThrow({ where: { id }, select: { status: true } });
+    if (now.status !== "CANCELLED") throw conflict("already_shipped", "This package has already shipped, so it can't be cancelled.");
+    return this.load(store, id);
   }
 
   // --- Export CSV -----------------------------------------------------------------

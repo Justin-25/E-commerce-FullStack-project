@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { MAX_PAGE } from "../catalog/catalog.schemas.js";
+import { SELLER_CANCEL_REASONS } from "../orders/cancelReasons.js";
 
 /** "Select courier": the couriers sellers in the Philippines ship with. */
 export const COURIERS = ["J&T Express", "LBC", "Ninja Van", "Flash Express", "2GO Express", "GoGo Xpress"] as const;
@@ -53,6 +54,12 @@ export const shipmentSchema = z.strictObject({
     .default(null)
 });
 
+/** "Cancel order" (the Modal's reasons). */
+export const sellerCancelSchema = z.strictObject({
+  reason: z.enum(SELLER_CANCEL_REASONS, { error: "Choose a reason" })
+});
+
 export type SellerOrderListQuery = z.infer<typeof sellerOrderListSchema>;
 export type SellerOrderExportQuery = z.infer<typeof sellerOrderExportSchema>;
 export type ShipmentInput = z.infer<typeof shipmentSchema>;
+export type SellerCancelInput = z.infer<typeof sellerCancelSchema>;
