@@ -17,10 +17,19 @@ export interface KeyValueStore {
   /** Seconds until the key expires, or 0 if it doesn't exist. */
   ttl(key: string): Promise<number>;
   delete(...keys: string[]): Promise<void>;
+  /**
+   * Adds a member to a count of unique members (Redis HyperLogLog: about 12 KB at most, whatever
+   * the count, about 1% error). The expiry is set when the count is created.
+   */
+  countUnique(key: string, member: string, ttlSeconds: number): Promise<void>;
+  /** How many unique members a count has (0 if it doesn't exist). */
+  uniqueCount(key: string): Promise<number>;
 }
 
 // INCR + EXPIRE in one atomic step, so a crash between them can't leave a counter that never expires.
 const INCREMENT_SCRIPT = `local n = redis.call('INCR', KEYS[1]) if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end return n`;
+// PFADD + EXPIRE (only if it has none yet) in one atomic step, for the same reason.
+const COUNT_UNIQUE_SCRIPT = `redis.call('PFADD', KEYS[1], ARGV[1]) if redis.call('TTL', KEYS[1]) < 0 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end return 1`;
 
 /** Every failure (timeout, connection down) comes out as DependencyUnavailableError, so callers can tell it apart from bugs. */
 export class RedisKv implements KeyValueStore {
@@ -58,6 +67,14 @@ export class RedisKv implements KeyValueStore {
     return this.run(async () => {
       if (keys.length) await this.redis.del(...keys);
     });
+  }
+  countUnique(key: string, member: string, ttlSeconds: number) {
+    return this.run(async () => {
+      await this.redis.eval(COUNT_UNIQUE_SCRIPT, 1, key, member, ttlSeconds);
+    });
+  }
+  uniqueCount(key: string) {
+    return this.run(() => this.redis.pfcount(key));
   }
 }
 
@@ -97,6 +114,24 @@ export class MemoryKv implements KeyValueStore {
     return entry ? Math.ceil((entry.expiresAt - this.now()) / 1000) : 0;
   }
   async delete(...keys: string[]) {
-    for (const k of keys) this.data.delete(k);
+    for (const k of keys) {
+      this.data.delete(k);
+      this.sets.delete(k);
+    }
+  }
+  /** Exact here (a Set), so tests can count precisely; Redis counts approximately. */
+  private readonly sets = new Map<string, { members: Set<string>; expiresAt: number }>();
+  async countUnique(key: string, member: string, ttlSeconds: number) {
+    const entry = this.liveSet(key) ?? { members: new Set<string>(), expiresAt: this.now() + ttlSeconds * 1000 };
+    entry.members.add(member);
+    this.sets.set(key, entry);
+  }
+  async uniqueCount(key: string) {
+    return this.liveSet(key)?.members.size ?? 0;
+  }
+  private liveSet(key: string) {
+    const entry = this.sets.get(key);
+    if (entry && entry.expiresAt <= this.now()) this.sets.delete(key);
+    return this.sets.get(key);
   }
 }

@@ -1,10 +1,11 @@
 import { Router } from "express";
 import { publicCache } from "../../lib/httpCache.js";
 import { cardsQuerySchema, productIdSchema, searchQuerySchema } from "./catalog.schemas.js";
+import type { VisitService } from "../stores/visits.js";
 import type { CatalogService } from "./catalog.service.js";
 
 /** Public catalog: no sign-in, same answer for everyone, so browsers and CDNs may keep it briefly. */
-export function catalogRouter({ catalog }: { catalog: CatalogService }): Router {
+export function catalogRouter({ catalog, visits }: { catalog: CatalogService; visits: VisitService }): Router {
   const router = Router();
 
   router.get("/categories", async (_req, res) => {
@@ -27,6 +28,7 @@ export function catalogRouter({ catalog }: { catalog: CatalogService }): Router 
 
   router.get("/products/:id", async (req, res) => {
     const product = await catalog.product(productIdSchema.parse(req.params).id);
+    void visits.record(product.store.id, { ip: req.ip, userAgent: req.get("user-agent") }); // the seller's "Store visits"
     publicCache(res);
     res.json({ product });
   });

@@ -7,6 +7,7 @@
 import { existsSync } from "node:fs";
 import { createPrisma } from "../src/lib/prisma.js";
 import { seedDemoData } from "./demo-data.js";
+import { seedDemoPayouts } from "./demo-payouts.js";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
 const url = process.env.DATABASE_URL;
@@ -18,6 +19,11 @@ try {
   const counts = await Promise.all([prisma.category.count(), prisma.store.count(), prisma.product.count(), prisma.productVariant.count(), prisma.user.count()]);
   console.log(`Seeded: ${counts[0]} categories, ${counts[1]} stores, ${counts[2]} products, ${counts[3]} variants, ${counts[4]} users`);
   console.log(`Demo shoppers: ${demo.shoppers}, with ${demo.orders} delivered orders and ${demo.reviews} reviews (ratings recomputed)`);
+  const key = process.env.DATA_ENCRYPTION_KEY;
+  if (key) {
+    const payouts = await seedDemoPayouts(prisma, key);
+    console.log(`Demo payouts: ${payouts.payouts} weekly payouts for ${payouts.stores} stores`);
+  } else console.log("Demo payouts skipped: DATA_ENCRYPTION_KEY is not set (npm run secrets)");
 } finally {
   await prisma.$disconnect();
 }

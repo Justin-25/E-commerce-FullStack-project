@@ -31,6 +31,9 @@ import { DeliveryService } from "../../src/modules/orders/delivery.js";
 import { SellerOrderService } from "../../src/modules/seller/orders.service.js";
 import { CancellationService } from "../../src/modules/orders/cancellation.js";
 import { RefundService } from "../../src/modules/orders/refunds.js";
+import { VisitService } from "../../src/modules/stores/visits.js";
+import { DashboardService } from "../../src/modules/seller/dashboard.service.js";
+import { PayoutService } from "../../src/modules/seller/payouts.service.js";
 
 /**
  * The real catalog, reviews and store routes on a fresh test database filled with the
@@ -49,6 +52,8 @@ export async function createCatalogHarness() {
     lowStock?: LowStockService;
     refunds?: RefundService;
     cancellation?: CancellationService;
+    visits?: VisitService;
+    payouts?: PayoutService;
   } = {};
   /** Moves the clock of the background jobs and Seller Center orders (a day, a week) without waiting. */
   const clock = { offsetMs: 0 };
@@ -78,13 +83,17 @@ export async function createCatalogHarness() {
       const delivery = new DeliveryService({ prisma, logger, now });
       services.delivery = delivery;
       const sellerOrders = new SellerOrderService({ prisma, email: deps.email, appUrl: deps.config.APP_URL, cancellation: orderServices(deps).cancellation, logger, now });
+      const visits = new VisitService({ prisma, kv, secret: deps.config.CODE_HASH_SECRET, logger, now });
+      services.visits = visits;
+      const payouts = new PayoutService({ prisma, email: deps.email, appUrl: deps.config.APP_URL, logger, now });
+      services.payouts = payouts;
       services.sellerOrders = sellerOrders;
       services.lowStock = new LowStockService({ prisma, email: deps.email, config: deps.config, logger, now });
       return [
         notificationsRouter({ priceDrops, guards }),
-        catalogRouter({ catalog }),
+        catalogRouter({ catalog, visits }),
         reviewsRouter({ reviews: new ReviewService({ prisma }), guards }),
-        storesRouter({ stores: new StoreService({ prisma }), guards }),
+        storesRouter({ stores: new StoreService({ prisma }), guards, visits }),
         homeRouter({ home: new HomeService({ prisma, kv, catalog, logger }) }),
         wishlistRouter({ wishlist: new WishlistService({ prisma, catalog }), guards }),
         cartRouter({ cart: new CartService({ prisma }), recommendations: new RecommendationService({ prisma, catalog }), guards }),
@@ -94,6 +103,8 @@ export async function createCatalogHarness() {
           onboarding: new OnboardingService({ prisma, kv, media, email: deps.email, config: deps.config, logger }),
           products: new SellerProductService({ prisma, kv, media, logger }),
           orders: sellerOrders,
+          dashboard: new DashboardService({ prisma, visits, now }),
+          payouts,
           security: new SecurityService({ prisma, kv, email: deps.email, config: deps.config, logger }),
           guards,
           config: deps.config
@@ -119,7 +130,7 @@ export async function createCatalogHarness() {
     if (!s) throw new Error(`no ${name} service yet`);
     return s as NonNullable<(typeof services)[K]>;
   };
-  return { ...h, demo, idOf, paymongo, media, orders, priceDrops, clock, delivery: service("delivery"), sellerOrders: service("sellerOrders"), lowStock: service("lowStock"), refunds: service("refunds"), cancellation: service("cancellation") };
+  return { ...h, demo, idOf, paymongo, media, orders, priceDrops, clock, delivery: service("delivery"), sellerOrders: service("sellerOrders"), lowStock: service("lowStock"), refunds: service("refunds"), cancellation: service("cancellation"), visits: service("visits"), payouts: service("payouts") };
 }
 
 export type CatalogHarness = Awaited<ReturnType<typeof createCatalogHarness>>;

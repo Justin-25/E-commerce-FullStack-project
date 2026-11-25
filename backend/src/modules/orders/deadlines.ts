@@ -55,3 +55,25 @@ export function buyerCancelUntil(paidAt: Date): Date {
 export function autoCancelAt(shipBy: Date): Date {
   return new Date(shipBy.getTime() + AUTO_CANCEL_DAYS * DAY_MS);
 }
+
+/** Automatic payouts: every Monday at 9:00 AM, Manila time. */
+export const PAYOUT_HOUR = 9;
+
+/** The latest Monday 9:00 AM (Manila) at or before `at`. */
+export function lastPayoutTime(at: Date): Date {
+  const dayStart = manilaDayStart(at);
+  const weekday = new Date(dayStart.getTime() + MANILA_OFFSET_MS).getUTCDay(); // 0 = Sunday … 1 = Monday
+  const monday = dayStart.getTime() - ((weekday + 6) % 7) * DAY_MS + PAYOUT_HOUR * HOUR_MS;
+  return new Date(monday <= at.getTime() ? monday : monday - 7 * DAY_MS);
+}
+
+/** The next Monday 9:00 AM (Manila) after `at`. */
+export function nextPayoutTime(at: Date): Date {
+  return new Date(lastPayoutTime(at).getTime() + 7 * DAY_MS);
+}
+
+/** "2026-11": the Philippine calendar month `at` falls in. */
+export const manilaMonth = (at: Date) => new Date(at.getTime() + MANILA_OFFSET_MS).toISOString().slice(0, 7);
+
+/** The first moment of a Philippine calendar month ("2026-11" → Nov 1, 00:00 Manila). */
+export const manilaMonthStart = (month: string) => new Date(Date.parse(`${month}-01T00:00:00.000Z`) - MANILA_OFFSET_MS);

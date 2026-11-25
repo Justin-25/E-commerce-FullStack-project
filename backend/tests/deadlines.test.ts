@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { csvCell, toCsv } from "../src/lib/csv.js";
 import { buyerCancelMessage, sellerCancelMessage } from "../src/modules/orders/cancelReasons.js";
-import { autoCancelAt, autoConfirmAt, buyerCancelUntil, earningsAvailableAt, manilaCutoff, manilaDayStart, shipByFor } from "../src/modules/orders/deadlines.js";
+import {
+  autoCancelAt,
+  autoConfirmAt,
+  buyerCancelUntil,
+  earningsAvailableAt,
+  lastPayoutTime,
+  manilaCutoff,
+  manilaDayStart,
+  manilaMonth,
+  manilaMonthStart,
+  nextPayoutTime,
+  shipByFor
+} from "../src/modules/orders/deadlines.js";
+import { manilaDay } from "../src/modules/stores/visits.js";
 import { shortName } from "../src/modules/seller/orders.service.js";
 
 describe("order deadlines (Philippine time, UTC+8)", () => {
@@ -29,6 +42,17 @@ describe("order deadlines (Philippine time, UTC+8)", () => {
     expect(buyerCancelMessage(null, null)).toBe("Order cancelled"); // an unpaid order that expired
     expect(sellerCancelMessage("SELLER", "CANNOT_SHIP_TO_ADDRESS")).toBe("You cancelled it · can't ship to this address");
     expect(sellerCancelMessage("SYSTEM", "NOT_SHIPPED_IN_TIME")).toBe("Cancelled automatically · not shipped in time");
+  });
+
+  it("pays out on Mondays at 9:00 AM Manila (01:00 UTC); days and months are Philippine ones", () => {
+    // Nov 23, 2026 is a Monday.
+    expect(lastPayoutTime(new Date("2026-11-23T00:59:00.000Z")).toISOString()).toBe("2026-11-16T01:00:00.000Z"); // 8:59 AM: last week's
+    expect(lastPayoutTime(new Date("2026-11-23T01:00:00.000Z")).toISOString()).toBe("2026-11-23T01:00:00.000Z");
+    expect(lastPayoutTime(new Date("2026-11-29T15:59:00.000Z")).toISOString()).toBe("2026-11-23T01:00:00.000Z"); // Sunday 11:59 PM
+    expect(nextPayoutTime(new Date("2026-11-23T01:00:00.000Z")).toISOString()).toBe("2026-11-30T01:00:00.000Z");
+    expect(manilaDay(new Date("2026-11-23T16:30:00.000Z"))).toBe("2026-11-24"); // 12:30 AM in Manila
+    expect(manilaMonth(new Date("2026-11-30T16:30:00.000Z"))).toBe("2026-12");
+    expect(manilaMonthStart("2026-12").toISOString()).toBe("2026-11-30T16:00:00.000Z");
   });
 
   it("confirms delivery 7 days after shipping, and releases earnings 7 days after delivery", () => {

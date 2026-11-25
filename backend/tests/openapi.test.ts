@@ -31,6 +31,9 @@ import type { OnboardingService } from "../src/modules/seller/onboarding.service
 import type { SellerProductService } from "../src/modules/seller/products.service.js";
 import type { SellerOrderService } from "../src/modules/seller/orders.service.js";
 import type { DeliveryService } from "../src/modules/orders/delivery.js";
+import type { VisitService } from "../src/modules/stores/visits.js";
+import type { DashboardService } from "../src/modules/seller/dashboard.service.js";
+import type { PayoutService } from "../src/modules/seller/payouts.service.js";
 import { sellerRouter } from "../src/modules/seller/seller.routes.js";
 import { notificationsRouter } from "../src/modules/notifications/notifications.routes.js";
 import type { PriceDropService } from "../src/modules/notifications/priceDrops.service.js";
@@ -79,16 +82,16 @@ describe("openapi.yaml", () => {
     const guards = createAuthGuards({ tokens, kv: new MemoryKv() });
     const routers = [
       auth,
-      catalogRouter({ catalog: {} as CatalogService }),
+      catalogRouter({ catalog: {} as CatalogService, visits: {} as VisitService }),
       reviewsRouter({ reviews: {} as ReviewService, guards }),
-      storesRouter({ stores: {} as StoreService, guards }),
+      storesRouter({ stores: {} as StoreService, guards, visits: {} as VisitService }),
       homeRouter({ home: {} as HomeService }),
       wishlistRouter({ wishlist: {} as WishlistService, guards }),
       cartRouter({ cart: {} as CartService, recommendations: {} as RecommendationService, guards }),
       addressesRouter({ addresses: {} as AddressService, guards }),
       ordersRouter({ orders: {} as OrderService, delivery: {} as DeliveryService, guards }),
       webhooksRouter({ orders: {} as OrderService, secret: undefined }),
-      sellerRouter({ onboarding: {} as OnboardingService, products: {} as SellerProductService, orders: {} as SellerOrderService, security: {} as SecurityService, guards, config }),
+      sellerRouter({ onboarding: {} as OnboardingService, products: {} as SellerProductService, orders: {} as SellerOrderService, dashboard: {} as DashboardService, payouts: {} as PayoutService, security: {} as SecurityService, guards, config }),
       notificationsRouter({ priceDrops: {} as PriceDropService, guards })
     ];
     const inCode = routers.flatMap((r) => routesOf(r, "/api/v1"));

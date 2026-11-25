@@ -403,6 +403,11 @@ export async function seedDemoReviews(prisma: PrismaClient, products: DemoProduc
     async (tx) => {
       // Replace the demo shoppers' previous run (their order items go with their seller orders).
       await tx.review.deleteMany({ where: { userId: { in: shopperIds } } });
+      // The demo stores' payouts go too (demo-payouts.ts makes them again from the new history).
+      const demoStores = [...new Set(rows.map((r) => r.storeId))];
+      await tx.ledgerEntry.deleteMany({ where: { storeId: { in: demoStores }, type: "PAYOUT" } });
+      await tx.ledgerEntry.updateMany({ where: { storeId: { in: demoStores }, payoutId: { not: null } }, data: { payoutId: null } });
+      await tx.payout.deleteMany({ where: { storeId: { in: demoStores } } });
       await tx.ledgerEntry.deleteMany({ where: { sellerOrder: { order: { userId: { in: shopperIds } } } } });
       await tx.sellerOrder.deleteMany({ where: { order: { userId: { in: shopperIds } } } });
       await tx.order.deleteMany({ where: { userId: { in: shopperIds } } });

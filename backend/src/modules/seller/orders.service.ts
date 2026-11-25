@@ -140,6 +140,39 @@ const STATUS_LABEL: Record<SellerOrderStatus, string> = {
 };
 const METHOD_NAME: Record<PaymentMethod, string> = { GCASH: "GCash", MAYA: "Maya", CARD: "card", COD: "cash on delivery" };
 
+/** What a list row needs from the database. */
+export const ROW_INCLUDE = {
+  order: { select: { orderNumber: true, placedAt: true, paymentMethod: true, shippingAddress: true } },
+  items: { orderBy: [{ createdAt: "asc" as const }, { id: "asc" as const }], select: { productTitle: true, variantName: true, imageUrl: true, quantity: true } }
+} satisfies Prisma.SellerOrderInclude;
+
+/** One row of the orders list (also the dashboard's Recent orders): "Maria S.", the first item, the totals. */
+export function sellerOrderRow(so: Prisma.SellerOrderGetPayload<{ include: typeof ROW_INCLUDE }>, now: Date): SellerOrderRow {
+  const address = addressOf(so.order.shippingAddress);
+  const [first] = so.items;
+  return {
+    id: so.id,
+    number: orderNumber(so.order.orderNumber),
+    placedAt: (so.order.placedAt ?? so.createdAt).toISOString(),
+    customer: { name: shortName(address.fullName ?? ""), city: address.city ?? "" },
+    items: {
+      first: { title: first?.productTitle ?? "", variantName: first?.variantName ?? "", imageUrl: first?.imageUrl ?? null, quantity: first?.quantity ?? 0 },
+      moreLines: Math.max(0, so.items.length - 1),
+      units: so.items.reduce((n, i) => n + i.quantity, 0)
+    },
+    subtotalCentavos: so.subtotalCentavos,
+    deliveryOption: so.deliveryOption,
+    paymentMethod: so.order.paymentMethod,
+    status: so.status,
+    shipBy: so.shipBy?.toISOString() ?? null,
+    late: so.status === "PREPARING" && so.shipBy !== null && so.shipBy <= now,
+    courier: so.courier,
+    trackingNumber: so.trackingNumber,
+    shippedAt: so.shippedAt?.toISOString() ?? null,
+    deliveredAt: so.deliveredAt?.toISOString() ?? null
+  };
+}
+
 /** "Maria Santos" → "Maria S."; one word stays as it is. */
 export function shortName(fullName: string): string {
   const words = fullName.trim().split(/\s+/).filter(Boolean);
@@ -217,10 +250,7 @@ export class SellerOrderService {
         orderBy: query.tab === "to_ship" ? [{ shipBy: "asc" }, { createdAt: "asc" }, { id: "asc" }] : [{ createdAt: "desc" }, { id: "desc" }],
         skip: (query.page - 1) * SELLER_ORDERS_PAGE_SIZE,
         take: SELLER_ORDERS_PAGE_SIZE,
-        include: {
-          order: { select: { orderNumber: true, placedAt: true, paymentMethod: true, shippingAddress: true } },
-          items: { orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: { productTitle: true, variantName: true, imageUrl: true, quantity: true } }
-        }
+        include: ROW_INCLUDE
       }),
       prisma.sellerOrder.count({ where }),
       count("to_ship"),
@@ -231,31 +261,7 @@ export class SellerOrderService {
       prisma.sellerOrder.count({ where: { AND: [this.where(store.id, "to_ship"), { shipBy: { lte: now } }] } })
     ]);
 
-    const items: SellerOrderRow[] = rows.map((so) => {
-      const address = addressOf(so.order.shippingAddress);
-      const [first] = so.items;
-      return {
-        id: so.id,
-        number: orderNumber(so.order.orderNumber),
-        placedAt: (so.order.placedAt ?? so.createdAt).toISOString(),
-        customer: { name: shortName(address.fullName ?? ""), city: address.city ?? "" },
-        items: {
-          first: { title: first?.productTitle ?? "", variantName: first?.variantName ?? "", imageUrl: first?.imageUrl ?? null, quantity: first?.quantity ?? 0 },
-          moreLines: Math.max(0, so.items.length - 1),
-          units: so.items.reduce((n, i) => n + i.quantity, 0)
-        },
-        subtotalCentavos: so.subtotalCentavos,
-        deliveryOption: so.deliveryOption,
-        paymentMethod: so.order.paymentMethod,
-        status: so.status,
-        shipBy: so.shipBy?.toISOString() ?? null,
-        late: so.status === "PREPARING" && so.shipBy !== null && so.shipBy <= now,
-        courier: so.courier,
-        trackingNumber: so.trackingNumber,
-        shippedAt: so.shippedAt?.toISOString() ?? null,
-        deliveredAt: so.deliveredAt?.toISOString() ?? null
-      };
-    });
+    const items: SellerOrderRow[] = rows.map((so) => sellerOrderRow(so, now));
     return {
       items,
       counts: { toShip, shipped, delivered, all },

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.12.0
+  version: 0.13.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -2157,6 +2157,84 @@ paths:
           description: CONFLICT (`already_shipped`). It has shipped; it can't be cancelled.
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
+  /api/v1/seller/dashboard:
+    get:
+      summary: Dashboard (last 7 or 30 days)
+      description: |
+        Sales (items in paid packages, before Vendora's fee; cancelled ones left out), orders (and how many are to
+        ship today), store visits and rating, each against the period before; sales per Philippine day; the 5 latest
+        orders; and what needs attention now. Store visits are unique visitors per store per day (store page and its
+        product pages), counted without cookies or personal data.
+      operationId: getSellerDashboard
+      tags: [seller]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: period, in: query, schema: { type: string, enum: [7d, 30d], default: 7d } }
+      responses:
+        "200":
+          description: The dashboard.
+          content: { application/json: { schema: { $ref: "#/components/schemas/SellerDashboard" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+
+  /api/v1/seller/payouts:
+    get:
+      summary: Payouts (balance, payout account, history)
+      description: |
+        Available now (released 7 days after delivery, not paid out yet), waiting (on hold, plus paid orders not delivered
+        yet, what the seller will get from them), paid out this month, the payout account, the next automatic payout
+        (every Monday 9:00 AM Manila) and the history, newest first, 20 a page.
+      operationId: getSellerPayouts
+      tags: [seller]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 1 } }
+      responses:
+        "200":
+          description: The payouts page.
+          content: { application/json: { schema: { $ref: "#/components/schemas/SellerPayouts" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+    post:
+      summary: Request payout
+      description: |
+        Pays out everything available now (at least ₱100) to the verified payout account: the lines are linked to the
+        payout in one transaction with the store locked, so nothing is paid twice, and one payout can be in progress at a
+        time. The seller is emailed. The transfer is simulated until milestone 7.
+      operationId: requestPayout
+      tags: [seller]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "201":
+          description: The payouts page, with the new payout first.
+          content: { application/json: { schema: { $ref: "#/components/schemas/SellerPayouts" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+        "409":
+          description: 'CONFLICT, with `details.reason`: below_minimum, in_progress, no_account, account_not_verified, store_not_approved.'
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/seller/payouts/statement:
+    get:
+      summary: Download statements (one month)
+      description: Every ledger line of one Philippine calendar month as CSV (sales, fees, payouts, adjustments; amounts in pesos, negative for money out).
+      operationId: downloadStatement
+      tags: [seller]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: month, in: query, required: true, schema: { type: string, pattern: "^20[0-9]{2}-(0[1-9]|1[0-2])$" }, example: 2026-11 }
+      responses:
+        "200":
+          description: 'The file ("vendora-statement-2026-11.csv", as an attachment).'
+          headers:
+            Content-Disposition: { schema: { type: string }, example: attachment; filename=vendora-statement-2026-11.csv }
+          content: { text/csv: { schema: { type: string } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerForbidden" }
+
   /api/v1/notifications/preferences:
     get:
       summary: My email settings
@@ -3421,6 +3499,84 @@ components:
           description: '"Waiting for you to ship" by the ship-by time, "Waiting for the buyer to confirm delivery", or when the earnings are released.'
           properties: { message: { type: string }, by: { type: string, format: date-time } }
         store: { type: object, description: For the packing slip., properties: { name: { type: string }, shipsFrom: { type: [string, "null"] } } }
+    SellerDashboard:
+      type: object
+      required: [store, period, stats, chart, recentOrders, tasks]
+      properties:
+        store: { type: object, properties: { name: { type: string }, status: { type: string, enum: [PENDING, APPROVED, REJECTED, SUSPENDED] } } }
+        period: { type: object, properties: { days: { type: integer, enum: [7, 30] }, from: { type: string, format: date-time }, to: { type: string, format: date-time } } }
+        stats:
+          type: object
+          description: '`change` is the percent change against the period before (null when the period before had none); rating.change is in stars.'
+          properties:
+            sales: { type: object, properties: { centavos: { type: integer }, previousCentavos: { type: integer }, change: { type: [number, "null"] } } }
+            orders: { type: object, properties: { count: { type: integer }, previous: { type: integer }, change: { type: [number, "null"] }, toShipToday: { type: integer, description: Due by today's 6:00 PM, late ones included. } } }
+            visits: { type: object, properties: { count: { type: integer }, previous: { type: integer }, change: { type: [number, "null"] } } }
+            rating: { type: object, properties: { average: { type: number }, count: { type: integer }, change: { type: [number, "null"] } } }
+        chart:
+          type: object
+          properties:
+            days: { type: array, items: { type: object, properties: { day: { type: string, example: 2026-11-25 }, salesCentavos: { type: integer } } } }
+            totalCentavos: { type: integer }
+            bestDay: { type: [string, "null"] }
+        recentOrders: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/SellerOrderList/properties/items/items" } }
+        tasks:
+          type: array
+          description: Needs attention, most urgent first.
+          items:
+            type: object
+            properties:
+              kind: { type: string, enum: [store_review, store_suspended, late, ship_today, out_of_stock, low_stock, payout_account] }
+              count: { type: integer }
+              title: { type: string, example: 3 orders to ship today }
+              detail: { type: string, example: "Ship by Nov 25, 6:00 PM." }
+    SellerPayouts:
+      type: object
+      required: [available, waiting, paidThisMonth, account, schedule, canRequest, cannotRequest, history]
+      properties:
+        available: { type: object, properties: { centavos: { type: integer } } }
+        waiting: { type: object, properties: { centavos: { type: integer }, orders: { type: integer } } }
+        paidThisMonth: { type: object, properties: { month: { type: string, example: 2026-11 }, centavos: { type: integer }, previousCentavos: { type: integer }, change: { type: [number, "null"] } } }
+        account:
+          type: [object, "null"]
+          properties:
+            method: { type: string, enum: [GCASH, BANK] }
+            bankName: { type: [string, "null"] }
+            accountName: { type: string }
+            last4: { type: string }
+            verified: { type: boolean }
+            verifiedAt: { type: [string, "null"], format: date-time }
+        schedule: { type: object, properties: { nextAutomaticAt: { type: string, format: date-time }, minimumCentavos: { type: integer, const: 10000 } } }
+        canRequest: { type: boolean }
+        cannotRequest:
+          type: [object, "null"]
+          properties:
+            reason: { type: string, enum: [below_minimum, in_progress, no_account, account_not_verified, store_not_approved] }
+            message: { type: string }
+        history:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  reference: { type: string, example: PO-2026-1123-K4Q2 }
+                  status: { type: string, enum: [PROCESSING, PAID, FAILED] }
+                  createdAt: { type: string, format: date-time }
+                  paidAt: { type: [string, "null"], format: date-time }
+                  failureReason: { type: [string, "null"] }
+                  orders: { type: integer }
+                  grossCentavos: { type: integer }
+                  feesCentavos: { type: integer }
+                  amountCentavos: { type: integer }
+                  method: { type: string, enum: [GCASH, BANK] }
+                  accountLast4: { type: string }
+            page: { type: integer }
+            pageSize: { type: integer, const: 20 }
+            totalItems: { type: integer }
+            totalPages: { type: integer }
     SellerCancelInput:
       type: object
       additionalProperties: false

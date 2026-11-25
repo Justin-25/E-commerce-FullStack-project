@@ -5,7 +5,9 @@ import { signedInUserId, type AuthGuards } from "../../middleware/auth.js";
 import { clientInfoFrom } from "../auth/events.js";
 import type { SecurityService } from "../auth/security.service.js";
 import type { OnboardingService } from "./onboarding.service.js";
-import { sellerCancelSchema, sellerOrderExportSchema, sellerOrderIdSchema, sellerOrderListSchema, shipmentSchema } from "./orders.schemas.js";
+import { dashboardQuerySchema, type DashboardService } from "./dashboard.service.js";
+import { payoutsQuerySchema, sellerCancelSchema, sellerOrderExportSchema, sellerOrderIdSchema, sellerOrderListSchema, shipmentSchema, statementQuerySchema } from "./orders.schemas.js";
+import type { PayoutService } from "./payouts.service.js";
 import type { SellerOrderService } from "./orders.service.js";
 import { productIdSchema, productInputSchema, sellerProductListSchema } from "./products.schemas.js";
 import type { SellerProductService } from "./products.service.js";
@@ -21,6 +23,8 @@ export function sellerRouter({
   onboarding,
   products,
   orders,
+  dashboard,
+  payouts,
   security,
   guards,
   config
@@ -28,6 +32,8 @@ export function sellerRouter({
   onboarding: OnboardingService;
   products: SellerProductService;
   orders: SellerOrderService;
+  dashboard: DashboardService;
+  payouts: PayoutService;
   security: Pick<SecurityService, "requireConfirmed">;
   guards: AuthGuards;
   config: Pick<Config, "GEO_HEADERS">;
@@ -135,6 +141,25 @@ export function sellerRouter({
   router.post("/seller/orders/:id/cancel", ...auth, async (req, res) => {
     const { id } = sellerOrderIdSchema.parse(req.params);
     res.json({ order: await orders.cancel(signedInUserId(req), id, sellerCancelSchema.parse(req.body)) });
+  });
+
+  // --- dashboard and payouts (6d) ---
+
+  router.get("/seller/dashboard", ...auth, async (req, res) => {
+    res.json(await dashboard.view(signedInUserId(req), dashboardQuerySchema.parse(req.query)));
+  });
+
+  router.get("/seller/payouts", ...auth, async (req, res) => {
+    res.json(await payouts.view(signedInUserId(req), payoutsQuerySchema.parse(req.query).page));
+  });
+
+  router.post("/seller/payouts", ...auth, async (req, res) => {
+    res.status(201).json(await payouts.request(signedInUserId(req)));
+  });
+
+  router.get("/seller/payouts/statement", ...auth, async (req, res) => {
+    const { filename, csv } = await payouts.statement(signedInUserId(req), statementQuerySchema.parse(req.query).month);
+    res.type("text/csv; charset=utf-8").attachment(filename).send(csv);
   });
 
   return router;

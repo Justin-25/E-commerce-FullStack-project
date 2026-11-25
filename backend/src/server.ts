@@ -29,6 +29,9 @@ import { LowStockService } from "./modules/notifications/lowStock.service.js";
 import { DeliveryService } from "./modules/orders/delivery.js";
 import { CancellationService } from "./modules/orders/cancellation.js";
 import { RefundService } from "./modules/orders/refunds.js";
+import { VisitService } from "./modules/stores/visits.js";
+import { DashboardService } from "./modules/seller/dashboard.service.js";
+import { PayoutService } from "./modules/seller/payouts.service.js";
 import { sellerRouter } from "./modules/seller/seller.routes.js";
 import { notificationsRouter } from "./modules/notifications/notifications.routes.js";
 import { PriceDropService } from "./modules/notifications/priceDrops.service.js";
@@ -83,7 +86,10 @@ if (prisma) {
   const google = new GoogleService({ prisma, kv, auth: authService, identity, email, config, logger });
   services.push(authService, security, google);
   const catalog = new CatalogService({ prisma, kv, logger });
-  routers.push(catalogRouter({ catalog }));
+  const visits = new VisitService({ prisma, kv, secret: config.CODE_HASH_SECRET, logger });
+  routers.push(catalogRouter({ catalog, visits }));
+  // Every hour: yesterday's (and the day before's) store visits from Redis into Postgres.
+  every(60 * 60_000, "the store visits copy", () => visits.copyFinishedDays());
   routers.push(homeRouter({ home: new HomeService({ prisma, kv, catalog, logger }) }));
   routers.push(wishlistRouter({ wishlist: new WishlistService({ prisma, catalog }), guards }));
   const cart = new CartService({ prisma });
@@ -108,7 +114,7 @@ if (prisma) {
   // Refunds PayMongo refused (or that were never sent): try again, hourly for 3 days.
   every(FIFTEEN_MINUTES, "the refund retries", () => refunds.sendDue());
   routers.push(reviewsRouter({ reviews: new ReviewService({ prisma }), guards }));
-  routers.push(storesRouter({ stores: new StoreService({ prisma }), guards }));
+  routers.push(storesRouter({ stores: new StoreService({ prisma }), guards, visits }));
 
   const media = config.CLOUDINARY_URL ? new CloudinaryStorage(config.CLOUDINARY_URL, logger) : null;
   if (!media) logger.info("CLOUDINARY_URL is not set — uploads (logos, photos, documents) are off");
@@ -116,7 +122,22 @@ if (prisma) {
   services.push(onboarding);
   const sellerOrders = new SellerOrderService({ prisma, email, appUrl: config.APP_URL, cancellation, logger });
   services.push(sellerOrders);
-  routers.push(sellerRouter({ onboarding, products: new SellerProductService({ prisma, kv, media, logger }), orders: sellerOrders, security, guards, config }));
+  const payouts = new PayoutService({ prisma, email, appUrl: config.APP_URL, logger });
+  services.push(payouts);
+  // Mondays from 9:00 AM (Manila): each store's payout of everything available (from ₱100).
+  every(FIFTEEN_MINUTES, "the Monday payouts", () => payouts.runWeekly());
+  routers.push(
+    sellerRouter({
+      onboarding,
+      products: new SellerProductService({ prisma, kv, media, logger }),
+      orders: sellerOrders,
+      dashboard: new DashboardService({ prisma, visits }),
+      payouts,
+      security,
+      guards,
+      config
+    })
+  );
   const lowStock = new LowStockService({ prisma, email, config, logger });
   services.push(lowStock);
   // Variants that dropped below 10: one email per store (each variant once until it's restocked).

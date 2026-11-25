@@ -299,6 +299,24 @@ How it works:
 - **PayMongo's reference was wrong about one thing:** it documents the refunds filter as `data.attributes.payment_id`, but the live API refuses that (400 `parameter_invalid`); plain `?payment_id=` works (checked read-only on the test account).
 - **The buyer sees** "Cancelled by the seller · out of stock" and "Refund of ₱549 sent to your GCash" on the tracking page, and gets an email for the cancellation and another when the refund is sent. A payment for an order that was paid and later cancelled is never used to revive it: it's refunded as a duplicate.
 
+## Dashboard and payouts in Seller Center (milestone 6d)
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/v1/seller/dashboard?period=7d` | Sales, orders, store visits and rating for the last 7 or 30 days against the period before; sales per day; the latest orders; Needs attention |
+| `GET /api/v1/seller/payouts?page=` | Available now, waiting, paid out this month, the payout account, the next automatic payout, the history |
+| `POST /api/v1/seller/payouts` | "Request payout" |
+| `GET /api/v1/seller/payouts/statement?month=2026-11` | "Download statements": one month's ledger as CSV |
+
+How it works:
+- **The dashboard counts what's real:** sales are the items in paid packages (before Vendora's fee), cancelled ones left out, by Philippine day; each figure is compared with the period before (+12.4%). Needs attention lists only what the seller can act on now: late orders (with the date they'd be cancelled), orders due today, out-of-stock and low-stock items, a payout account being checked, a store under review.
+- **Store visits without tracking people** (the way Plausible does it): a visitor is a hash of their IP address and browser with a salt that changes every day and is never stored. No cookie, no personal data, and nobody can be followed from one day, or one store, to the next. Redis counts the unique hashes with HyperLogLog (a few KB per store per day, about 1% error); an hourly job copies finished days into Postgres (`store_daily_visits`). Bots and scripts aren't counted; if Redis is down, visits just aren't counted and the page still works. They're counted where the API serves the store and product pages; if a CDN ever caches those answers, counting moves to a small call from the browser.
+- **Payouts are bookkeeping on the ledger:** a payout takes every line that's available and not paid out yet, links them to the payout and adds one PAYOUT line taking the total out, in one transaction with the store row locked. So a line can never be paid twice; a partial unique index allows one payout in progress per store, even with two servers.
+- **When:** automatically every Monday at 9:00 AM (Manila) for what was available by then (money released later in the week waits for the next Monday; a missed run catches up), or "Request payout" any time. From ₱100, only to a verified payout account, one at a time; the seller is emailed when it's sent, paid or failed.
+- **The transfer is simulated until the admin screens (milestone 7):** `npm run payout:paid -- PO-2026-1123-K4Q2`, or `npm run payout:failed -- PO-2026-1123-K4Q2 "reason"`. A failed payout gives its lines back and adds an ADJUSTMENT line that balances the PAYOUT line: the money is available again, and history is never edited.
+- **Statements:** every ledger line of a month as CSV (amounts as numbers, negative for money out), with the same formula-safe CSV writer as the orders export.
+- **Demo data:** the demo stores get a demo GCash payout account (encrypted like a real one) and one payout for every past Monday (`npm run demo:payouts` for a database seeded before 6d; the seed does it too).
+
 ## If Redis (Upstash) goes down
 
 Redis commands give up after 1 second instead of waiting, and each part of the API then does what's safest for it:
@@ -327,7 +345,7 @@ Measured with Redis pointed at an unreachable address: before this, every API re
 - `tests/checkout/my-orders.test.ts` checks "Your orders" (tabs and counts, packages in two tabs, search by number and product name with `%` and `_` as plain text, pages, unpaid and cancelled orders, privacy), tracking (the 4 steps, arrival dates for Standard and Express, the timeline with courier updates) and Buy again (stock, sold-out and removed items). `recommendations.test.ts` checks the cart's "Recommended for you" (cart categories first, never cart items, sold-out or draft products, the wishlist and followed stores, top-ups, "See all"). `tests/catalog/write-reviews.test.ts` checks writing, editing and deleting reviews (only after delivery, one per item even when sent twice at once, only your own, field rules) and that the stored ratings always equal what the reviews say, also when several shoppers review one store at the same moment.
 - `tests/seller/onboarding.test.ts` walks through becoming a seller against a fake Cloudinary: 2FA first, drafts, submit and approval, encrypted TIN and payout number, registered businesses, unique and reserved names (also claimed at the same moment), locked details after submitting, re-auth and an email for payout changes, uploads (someone else's file, missing, too big, wrong type, the same file twice, limits, outages) and privacy. `media.test.ts` checks the real Cloudinary client (signatures against Cloudinary's documented example, requests, outages).
 - `tests/seller/products.test.ts` checks Seller Center products: who may sell (shoppers, draft stores, missing 2FA, suspended stores, admins), Save draft and every Publish rule, photos (someone else's, missing, too big, one file per photo, the 120-an-hour allowance), SKUs, the 64 KB form, out-of-date forms, stock as a difference while orders come in, variants and photos that past orders still use, the Active toggle (carts too), deals before and after they end, delete, the list (tabs that add up, search with `%` and `_` as plain text, categories, sold in 30 days, low stock, pages) and Express delivery at checkout. `tests/notifications/price-drops.test.ts` checks price-drop emails: once per price, at most one a day, drops that end, deals, hidden products, opted-out and unverified shoppers, the unsubscribe link (forged and tampered tokens) and simultaneous runs.
-- `tests/seller/orders.test.ts` checks Seller Center orders: only my paid packages, To ship by urgency, today's 6:00 PM deadline and late ones, search, the order page (my items only, address while it needs shipping, earnings, what's next), Mark as shipped (every field rule, the tracking number format, two clicks at once, fixing a typo, someone else's tracking number, after delivery, suspended stores), the new-order email (cash on delivery and online, a payment reported twice), privacy after delivery and Export CSV (formula injection from a buyer's name). `tests/checkout/delivery.test.ts` checks "Order received" (ledger lines and dates, the order completing, cash collected, pressing twice, not shipped yet, someone else's), the automatic confirmation after 7 days, and the buyer and the job at the same moment. `tests/checkout/cancellations.test.ts` checks cancellations and refunds: the seller's Cancel order (every rule, stock back or to 0, the refund amount with the delivery fee, emails, a cancel and a ship at the same moment), two-store orders, cash on delivery, the buyer's cancel within the hour (and after it), the warnings and the automatic cancel, refunds PayMongo refuses (hourly retries, given up after 3 days), a lost answer found by our id, two runs at once, and a late payment for a cancelled order. `tests/notifications/low-stock.test.ts` checks low-stock emails (once until restocked, typed-in numbers, the alert off, one email per store, simultaneous runs). `tests/deadlines.test.ts` checks ship-by times in Manila, CSV escaping and "Maria S.".
+- `tests/seller/orders.test.ts` checks Seller Center orders: only my paid packages, To ship by urgency, today's 6:00 PM deadline and late ones, search, the order page (my items only, address while it needs shipping, earnings, what's next), Mark as shipped (every field rule, the tracking number format, two clicks at once, fixing a typo, someone else's tracking number, after delivery, suspended stores), the new-order email (cash on delivery and online, a payment reported twice), privacy after delivery and Export CSV (formula injection from a buyer's name). `tests/checkout/delivery.test.ts` checks "Order received" (ledger lines and dates, the order completing, cash collected, pressing twice, not shipped yet, someone else's), the automatic confirmation after 7 days, and the buyer and the job at the same moment. `tests/checkout/cancellations.test.ts` checks cancellations and refunds: the seller's Cancel order (every rule, stock back or to 0, the refund amount with the delivery fee, emails, a cancel and a ship at the same moment), two-store orders, cash on delivery, the buyer's cancel within the hour (and after it), the warnings and the automatic cancel, refunds PayMongo refuses (hourly retries, given up after 3 days), a lost answer found by our id, two runs at once, and a late payment for a cancelled order. `tests/seller/dashboard.test.ts` checks the dashboard (sales and orders against the period before, cancelled orders left out, 7 and 30 days, Needs attention) and store visits (unique per day, no cookie, bots, the nightly copy, Redis down). `tests/seller/payouts.test.ts` checks payouts (waiting, available, Request payout once, paid, failed and paid again, the account and store rules, the Monday payout and two runs at once, statements) and the demo payout history. `tests/notifications/low-stock.test.ts` checks low-stock emails (once until restocked, typed-in numbers, the alert off, one email per store, simultaneous runs). `tests/deadlines.test.ts` checks ship-by times in Manila, CSV escaping and "Maria S.".
 - `tests/db/migration.test.ts` checks that every table, index, foreign key and safety rule really exists. CI also migrates and seeds a real PostgreSQL 18 server, the same major version as Neon.
 
 ## Structure
@@ -344,7 +362,7 @@ src/
   modules/health/        GET /health (alive) and GET /ready (dependencies OK)
   modules/auth/          sign-in: routes → service (rules) → tokens, lockout, one-time codes, emails
   modules/catalog/       categories, search, product page: routes → service → search SQL + one pricing rule + one visibility rule
-  modules/stores/        store page, follow
+  modules/stores/        store page, follow, store visits (privacy-friendly unique counts)
   modules/reviews/       product and store reviews, writing your own; ratings.ts recomputes ratings from reviews
   modules/home/          Home's sections (cached for a minute)
   modules/wishlist/      saved products and price drops
@@ -355,15 +373,15 @@ src/
                          delivery ("Order received", automatic after 7 days), cancellations, refunds (with retries)
                          and the order deadlines
   modules/seller/        Seller Center: becoming a seller (onboarding, documents, payout account), products, uploads,
-                         orders (ship, CSV), the earnings ledger
+                         orders (ship, CSV), the earnings ledger, the dashboard, payouts
   modules/notifications/ price-drop and low-stock emails (15-minute jobs), email settings, one-click unsubscribe
   generated/prisma/      Prisma client (generated by `npm run db:generate`, not committed)
 prisma/
-  schema.prisma          the 32 tables
+  schema.prisma          the 33 tables
   migrations/            SQL applied to the database, in order
   seed.ts, demo-data.ts  demo categories, stores, products and accounts (safe to run again)
   demo-reviews.ts        demo shoppers, their delivered orders and reviews
-scripts/                 npm run secrets
+scripts/                 npm run secrets, store:approve, payout:paid / payout:failed, demo:payouts
 tests/                   API, database and unit tests (tests/support: test database, browser, harness)
 openapi/openapi.yaml     the API contract
 ```
@@ -395,7 +413,7 @@ openapi/openapi.yaml     the API contract
 | File uploads | Files go straight to Cloudinary with a one-time signed ticket for a place the server chose, which can never replace an existing file; the server then checks the owner's folder, type and size with Cloudinary before using a file (and deletes rejected ones). ID documents are private (`authenticated`) files. File names and links come only from the server; one stored file is one photo (a unique index). Files nobody uses any more (replaced logos, removed photos) are deleted. |
 | Evil regular expressions | Only simple, linear patterns. |
 | CSV injection | Exported CSV cells that start with `=`, `+`, `-`, `@` (or a tab / carriage return) get a leading apostrophe, so a formula in a buyer's name or city shows as text in Excel instead of running. |
-| Data minimisation | Sellers see a buyer's full address and phone only while the package still has to reach them; lists, exports and delivered orders show "Maria S." and the city. |
+| Data minimisation | Sellers see a buyer's full address and phone only while the package still has to reach them; lists, exports and delivered orders show "Maria S." and the city. Store visits are counted without cookies or personal data (a daily-salted hash, never stored). |
 | No secrets in git | `.env` is git-ignored; `npm run secrets` writes keys without printing them; config errors name a variable but never its value. |
 | HTTPS | Production requires https origins and `APP_URL`, sets HSTS, and uses `__Host-`/`__Secure-` Secure cookies. |
 

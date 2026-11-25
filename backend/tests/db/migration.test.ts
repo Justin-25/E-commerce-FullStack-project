@@ -43,9 +43,9 @@ beforeAll(async () => {
 afterAll(async () => db?.close());
 
 describe("migration structure", () => {
-  it("creates all 32 tables (30 from milestone 2 + trusted_devices + refunds)", async () => {
+  it("creates all 33 tables (30 from milestone 2 + trusted_devices, refunds, store_daily_visits)", async () => {
     const { n } = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`);
-    expect(n).toBe(32);
+    expect(n).toBe(33);
   });
 
   it("really builds every index the migration declares", async () => {
@@ -62,11 +62,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 48 foreign keys and 46 safety (CHECK) rules", async () => {
+  it("has the 49 foreign keys and 50 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
-    expect(fk.n).toBe(48);
-    expect(chk.n).toBe(46);
+    expect(fk.n).toBe(49);
+    expect(chk.n).toBe(50);
   });
 });
 
@@ -183,6 +183,24 @@ describe("orders, reviews & money", () => {
     const v = await variant(await product(s), s);
     for (const q of [0, 100]) await fails(`INSERT INTO cart_items ("cartId", "variantId", quantity) VALUES ($1, $2, $3)`, [cart.id, v, q], /cart_items_quantity_chk/);
     await fails(`INSERT INTO cart_items ("cartId", "variantId", quantity, "priceAtAddCentavos") VALUES ($1, $2, 1, -1)`, [cart.id, v], /cart_items_price_at_add_chk/);
+  });
+
+  it("keeps payouts consistent: one in progress per store, paid has a date, failed a reason, a payout line takes money out", async () => {
+    const s = await store(await user());
+    const payout = (reference: string, status = "PROCESSING", extra = "", values: unknown[] = []) =>
+      db.query(`INSERT INTO payouts (id, "storeId", reference, "amountCentavos", method, "accountLast4", status, "updatedAt"${extra ? `, ${extra}` : ""}) VALUES (gen_random_uuid(), $1, $2, 10000, 'GCASH', '4567', $3, now()${values.map((_, i) => `, $${i + 4}`).join("")}) RETURNING id`, [s, reference, status, ...values]);
+    const first = (await payout("PO-1")).rows[0] as { id: string };
+    await expect(payout("PO-2")).rejects.toThrow(/unique/i); // a second one in progress
+    await expect(payout("PO-3", "PAID")).rejects.toThrow(/payouts_status_chk/); // paid without a date
+    await expect(payout("PO-4", "FAILED")).rejects.toThrow(/payouts_status_chk/); // failed without a reason
+    await expect(payout("PO-5", "PAID", `"paidAt", "orderCount"`, [new Date(), -1])).rejects.toThrow(/payouts_breakdown_chk/);
+    await payout("PO-6", "PAID", `"paidAt"`, [new Date()]); // a paid one beside the one in progress is fine
+    const line = (amount: number, payoutId: string | null) =>
+      db.query(`INSERT INTO ledger_entries (id, "storeId", "payoutId", type, "amountCentavos", "availableAt") VALUES (gen_random_uuid(), $1, $2, 'PAYOUT', $3, now())`, [s, payoutId, amount]);
+    await expect(line(-10_000, null)).rejects.toThrow(/ledger_entries_payout_chk/);
+    await expect(line(10_000, first.id)).rejects.toThrow(/ledger_entries_payout_chk/);
+    await line(-10_000, first.id);
+    await fails(`INSERT INTO store_daily_visits ("storeId", day, visits) VALUES ($1, current_date, -1)`, [s], /store_daily_visits_visits_chk/);
   });
 
   it("keeps cancellations and refunds consistent: who and why together, one refund per package, a sent refund has PayMongo's id", async () => {

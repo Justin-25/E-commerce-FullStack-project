@@ -36,6 +36,12 @@ export class FlakyKv implements KeyValueStore {
   delete(...keys: string[]) {
     return this.redis.down ? fail() : this.inner.delete(...keys);
   }
+  countUnique(key: string, member: string, ttl: number) {
+    return this.redis.down ? fail() : this.inner.countUnique(key, member, ttl);
+  }
+  uniqueCount(key: string) {
+    return this.redis.down ? fail() : this.inner.uniqueCount(key);
+  }
 }
 
 /** A rate-limit store that fails (like rate-limit-redis would) while `redis.down` is true. */

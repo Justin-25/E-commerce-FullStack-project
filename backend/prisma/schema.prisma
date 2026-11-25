@@ -426,6 +426,7 @@ model Store {
   sellerOrders  SellerOrder[]
   ledgerEntries LedgerEntry[]
   payouts       Payout[]
+  dailyVisits   StoreDailyVisit[]
 
   @@index([status])
   @@index([categoryId])
@@ -451,6 +452,18 @@ model StoreDocument {
 
   @@index([storeId])
   @@map("store_documents")
+}
+
+/// Unique visitors per store per Philippine day (store page + its product pages), copied nightly from Redis (6d).
+model StoreDailyVisit {
+  storeId String   @db.Uuid
+  day     DateTime @db.Date
+  visits  Int // ≥ 0 (CHECK)
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@id([storeId, day])
+  @@map("store_daily_visits")
 }
 
 model PayoutAccount {
@@ -888,6 +901,9 @@ model LedgerEntry {
   @@map("ledger_entries")
 }
 
+/// Money sent to a seller: all their available ledger lines at that moment. One PROCESSING payout per store
+/// (partial unique index, migration only); PAID has paidAt and FAILED a reason (CHECK). The transfer is simulated
+/// until milestone 7 (`npm run payout:paid|failed`).
 model Payout {
   id             String       @id @default(uuid(7)) @db.Uuid
   storeId        String       @db.Uuid
@@ -895,6 +911,10 @@ model Payout {
   amountCentavos Int // > 0 (CHECK)
   method         PayoutMethod
   accountLast4   String       @db.VarChar(4)
+  /// The history row: orders, gross sales and Vendora's fees in it (written when it's made).
+  orderCount     Int          @default(0)
+  grossCentavos  Int          @default(0)
+  feesCentavos   Int          @default(0)
   status         PayoutStatus @default(PROCESSING)
   failureReason  String?      @db.VarChar(255)
   paidAt         DateTime?    @db.Timestamptz(3)

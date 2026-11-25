@@ -17,7 +17,10 @@
     "db:status": "prisma migrate status",
     "db:seed": "prisma db seed",
     "secrets": "tsx scripts/generate-secrets.ts",
-    "store:approve": "tsx scripts/approve-store.ts"
+    "store:approve": "tsx scripts/approve-store.ts",
+    "payout:paid": "tsx scripts/payout-status.ts paid",
+    "payout:failed": "tsx scripts/payout-status.ts failed",
+    "demo:payouts": "tsx scripts/demo-payouts.ts"
   },
   "type": "module",
   "private": "true",

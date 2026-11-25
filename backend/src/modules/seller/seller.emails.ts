@@ -147,3 +147,50 @@ export function orderCancelledForSellerEmail(to: string, p: { id: string; number
     ].join("\n")
   };
 }
+
+export interface PayoutInfo {
+  reference: string;
+  amountCentavos: number;
+  method: "GCASH" | "BANK";
+  accountLast4: string;
+}
+const destination = (p: PayoutInfo) => `${p.method === "GCASH" ? "GCash" : "bank account"} ending in ${p.accountLast4}`;
+
+/** A payout was made (every Monday, or "Request payout"). */
+export function payoutStartedEmail(to: string, storeName: string, p: PayoutInfo, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "seller-payout-started",
+    subject: `Payout ${p.reference}: ${formatPeso(p.amountCentavos)} is on its way`,
+    text: [
+      `We're sending ${formatPeso(p.amountCentavos)} from ${storeName}'s sales to your ${destination(p)}.`,
+      "It usually arrives within 1–2 business days.",
+      "",
+      `Payouts: ${appUrl}/seller/payouts`
+    ].join("\n")
+  };
+}
+
+export function payoutPaidEmail(to: string, storeName: string, p: PayoutInfo, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "seller-payout-paid",
+    subject: `Payout ${p.reference} paid: ${formatPeso(p.amountCentavos)}`,
+    text: [`${formatPeso(p.amountCentavos)} from ${storeName}'s sales was paid to your ${destination(p)}.`, "", `Payouts: ${appUrl}/seller/payouts`].join("\n")
+  };
+}
+
+/** The transfer failed: the money is back in the store's balance for the next payout. */
+export function payoutFailedEmail(to: string, storeName: string, p: PayoutInfo & { reason: string }, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "seller-payout-failed",
+    subject: `Payout ${p.reference} didn't go through`,
+    text: [
+      `We couldn't pay ${formatPeso(p.amountCentavos)} to your ${destination(p)}: ${p.reason}.`,
+      `The money is back in ${storeName}'s available balance. Check your payout account, then request the payout again (or wait for Monday's).`,
+      "",
+      `Payouts: ${appUrl}/seller/payouts`
+    ].join("\n")
+  };
+}

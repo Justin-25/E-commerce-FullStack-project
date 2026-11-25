@@ -54,6 +54,16 @@ export const shipmentSchema = z.strictObject({
     .default(null)
 });
 
+/** Payout history pages. */
+export const payoutsQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).max(MAX_PAGE, { error: `Only the first ${MAX_PAGE} pages are available` }).default(1)
+});
+
+/** "Download statements": one Philippine calendar month, "2026-11". */
+export const statementQuerySchema = z.object({
+  month: z.string({ error: "Choose a month" }).regex(/^20[0-9]{2}-(0[1-9]|1[0-2])$/, { error: "Choose a month like 2026-11" })
+});
+
 /** "Cancel order" (the Modal's reasons). */
 export const sellerCancelSchema = z.strictObject({
   reason: z.enum(SELLER_CANCEL_REASONS, { error: "Choose a reason" })

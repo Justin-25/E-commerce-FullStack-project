@@ -400,6 +400,7 @@ erDiagram
   seller_orders ||--o{ ledger_entries : "creates"
   stores ||--o{ payouts : "receives"
   payouts ||--o{ ledger_entries : "settles"
+  stores ||--o{ store_daily_visits : "visits per day"
   products ||--o{ product_flags : "flagged"
   users ||--o{ audit_logs : "admin actions"
   ledger_entries {
@@ -418,7 +419,15 @@ erDiagram
     string reference UK "PO-2026-1117"
     int amountCentavos
     enum status "PROCESSING | PAID | FAILED"
+    int orderCount "history row (6d)"
+    int grossCentavos
+    int feesCentavos
     datetime paidAt
+  }
+  store_daily_visits {
+    uuid storeId PK
+    date day PK "Philippine day"
+    int visits "unique visitors (6d)"
   }
   webhook_events {
     uuid id PK
@@ -447,6 +456,7 @@ erDiagram
   }
 ```
 
+- **Payouts** (milestone 6d, migration `20261127090000_dashboard_payouts`): a payout links the store's available lines and adds a PAYOUT line (CHECK: it belongs to a payout and is negative); one PROCESSING payout per store (partial unique index); PAID has `paidAt`, FAILED a reason (CHECK); `orderCount`, `grossCentavos` and `feesCentavos` are the history row, written when it's made. A failed payout unlinks its lines and adds a balancing ADJUSTMENT line. `store_daily_visits` keeps unique visitors per store per Philippine day (copied from Redis).
 - **A seller's balance is the sum of their ledger entries,** not a number that gets overwritten. Every peso can be traced to an order, fee, refund or payout, the way accounting systems do it.
   - Example: a ₱9,998 sale (+999800), the fee (−50000), and later a payout (−949800).
   - **Written at delivery** (milestone 6c), in the same transaction that marks the package delivered: a `SALE` line and a `FEE` line (none in a store's first 30 days), both available 7 days after delivery. A partial unique index, `(sellerOrderId, type) WHERE type IN ('SALE', 'FEE')`, allows one of each per package, so a package can never be credited twice. The migration wrote these lines for packages delivered before 6c.
