@@ -52,7 +52,7 @@ describe("Who can use Seller Center products", () => {
       expect(res.body.error.details).toEqual({ reason: "store_suspended" });
     }
 
-    await h.db.prisma.user.update({ where: { id: s.user.id }, data: { role: "ADMIN" } });
+    await h.db.prisma.user.update({ where: { id: s.user.id }, data: { role: "ADMIN", adminRoles: ["SUPPORT"] } });
     expect((await s.browser.get(P)).body.error.details).toEqual({ reason: "admin_account" });
   });
 

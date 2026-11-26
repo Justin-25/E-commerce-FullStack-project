@@ -88,10 +88,10 @@ describe("GET /stores/:slug (store page)", () => {
     expect((await storePage("no-such-store")).status).toBe(404);
     expect((await storePage("Robert'); DROP TABLE stores;--")).status).toBe(400);
     for (const status of ["PENDING", "SUSPENDED", "REJECTED"] as const) {
-      await h.db.prisma.store.update({ where: { slug: "sol-co" }, data: { status } });
+      await h.db.prisma.store.update({ where: { slug: "sol-co" }, data: { status, reviewNote: status === "REJECTED" ? "Documents didn't match." : null } });
       expect((await storePage("sol-co")).status, status).toBe(404);
     }
-    await h.db.prisma.store.update({ where: { slug: "sol-co" }, data: { status: "APPROVED" } });
+    await h.db.prisma.store.update({ where: { slug: "sol-co" }, data: { status: "APPROVED", reviewNote: null } });
     expect((await storePage("sol-co")).status).toBe(200);
   });
 

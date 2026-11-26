@@ -194,3 +194,56 @@ export function payoutFailedEmail(to: string, storeName: string, p: PayoutInfo &
     ].join("\n")
   };
 }
+
+/** An admin approved the store: it's live. */
+export function storeApprovedEmail(to: string, storeName: string, appUrl: string, note: string | null): EmailMessage {
+  return {
+    to,
+    kind: "store-approved",
+    subject: `${storeName} is approved and live on Vendora`,
+    text: [
+      `Good news: we've reviewed ${storeName}, and it's now live. Shoppers can find your published products.`,
+      ...(note ? ["", `A note from our team: ${note}`] : []),
+      "",
+      `Seller Center: ${appUrl}/seller`
+    ].join("\n")
+  };
+}
+
+/** An admin needs something changed before approving: the note says what. */
+export function storeChangesRequestedEmail(to: string, storeName: string, note: string, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "store-changes-requested",
+    subject: `${storeName}: we need a few changes before approving`,
+    text: [
+      `Thanks for applying to sell on Vendora. Before we can approve ${storeName}, please change the following:`,
+      "",
+      note,
+      "",
+      "Your details and documents can be edited again. When you're done, choose \"Submit again\".",
+      "",
+      `Your application: ${appUrl}/seller/onboarding`
+    ].join("\n")
+  };
+}
+
+/** Final: the application was rejected. */
+export function storeRejectedEmail(to: string, storeName: string, note: string): EmailMessage {
+  return {
+    to,
+    kind: "store-rejected",
+    subject: `Your Vendora application for ${storeName}`,
+    text: [`We've reviewed your application for ${storeName}, and we can't approve it.`, "", `Reason: ${note}`, "", "If you think this is a mistake, reply to this email or contact Vendora support."].join("\n")
+  };
+}
+
+/** A changed payout account was checked: payouts go there now. */
+export function payoutAccountVerifiedEmail(to: string, storeName: string, summary: string, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "payout-account-verified",
+    subject: `${storeName}'s payout account is verified`,
+    text: [`We've checked ${storeName}'s new payout account (${summary}). Payouts go there from now on.`, "", `Payouts: ${appUrl}/seller/payouts`].join("\n")
+  };
+}

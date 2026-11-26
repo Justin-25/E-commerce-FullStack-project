@@ -1,4 +1,4 @@
-import type { DocumentType, Prisma, PrismaClient } from "../../generated/prisma/client.js";
+import type { DocumentType, Prisma, PrismaClient, StoreStatus } from "../../generated/prisma/client.js";
 import { BackgroundMailer } from "../../lib/backgroundMailer.js";
 import type { EmailSender } from "../../lib/email.js";
 import { createFieldCipher, type FieldCipher } from "../../lib/encryption.js";
@@ -22,7 +22,6 @@ import {
 import { SellerUploads } from "./uploads.js";
 
 type Tx = Prisma.TransactionClient;
-type StoreStatus = "DRAFT" | "PENDING" | "APPROVED" | "REJECTED" | "SUSPENDED";
 
 /** What's still needed before "Submit for review" (in the order of the steps). */
 export type MissingItem = "two_factor" | "store_details" | "verification" | "gov_id" | "business_certificate" | "payout_account";
@@ -50,6 +49,8 @@ export interface OnboardingView {
     };
     documents: { id: string; type: DocumentType; format: string | null; bytes: number | null; status: string; createdAt: string }[];
     payoutAccount: { method: "GCASH" | "BANK"; bankName: string | null; accountName: string; last4: string; verifiedAt: string | null } | null;
+    /** The admin's answer when changes were requested (edit, then "Submit again") or the application was rejected (final). */
+    review: { status: "CHANGES_REQUESTED" | "REJECTED"; note: string; reviewedAt: string | null } | null;
   } | null;
   steps: { storeDetails: boolean; verification: boolean; payoutAccount: boolean };
   missing: MissingItem[];
@@ -63,8 +64,8 @@ const conflict = (reason: string, message: string, field?: string) =>
   new AppError(409, "CONFLICT", message, { details: { reason }, ...(field ? { fields: [{ path: field, message }] } : {}) });
 const badField = (path: string, message: string) => new AppError(400, "VALIDATION_ERROR", "Some fields are invalid", { fields: [{ path, message }] });
 const noStore = () => new AppError(404, "NOT_FOUND", "Set up your store details first.");
-/** Legal details and documents can't change once submitted (until a rejection asks for changes). */
-const EDITABLE_LEGAL: StoreStatus[] = ["DRAFT", "REJECTED"];
+/** Legal details and documents can't change once submitted, unless an admin asks for changes (milestone 7a). */
+const EDITABLE_LEGAL: StoreStatus[] = ["DRAFT", "CHANGES_REQUESTED"];
 const tinContext = (storeId: string) => `store:${storeId}:tin`;
 const payoutContext = (storeId: string) => `store:${storeId}:payout`;
 
@@ -161,7 +162,11 @@ export class OnboardingService {
               last4: store.payoutAccount.last4,
               verifiedAt: store.payoutAccount.verifiedAt?.toISOString() ?? null
             }
-          : null
+          : null,
+        review:
+          (store.status === "CHANGES_REQUESTED" || store.status === "REJECTED") && store.reviewNote
+            ? { status: store.status, note: store.reviewNote, reviewedAt: store.reviewedAt?.toISOString() ?? null }
+            : null
       },
       steps: { storeDetails: details, verification: legal && !missing.includes("gov_id") && !missing.includes("business_certificate"), payoutAccount: Boolean(store.payoutAccount) },
       missing,
@@ -347,6 +352,7 @@ export class OnboardingService {
     if (!user.twoFactorEnabledAt) throw forbidden("two_factor_required", "Turn on two-step verification before opening a store.");
     const store = await this.deps.prisma.store.findUnique({ where: { ownerId: userId }, select: { status: true } });
     if (store?.status === "SUSPENDED") throw forbidden("store_suspended", "This store is suspended. Contact Vendora support.");
+    if (store?.status === "REJECTED") throw forbidden("store_rejected", "This application was rejected. Contact Vendora support if you think it's a mistake.");
   }
 
   private async storeOf(userId: string) {

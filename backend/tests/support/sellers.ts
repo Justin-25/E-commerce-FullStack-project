@@ -23,7 +23,7 @@ export function sellers(h: CatalogHarness) {
   /** A seller (2FA on) whose store is submitted for review; `approve` also approves it. */
   async function seller({ approve = false, name = "Ana Reyes" }: { approve?: boolean; name?: string } = {}) {
     const s = await h.signUp({ email: `seller-${randomUUID().slice(0, 8)}@example.com`, name });
-    await h.enableTwoFactor(s.browser);
+    const { manualKey } = await h.enableTwoFactor(s.browser);
     const storeName = `Ana Audio ${randomUUID().slice(0, 8)}`;
     expect((await s.browser.put(`${S}/store`, { name: storeName, category: "electronics", shipsFrom: "Manila" })).status).toBe(200);
     expect((await s.browser.put(`${S}/store/verification`, { businessType: "INDIVIDUAL", legalName: "Ana Maria Reyes", tin: "123-456-789-000" })).status).toBe(200);
@@ -32,7 +32,7 @@ export function sellers(h: CatalogHarness) {
     expect((await s.browser.post(`${S}/store/submit`)).status).toBe(200);
     const store = await h.db.prisma.store.findUniqueOrThrow({ where: { ownerId: s.user.id }, select: { id: true, slug: true, name: true } });
     if (approve) expect(await approveStore(h.db.prisma, store.slug, null)).toBe("approved");
-    return { ...s, store };
+    return { ...s, store, manualKey };
   }
 
   /** A complete "Publish" form (one variant, one new photo), with changes on top. */

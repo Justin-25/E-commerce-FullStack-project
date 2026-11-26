@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.13.0
+  version: 0.14.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -57,6 +57,11 @@ tags:
     description: Seller Center, becoming a seller (milestone 6a) and products (milestone 6b)
   - name: notifications
     description: Email settings and the one-click unsubscribe in price-drop emails (milestone 6b)
+  - name: admin
+    description: |
+      Admin pages (milestone 7). An ADMIN account with two-step verification on, checked in the database on
+      every request, holding the role a page needs: SUPPORT (seller applications, payout accounts), FINANCE,
+      MODERATION. Every action, and every look at sensitive data, is written to the audit log.
 
 paths:
   /health:
@@ -1899,7 +1904,8 @@ paths:
       summary: Submit for review
       description: |
         Every step must be done (409 `incomplete`, with `details.missing`). The store becomes PENDING and the
-        account a SELLER; an email confirms it. Refresh the session (`POST /auth/refresh`) to get the seller
+        account a SELLER; an email confirms it. After an admin asked for changes (CHANGES_REQUESTED), this is
+        "Submit again". A rejected application can't be submitted again (403 `store_rejected`). Refresh the session (`POST /auth/refresh`) to get the seller
         role in the access pass. Products can be added while it's reviewed; it appears to shoppers once
         approved. Sending it twice is harmless.
       operationId: submitStore
@@ -2234,6 +2240,198 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/SellerForbidden" }
+
+  /api/v1/admin/dashboard:
+    get:
+      summary: Admin dashboard (any admin role)
+      description: Sales (GMV) and orders this month against the same days of last month, what's waiting for an admin, orders per day for 14 days, and the first items of the queues.
+      operationId: getAdminDashboard
+      tags: [admin]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200":
+          description: The dashboard.
+          content: { application/json: { schema: { $ref: "#/components/schemas/AdminDashboard" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+
+  /api/v1/admin/applications:
+    get:
+      summary: Seller applications (Support)
+      description: Waiting for review oldest first; the other tabs newest first; 20 a page. Search by store name, web address or the owner's email. `counts` ignore the search.
+      operationId: listApplications
+      tags: [admin]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: tab, in: query, schema: { type: string, enum: [pending, changes_requested, rejected, approved], default: pending } }
+        - { name: q, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 1 } }
+      responses:
+        "200":
+          description: A page of applications.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApplicationList" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+
+  /api/v1/admin/applications/{storeId}:
+    parameters:
+      - { name: storeId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: One application (Support)
+      description: The store, the owner, the business details (TIN masked), the documents (no links), the payout account, the checks and the history from the audit log.
+      operationId: getApplication
+      tags: [admin]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/Application" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/admin/applications/{storeId}/tin:
+    parameters:
+      - { name: storeId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Show the full TIN (Support, audit-logged)
+      operationId: revealTin
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "200":
+          description: The TIN.
+          content: { application/json: { schema: { type: object, required: [tin], properties: { tin: { type: string, example: 123-456-789-000 } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/admin/applications/{storeId}/documents/{documentId}/link:
+    parameters:
+      - { name: storeId, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: documentId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Open a private document (Support, audit-logged)
+      description: A Cloudinary link to the private (authenticated) file that works for 5 minutes. Open it right away; don't store it.
+      operationId: documentLink
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "200":
+          description: The link.
+          content: { application/json: { schema: { type: object, required: [url, expiresAt], properties: { url: { type: string }, expiresAt: { type: string, format: date-time } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/UploadsUnavailable" }
+
+  /api/v1/admin/applications/{storeId}/approve:
+    parameters:
+      - { name: storeId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Approve seller (Support, Confirm it's you)
+      description: |
+        Only a waiting application. The store goes live for shoppers, its documents count as checked and its payout
+        account as verified (so it needs "Confirm it's you": 403 REAUTH_REQUIRED). The seller is emailed, with the
+        optional note.
+      operationId: approveApplication
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        content: { application/json: { schema: { type: object, additionalProperties: false, properties: { note: { type: string, maxLength: 1000 } } } } }
+      responses:
+        "200": { $ref: "#/components/responses/Application" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ApplicationConflict" }
+
+  /api/v1/admin/applications/{storeId}/request-changes:
+    parameters:
+      - { name: storeId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Ask for changes (Support)
+      description: Only a waiting application. It goes back to the seller (CHANGES_REQUESTED) with the note, emailed; they can edit their details and documents and submit again.
+      operationId: requestApplicationChanges
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ReviewNote" } } }
+      responses:
+        "200": { $ref: "#/components/responses/Application" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ApplicationConflict" }
+
+  /api/v1/admin/applications/{storeId}/reject:
+    parameters:
+      - { name: storeId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Reject (Support, final)
+      description: Only a waiting application. Final; the seller is emailed the note and can't submit again.
+      operationId: rejectApplication
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ReviewNote" } } }
+      responses:
+        "200": { $ref: "#/components/responses/Application" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ApplicationConflict" }
+
+  /api/v1/admin/payout-accounts:
+    get:
+      summary: Payout accounts to check (Support)
+      description: Accounts changed by sellers whose stores were already approved, oldest first. Their payouts wait until an admin verifies them.
+      operationId: listPayoutAccountsToCheck
+      tags: [admin]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/PayoutAccountsToCheck" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+
+  /api/v1/admin/payout-accounts/{storeId}/number:
+    parameters:
+      - { name: storeId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Show the full account number (Support, audit-logged)
+      operationId: revealPayoutAccountNumber
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "200":
+          description: The number.
+          content: { application/json: { schema: { type: object, required: [accountNumber], properties: { accountNumber: { type: string } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/admin/payout-accounts/{storeId}/verify:
+    parameters:
+      - { name: storeId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Verify a payout account (Support, Confirm it's you)
+      description: Payouts go to this account from now on; the seller is emailed. If the seller changed it again meanwhile, it's refused (409 `changed`).
+      operationId: verifyPayoutAccount
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/PayoutAccountsToCheck" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: 'CONFLICT, with `details.reason`: already_verified, changed.'
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
   /api/v1/notifications/preferences:
     get:
@@ -3228,7 +3426,7 @@ components:
             id: { type: string, format: uuid }
             name: { type: string }
             slug: { type: string, description: The store page's web address. }
-            status: { type: string, enum: [DRAFT, PENDING, APPROVED, REJECTED, SUSPENDED] }
+            status: { type: string, enum: [DRAFT, PENDING, CHANGES_REQUESTED, APPROVED, REJECTED, SUSPENDED], description: "CHANGES_REQUESTED: an admin asked for changes (see review); edit and submit again. REJECTED: final." }
             category: { type: [object, "null"], properties: { slug: { type: string }, name: { type: string } } }
             description: { type: [string, "null"] }
             shipsFrom: { type: [string, "null"] }
@@ -3261,6 +3459,13 @@ components:
                 accountName: { type: string }
                 last4: { type: string, example: "4567" }
                 verifiedAt: { type: [string, "null"], format: date-time }
+            review:
+              type: [object, "null"]
+              description: "The admin's note when changes were requested or the application was rejected."
+              properties:
+                status: { type: string, enum: [CHANGES_REQUESTED, REJECTED] }
+                note: { type: string }
+                reviewedAt: { type: [string, "null"], format: date-time }
         steps: { type: object, properties: { storeDetails: { type: boolean }, verification: { type: boolean }, payoutAccount: { type: boolean } } }
         missing:
           type: array
@@ -3577,6 +3782,85 @@ components:
             pageSize: { type: integer, const: 20 }
             totalItems: { type: integer }
             totalPages: { type: integer }
+    AdminDashboard:
+      type: object
+      required: [admin, month, sales, orders, waiting, ordersPerDay, queues]
+      properties:
+        admin: { type: object, properties: { name: { type: string }, roles: { type: array, items: { type: string, enum: [SUPPORT, FINANCE, MODERATION] } } } }
+        month: { type: string, example: 2026-11 }
+        sales: { type: object, description: GMV (items and delivery of paid packages, cancelled ones left out) this month to date vs the same days of last month., properties: { gmvCentavos: { type: integer }, previousCentavos: { type: integer }, change: { type: [number, "null"] } } }
+        orders: { type: object, properties: { count: { type: integer }, previous: { type: integer }, change: { type: [number, "null"] } } }
+        waiting:
+          type: object
+          properties:
+            applications: { type: integer }
+            oldestApplicationAt: { type: [string, "null"], format: date-time }
+            changesRequested: { type: integer }
+            payoutAccountsToCheck: { type: integer }
+            flaggedListings: { type: integer }
+            refundsNeedingAPerson: { type: integer, description: Refunds PayMongo refused for 3 days. }
+            refundsRetrying: { type: integer }
+            payoutsInProgress: { type: integer }
+            payoutsInProgressCentavos: { type: integer }
+        ordersPerDay: { type: array, maxItems: 14, items: { type: object, properties: { day: { type: string }, orders: { type: integer } } } }
+        queues:
+          type: object
+          properties:
+            applications: { type: array, maxItems: 4, items: { type: object, properties: { storeId: { type: string, format: uuid }, name: { type: string }, businessType: { type: string }, category: { type: [string, "null"] }, submittedAt: { type: [string, "null"], format: date-time } } } }
+            flaggedListings: { type: array, maxItems: 3, items: { type: object, properties: { id: { type: string, format: uuid }, source: { type: string }, reason: { type: string }, createdAt: { type: string, format: date-time }, product: { type: object, properties: { id: { type: string }, title: { type: string }, store: { type: string } } } } } }
+    ApplicationList:
+      type: object
+      required: [items, counts, page, pageSize, totalItems, totalPages]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              storeId: { type: string, format: uuid }
+              name: { type: string }
+              slug: { type: string }
+              logoUrl: { type: [string, "null"] }
+              businessType: { type: string, enum: [INDIVIDUAL, REGISTERED_BUSINESS] }
+              category: { type: [string, "null"] }
+              shipsFrom: { type: [string, "null"] }
+              owner: { type: object, properties: { name: { type: string }, email: { type: string } } }
+              status: { type: string, enum: [PENDING, CHANGES_REQUESTED, REJECTED, APPROVED] }
+              submittedAt: { type: [string, "null"], format: date-time }
+              reviewedAt: { type: [string, "null"], format: date-time }
+              checks: { type: object, description: '"4 of 4 passed".', properties: { passed: { type: integer }, total: { type: integer } } }
+        counts: { type: object, properties: { pending: { type: integer }, changesRequested: { type: integer }, rejected: { type: integer }, approved: { type: integer } } }
+        page: { type: integer }
+        pageSize: { type: integer, const: 20 }
+        totalItems: { type: integer }
+        totalPages: { type: integer }
+    Application:
+      type: object
+      properties:
+        storeId: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        status: { type: string, enum: [PENDING, CHANGES_REQUESTED, REJECTED, APPROVED, SUSPENDED] }
+        logoUrl: { type: [string, "null"] }
+        description: { type: [string, "null"] }
+        category: { type: [object, "null"], properties: { slug: { type: string }, name: { type: string } } }
+        shipsFrom: { type: [string, "null"] }
+        submittedAt: { type: [string, "null"], format: date-time }
+        approvedAt: { type: [string, "null"], format: date-time }
+        owner: { type: object, properties: { id: { type: string, format: uuid }, name: { type: string }, email: { type: string }, emailVerified: { type: boolean }, twoFactor: { type: boolean }, joinedAt: { type: string, format: date-time } } }
+        business: { type: object, properties: { type: { type: string, enum: [INDIVIDUAL, REGISTERED_BUSINESS] }, legalName: { type: [string, "null"] }, registrationNo: { type: [string, "null"] }, tinMasked: { type: [string, "null"], example: "•••-•••-•••-000" } } }
+        documents: { type: array, items: { type: object, properties: { id: { type: string, format: uuid }, type: { type: string }, format: { type: [string, "null"] }, bytes: { type: [integer, "null"] }, status: { type: string }, uploadedAt: { type: string, format: date-time } } } }
+        payoutAccount: { type: [object, "null"], properties: { method: { type: string }, bankName: { type: [string, "null"] }, accountName: { type: string }, last4: { type: string }, verified: { type: boolean } } }
+        checks: { type: array, items: { type: object, properties: { key: { type: string, enum: [store_details, business_details, gov_id, business_certificate, payout_account] }, label: { type: string }, passed: { type: boolean } } } }
+        review: { type: [object, "null"], properties: { by: { type: [string, "null"] }, at: { type: string, format: date-time }, note: { type: [string, "null"] } } }
+        canReview: { type: boolean, description: Waiting for review (Approve / Ask for changes / Reject). }
+        history: { type: array, description: From the audit log, newest first (decisions and every look at the TIN or a document)., items: { type: object, properties: { action: { type: string, example: store.view_tin }, by: { type: string }, at: { type: string, format: date-time }, metadata: {} } } }
+    ReviewNote:
+      type: object
+      additionalProperties: false
+      required: [note]
+      properties:
+        note: { type: string, minLength: 10, maxLength: 1000, description: What the seller reads in the email. }
     SellerCancelInput:
       type: object
       additionalProperties: false
@@ -3787,10 +4071,41 @@ components:
     EmailPreferences:
       description: The email settings.
       content: { application/json: { schema: { $ref: "#/components/schemas/EmailPreferences" } } }
+    Application:
+      description: The application after the change.
+      content: { application/json: { schema: { type: object, required: [application], properties: { application: { $ref: "#/components/schemas/Application" } } } } }
+    ApplicationConflict:
+      description: CONFLICT (`not_pending`). It isn't waiting for review any more (another admin decided, or the seller hasn't resubmitted).
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    PayoutAccountsToCheck:
+      description: The payout accounts waiting to be checked.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    storeId: { type: string, format: uuid }
+                    store: { type: object, properties: { name: { type: string }, slug: { type: string } } }
+                    owner: { type: object, properties: { name: { type: string }, email: { type: string } } }
+                    method: { type: string, enum: [GCASH, BANK] }
+                    bankName: { type: [string, "null"] }
+                    accountName: { type: string }
+                    last4: { type: string }
+                    changedAt: { type: string, format: date-time }
+    AdminForbidden:
+      description: FORBIDDEN, with `details.reason`; not_an_admin, two_factor_required, missing_role (with `details.role`). Actions that decide where money goes also need "Confirm it's you" (403 REAUTH_REQUIRED).
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     SellerForbidden:
       description: |
         FORBIDDEN, with `details.reason`; two_factor_required (turn on two-step verification first), admin_account,
         store_suspended (a suspended store can look but not change anything; it can still ship paid orders),
+        store_rejected (a rejected application: looking only),
         not_a_seller (Seller Center needs a store submitted for review), removed_by_vendora (a product taken down
         by Vendora can't be changed).
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }

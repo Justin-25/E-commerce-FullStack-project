@@ -67,7 +67,8 @@ export class DashboardService {
         WHERE so."storeId" = ${store.id}::uuid AND o."placedAt" >= ${from} AND o."placedAt" <= ${now} AND so.status NOT IN ('CANCELLED', 'AWAITING_PAYMENT')
         GROUP BY 1`,
       prisma.sellerOrder.findMany({ where: { storeId: store.id, order: { placedAt: { not: null } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: RECENT_ORDERS, include: ROW_INCLUDE }),
-      prisma.sellerOrder.findMany({ where: { storeId: store.id, status: "PREPARING", order: { placedAt: { not: null } }, shipBy: { lte: cutoff } }, select: { shipBy: true } }),
+      // Every late package (whatever its time), plus those due by today's 6:00 PM (after it, only late ones are left).
+      prisma.sellerOrder.findMany({ where: { storeId: store.id, status: "PREPARING", order: { placedAt: { not: null } }, shipBy: { lte: now > cutoff ? now : cutoff } }, select: { shipBy: true } }),
       prisma.store.findUniqueOrThrow({ where: { id: store.id }, select: { ratingAvg: true, ratingCount: true } }),
       prisma.$queryRaw<{ avg: number | null }[]>`
         SELECT avg(r.rating)::float8 AS avg FROM reviews r JOIN products p ON p.id = r."productId"

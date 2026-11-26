@@ -34,6 +34,9 @@ import { RefundService } from "../../src/modules/orders/refunds.js";
 import { VisitService } from "../../src/modules/stores/visits.js";
 import { DashboardService } from "../../src/modules/seller/dashboard.service.js";
 import { PayoutService } from "../../src/modules/seller/payouts.service.js";
+import { adminRouter } from "../../src/modules/admin/admin.routes.js";
+import { ApplicationService } from "../../src/modules/admin/applications.service.js";
+import { AdminDashboardService } from "../../src/modules/admin/dashboard.service.js";
 
 /**
  * The real catalog, reviews and store routes on a fresh test database filled with the
@@ -91,6 +94,12 @@ export async function createCatalogHarness() {
       services.lowStock = new LowStockService({ prisma, email: deps.email, config: deps.config, logger, now });
       return [
         notificationsRouter({ priceDrops, guards }),
+        adminRouter({
+          dashboard: new AdminDashboardService({ prisma, now }),
+          applications: new ApplicationService({ prisma, media, email: deps.email, config: deps.config, logger, now }),
+          security: new SecurityService({ prisma, kv, email: deps.email, config: deps.config, logger }),
+          guards
+        }),
         catalogRouter({ catalog, visits }),
         reviewsRouter({ reviews: new ReviewService({ prisma }), guards }),
         storesRouter({ stores: new StoreService({ prisma }), guards, visits }),

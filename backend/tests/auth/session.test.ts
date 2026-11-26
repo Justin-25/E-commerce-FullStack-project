@@ -169,7 +169,7 @@ describe("role checks", () => {
     expect(denied.status).toBe(403);
     expect(denied.body.error.code).toBe("FORBIDDEN");
 
-    await h.db.prisma.user.update({ where: { email: "future-admin@example.com" }, data: { role: "ADMIN" } });
+    await h.db.prisma.user.update({ where: { email: "future-admin@example.com" }, data: { role: "ADMIN", adminRoles: ["SUPPORT"] } });
     await browser.post(AUTH.refresh);
     expect((await browser.get("/api/v1/test/admin-only")).status).toBe(200);
   });

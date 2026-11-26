@@ -62,11 +62,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 49 foreign keys and 50 safety (CHECK) rules", async () => {
+  it("has the 50 foreign keys and 52 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
-    expect(fk.n).toBe(49);
-    expect(chk.n).toBe(50);
+    expect(fk.n).toBe(50);
+    expect(chk.n).toBe(52);
   });
 });
 
@@ -183,6 +183,17 @@ describe("orders, reviews & money", () => {
     const v = await variant(await product(s), s);
     for (const q of [0, 100]) await fails(`INSERT INTO cart_items ("cartId", "variantId", quantity) VALUES ($1, $2, $3)`, [cart.id, v, q], /cart_items_quantity_chk/);
     await fails(`INSERT INTO cart_items ("cartId", "variantId", quantity, "priceAtAddCentavos") VALUES ($1, $2, 1, -1)`, [cart.id, v], /cart_items_price_at_add_chk/);
+  });
+
+  it("admins hold at least one role and nobody else holds any; asking for changes or rejecting needs a note", async () => {
+    const u = await user();
+    await fails(`UPDATE users SET role = 'ADMIN' WHERE id = $1`, [u], /users_admin_roles_chk/); // an admin without a role
+    await fails(`UPDATE users SET "adminRoles" = '{SUPPORT}' WHERE id = $1`, [u], /users_admin_roles_chk/); // a customer with one
+    await db.query(`UPDATE users SET role = 'ADMIN', "adminRoles" = '{SUPPORT,FINANCE}' WHERE id = $1`, [u]);
+    const s = await store(await user());
+    await db.query(`UPDATE stores SET status = 'PENDING', "submittedAt" = now() WHERE id = $1`, [s]);
+    for (const status of ["CHANGES_REQUESTED", "REJECTED"]) await fails(`UPDATE stores SET status = $2 WHERE id = $1`, [s, status], /stores_review_note_chk/);
+    await db.query(`UPDATE stores SET status = 'CHANGES_REQUESTED', "reviewNote" = 'Please upload a clearer ID.', "reviewedById" = $2, "reviewedAt" = now() WHERE id = $1`, [s, u]);
   });
 
   it("keeps payouts consistent: one in progress per store, paid has a date, failed a reason, a payout line takes money out", async () => {

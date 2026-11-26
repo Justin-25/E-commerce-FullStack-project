@@ -257,7 +257,7 @@ describe("Store details", () => {
 
   it("aren't for admin accounts, and need sign-in", async () => {
     const s = await owner("Ada Admin");
-    await h.db.prisma.user.update({ where: { id: s.user.id }, data: { role: "ADMIN" } });
+    await h.db.prisma.user.update({ where: { id: s.user.id }, data: { role: "ADMIN", adminRoles: ["SUPPORT"] } });
     const res = await s.browser.put(`${S}/store`, details(`Admin Shop ${++n}`));
     expect(res.status).toBe(403);
     expect(res.body.error.details).toEqual({ reason: "admin_account" });

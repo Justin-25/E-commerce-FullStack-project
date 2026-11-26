@@ -56,6 +56,14 @@ describe("CloudinaryStorage", () => {
     expect(JSON.stringify(ticket)).not.toContain("abcdefghijklmnopqrstuvwxyz1"); // the secret never leaves the server
   });
 
+  it("opens a private document through a signed download link that stops working after the given seconds", () => {
+    const url = new URL(new CloudinaryStorage(URL_, undefined, () => NOW).downloadUrl("vendora/store-documents/u1/abc", "private", "pdf", 300));
+    expect(url.origin + url.pathname).toBe("https://api.cloudinary.com/v1_1/vendora-test/image/download");
+    const signed = { expires_at: String(Number(TS) + 300), format: "pdf", public_id: "vendora/store-documents/u1/abc", timestamp: TS, type: "authenticated" };
+    expect(Object.fromEntries(url.searchParams)).toEqual({ ...signed, api_key: "123456789012345", signature: cloudinarySignature(signed, "abcdefghijklmnopqrstuvwxyz1") });
+    expect(url.toString()).not.toContain("abcdefghijklmnopqrstuvwxyz1");
+  });
+
   it("checks an upload with the Admin API (Basic auth) and reads its type, size and link", async () => {
     const calls = stubFetch({ status: 200, json: { public_id: "vendora/store-logos/u1/abc", format: "PNG", bytes: 1234, type: "upload", secure_url: "https://res.cloudinary.com/vendora-test/image/upload/v1/vendora/store-logos/u1/abc.png" } });
     const found = await new CloudinaryStorage(URL_).find("vendora/store-logos/u1/abc", "public");

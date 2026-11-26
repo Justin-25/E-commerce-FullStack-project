@@ -40,6 +40,8 @@ export interface MediaStorage {
   /** What was really uploaded there, or null if nothing was. */
   find(publicId: string, access: MediaAccess): Promise<StoredMedia | null>;
   remove(publicId: string, access: MediaAccess): Promise<void>;
+  /** A link that opens the file for `seconds` (private files: admins only, every opening audit-logged by the caller). */
+  downloadUrl(publicId: string, access: MediaAccess, format: string, seconds: number): string;
 }
 
 /** Storage names are made by our server, never by the browser: a prefix per purpose and owner + a random part. */
@@ -119,6 +121,18 @@ export class CloudinaryStorage implements MediaStorage {
     const form = new URLSearchParams({ ...params, api_key: this.apiKey, signature: cloudinarySignature(params, this.apiSecret) });
     const res = await this.call(`https://api.cloudinary.com/v1_1/${this.cloudName}/image/destroy`, { method: "POST", body: form });
     if (!res.ok) throw new Error(`Cloudinary: couldn't delete a file (${res.status})`);
+  }
+
+  /**
+   * Cloudinary's private download URL (docs: "Providing time-limited access to private media assets"):
+   * the Admin API's /download endpoint with the same SHA-1 request signature as uploads, valid until
+   * `expires_at`. It's served from the API (not the CDN), so it's for one person opening one file.
+   */
+  downloadUrl(publicId: string, access: MediaAccess, format: string, seconds: number): string {
+    const timestamp = Math.floor(this.now().getTime() / 1000);
+    const params = { expires_at: String(timestamp + seconds), format, public_id: publicId, timestamp: String(timestamp), type: TYPE[access] };
+    const query = new URLSearchParams({ ...params, signature: cloudinarySignature(params, this.apiSecret), api_key: this.apiKey });
+    return `https://api.cloudinary.com/v1_1/${this.cloudName}/image/download?${query.toString()}`;
   }
 
   private async call(url: string, init: RequestInit): Promise<Response> {

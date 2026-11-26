@@ -197,7 +197,7 @@ describe("sellers and admins", () => {
 
   it("the set-up step can't be used by a shopper's '2FA code' step or without signing in", async () => {
     const { user } = await h.signUp({ email: "admin@example.com" });
-    await h.db.prisma.user.update({ where: { id: user.id }, data: { role: "ADMIN" } });
+    await h.db.prisma.user.update({ where: { id: user.id }, data: { role: "ADMIN", adminRoles: ["SUPPORT"] } });
     expect((await (await h.browser()).post(AUTH.twoFactorEnable, { code: "123456" })).status).toBe(401);
     const shopper = await userWithTwoFactor("not-setup@example.com");
     const b = await h.browser();

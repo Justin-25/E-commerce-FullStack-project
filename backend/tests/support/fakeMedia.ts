@@ -52,4 +52,9 @@ export class FakeMedia implements MediaStorage {
     this.files.delete(`${access}:${publicId}`);
     this.removed.push(publicId);
   }
+
+  /** Like Cloudinary's private download URL: names the file, its type and when the link stops working. */
+  downloadUrl(publicId: string, access: MediaAccess, format: string, seconds: number): string {
+    return `https://media.test/${access}/${publicId}.${format}?expires_in=${seconds}`;
+  }
 }

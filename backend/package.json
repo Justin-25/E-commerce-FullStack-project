@@ -20,7 +20,9 @@
     "store:approve": "tsx scripts/approve-store.ts",
     "payout:paid": "tsx scripts/payout-status.ts paid",
     "payout:failed": "tsx scripts/payout-status.ts failed",
-    "demo:payouts": "tsx scripts/demo-payouts.ts"
+    "demo:payouts": "tsx scripts/demo-payouts.ts",
+    "admin:create": "tsx scripts/admin.ts create",
+    "admin:remove": "tsx scripts/admin.ts remove"
   },
   "type": "module",
   "private": "true",

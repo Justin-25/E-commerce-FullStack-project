@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import request from "supertest";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { KeyValueStore } from "../../src/lib/kv.js";
+import { manilaCutoff } from "../../src/modules/orders/deadlines.js";
 import { VisitService, manilaDay } from "../../src/modules/stores/visits.js";
 import type { Browser } from "../support/browser.js";
 import { createCatalogHarness, type CatalogHarness } from "../support/catalogHarness.js";
@@ -78,13 +79,16 @@ describe("Seller dashboard", () => {
 
   it("Needs attention: late orders, orders due today, out of stock, low stock, a payout account being checked", async () => {
     const { seller, product, sku } = await store();
+    // Seen at 9:00 PM (Manila), after the day's 6:00 PM cutoff: a package due at 8:00 PM is late too.
+    const evening = new Date(manilaCutoff(new Date()).getTime() + 3 * HOUR);
     const late = await shop.order(await shop.shopper(), [[sku, 1]]);
-    await h.db.prisma.sellerOrder.update({ where: { id: late.packages[0]?.id ?? "" }, data: { shipBy: new Date(Date.now() - HOUR) } });
+    await h.db.prisma.sellerOrder.update({ where: { id: late.packages[0]?.id ?? "" }, data: { shipBy: new Date(evening.getTime() - HOUR) } });
     const nearlyGone = await sell.publish(seller.browser, { variants: [{ name: "Red", sku: `SKU-${randomUUID().slice(0, 8)}`, priceCentavos: 50_000, stock: 1 }] });
     await shop.order(await shop.shopper(), [[nearlyGone.variants[0]?.sku ?? "", 1]]); // now 0 left
     await h.db.prisma.productVariant.update({ where: { id: product.variants[0]?.id ?? "" }, data: { stock: 4 } });
     await h.db.prisma.payoutAccount.update({ where: { storeId: seller.store.id }, data: { verifiedAt: null } });
 
+    h.clock.offsetMs = evening.getTime() - Date.now();
     const d = await dashboard(seller.browser);
     expect(d.tasks.map((t) => [t.kind, t.count])).toEqual([
       ["late", 1],

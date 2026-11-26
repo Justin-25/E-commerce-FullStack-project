@@ -32,6 +32,9 @@ import { RefundService } from "./modules/orders/refunds.js";
 import { VisitService } from "./modules/stores/visits.js";
 import { DashboardService } from "./modules/seller/dashboard.service.js";
 import { PayoutService } from "./modules/seller/payouts.service.js";
+import { adminRouter } from "./modules/admin/admin.routes.js";
+import { ApplicationService } from "./modules/admin/applications.service.js";
+import { AdminDashboardService } from "./modules/admin/dashboard.service.js";
 import { sellerRouter } from "./modules/seller/seller.routes.js";
 import { notificationsRouter } from "./modules/notifications/notifications.routes.js";
 import { PriceDropService } from "./modules/notifications/priceDrops.service.js";
@@ -142,6 +145,10 @@ if (prisma) {
   services.push(lowStock);
   // Variants that dropped below 10: one email per store (each variant once until it's restocked).
   every(FIFTEEN_MINUTES, "the low-stock emails run", () => lowStock.run());
+
+  const applications = new ApplicationService({ prisma, media, email, config, logger });
+  services.push(applications);
+  routers.push(adminRouter({ dashboard: new AdminDashboardService({ prisma }), applications, security, guards }));
 
   const priceDrops = new PriceDropService({ prisma, email, config, logger });
   services.push(priceDrops);

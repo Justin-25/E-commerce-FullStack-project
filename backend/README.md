@@ -21,7 +21,9 @@ npm run dev            # http://localhost:4000/health
 | `npm run check` | Generate the Prisma client, type check, lint, test (run before every commit) |
 | `npm test` | Tests only (Vitest + Supertest) |
 | `npm run secrets` | Add any missing secret keys to `.env` (keeps existing ones) |
-| `npm run store:approve -- <web-address>` | Approve a store waiting for review (until the admin screens of milestone 7) |
+| `npm run admin:create -- <email> support,finance` | Make an existing account an admin with these roles (Support, Finance, Moderation), or change an admin's roles |
+| `npm run admin:remove -- <email>` | Back to a normal account, signed out everywhere |
+| `npm run store:approve -- <web-address>` | Approve a store waiting for review from the server (the admin screen does it too) |
 | `npm run build` / `npm start` | Compile to `dist/` and run the compiled server |
 
 ## Database (PostgreSQL on Neon + Prisma 7)
@@ -236,11 +238,11 @@ How it works:
 
 How it works:
 - **Two-step verification first.** Sellers handle other people's money, so an account needs 2FA before it can save any step (403 `two_factor_required`); sellers can't turn it off. Admin accounts can't open stores.
-- **Drafts, then review.** Every step is saved as it goes ("Save and exit"): the store is a `DRAFT` nobody else sees. "Submit for review" checks every step, makes the store `PENDING` and the account a `SELLER` (one `POST /auth/refresh` puts the new role in the access pass), and emails a confirmation. Products can be added while it's reviewed (6b); shoppers see the store once an admin approves it (milestone 7; until then `npm run store:approve -- <web-address>`).
+- **Drafts, then review.** Every step is saved as it goes ("Save and exit"): the store is a `DRAFT` nobody else sees. "Submit for review" checks every step, makes the store `PENDING` and the account a `SELLER` (one `POST /auth/refresh` puts the new role in the access pass), and emails a confirmation. Products can be added while it's reviewed (6b); shoppers see the store once an admin approves it (milestone 7a). If the admin asks for changes, the seller sees the note here and can edit and submit again.
 - **One name per store.** The name becomes the store's web address (`hearth-home`), so names are unique however they're written ("Glow-Lab" = "Glow Lab"), a few are reserved (anything with "vendora", "admin", "support"…), and the name is locked once submitted. Two sellers claiming a name at the same moment: the database's unique index decides.
 - **Sensitive numbers are encrypted.** The TIN (required for everyone) and the payout account number are stored with AES-256-GCM, bound to their store; only "TIN ending in 000" and "•••• 4567" ever come back. Business details and documents are locked once submitted.
 - **Changing where the money goes is guarded.** After submitting, a new payout account needs "Confirm it's you", is recorded in security activity, emails the owner (so a stolen session can't quietly redirect payouts), and is verified again.
-- **Uploads go straight to Cloudinary**, not through our server. `POST /seller/uploads` returns a ticket signed with the API secret (which never leaves the server) for ONE file, at a place our server chose (`vendora/store-documents/<account>/<random>`), in the allowed formats, and it can never replace a file that's already there (`overwrite=false` is signed in; a live test showed a ticket could otherwise swap a file after our check). ID and business documents are `authenticated` (private) files that only admins will open, through expiring links (milestone 7). When the browser hands back the upload, the server checks it with Cloudinary's Admin API: it must be in this account's folder, really exist, and have an allowed type and size (logos 5 MB, documents 10 MB). Anything else is refused and deleted. Links and file sizes come from Cloudinary, never from the browser. A replaced or removed logo is deleted from Cloudinary. Without `CLOUDINARY_URL`, uploads are simply off.
+- **Uploads go straight to Cloudinary**, not through our server. `POST /seller/uploads` returns a ticket signed with the API secret (which never leaves the server) for ONE file, at a place our server chose (`vendora/store-documents/<account>/<random>`), in the allowed formats, and it can never replace a file that's already there (`overwrite=false` is signed in; a live test showed a ticket could otherwise swap a file after our check). ID and business documents are `authenticated` (private) files that only admins open, through 5-minute signed links (milestone 7a). When the browser hands back the upload, the server checks it with Cloudinary's Admin API: it must be in this account's folder, really exist, and have an allowed type and size (logos 5 MB, documents 10 MB). Anything else is refused and deleted. Links and file sizes come from Cloudinary, never from the browser. A replaced or removed logo is deleted from Cloudinary. Without `CLOUDINARY_URL`, uploads are simply off.
 
 ## Products in Seller Center (milestone 6b)
 
@@ -317,6 +319,29 @@ How it works:
 - **Statements:** every ledger line of a month as CSV (amounts as numbers, negative for money out), with the same formula-safe CSV writer as the orders export.
 - **Demo data:** the demo stores get a demo GCash payout account (encrypted like a real one) and one payout for every past Monday (`npm run demo:payouts` for a database seeded before 6d; the seed does it too).
 
+## Admin: seller approvals (milestone 7a)
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/v1/admin/dashboard` | Any admin: this month's sales and orders against the same days last month, what's waiting (applications, payout accounts, refunds, payouts), orders per day, the oldest applications |
+| `GET /api/v1/admin/applications?tab=&q=&page=` | Seller approvals: Waiting (oldest first) / Changes requested / Rejected / Approved, search by store name or email |
+| `GET /api/v1/admin/applications/{storeId}` | One application: details, masked TIN, documents, payout account, checks, history |
+| `POST …/{storeId}/tin`, `POST …/{storeId}/documents/{documentId}/link` | "Show TIN" and "Open" a private document (a 5-minute link); both recorded in the audit log |
+| `POST …/{storeId}/approve` | Approve ("Confirm it's you" first), with an optional note |
+| `POST …/{storeId}/request-changes`, `POST …/{storeId}/reject` | Ask for changes, or reject (final); both need a note for the seller |
+| `GET /api/v1/admin/payout-accounts` | Payout accounts changed after approval, waiting to be checked |
+| `POST /api/v1/admin/payout-accounts/{storeId}/number`, `…/verify` | "Show number" (logged) and "Verify" ("Confirm it's you" first) |
+
+How it works:
+- **Admins are made by a command on the server, never from a screen:** `npm run admin:create -- ana@example.com support,finance` (an existing account with a verified email that doesn't own a store, not even a draft), `npm run admin:remove -- ana@example.com` (back to a normal account and signed out everywhere). There's no "make me an admin" request for anyone to abuse.
+- **Separate roles: Support, Finance, Moderation.** Each admin holds only the roles they need, so one stolen admin account can't do everything. Seller approvals are Support's; payouts and refunds will be Finance's (7b); reports and warnings Moderation's (7d). The dashboard is for every admin. A database rule keeps it consistent: an admin has at least one role, nobody else has any.
+- **Checked in the database on every request,** not from the access pass: an admin account, active, with two-step verification on, and the role the screen needs. Removing an admin or a role works at once, even in a session that's already open.
+- **Sensitive data only on request, and every look is recorded.** The TIN shows as `•••-•••-•••-000` until "Show TIN"; ID and business documents open through a signed Cloudinary link that stops working after 5 minutes (the files are private, `authenticated`); a payout account number shows as `•••• 4567` until "Show number". Each of these is a row in the audit log (who, when, from which IP, which document).
+- **Every decision is one transaction with its audit row.** Approve, Ask for changes and Reject only move an application that's still waiting, checked in the same statement, so two admins deciding at the same moment can't both win (the other gets 409 and reloads). The seller is emailed afterwards.
+- **Ask for changes** sends the application back with a note the seller sees on "Open your store": they can edit their business details, documents and payout account, and submit again. **Reject** is final: the store can't be edited, submitted or used to sell. A database rule makes sure both always carry a note.
+- **"Confirm it's you"** before approving (it also verifies where the seller's money goes) and before verifying a changed payout account. Verify only succeeds if the account still has the number that was checked; if the seller changed it again meanwhile, it stays unverified (409 `changed`).
+- `npm run store:approve -- <web-address>` still works (recorded as "a command on the server").
+
 ## If Redis (Upstash) goes down
 
 Redis commands give up after 1 second instead of waiting, and each part of the API then does what's safest for it:
@@ -346,6 +371,7 @@ Measured with Redis pointed at an unreachable address: before this, every API re
 - `tests/seller/onboarding.test.ts` walks through becoming a seller against a fake Cloudinary: 2FA first, drafts, submit and approval, encrypted TIN and payout number, registered businesses, unique and reserved names (also claimed at the same moment), locked details after submitting, re-auth and an email for payout changes, uploads (someone else's file, missing, too big, wrong type, the same file twice, limits, outages) and privacy. `media.test.ts` checks the real Cloudinary client (signatures against Cloudinary's documented example, requests, outages).
 - `tests/seller/products.test.ts` checks Seller Center products: who may sell (shoppers, draft stores, missing 2FA, suspended stores, admins), Save draft and every Publish rule, photos (someone else's, missing, too big, one file per photo, the 120-an-hour allowance), SKUs, the 64 KB form, out-of-date forms, stock as a difference while orders come in, variants and photos that past orders still use, the Active toggle (carts too), deals before and after they end, delete, the list (tabs that add up, search with `%` and `_` as plain text, categories, sold in 30 days, low stock, pages) and Express delivery at checkout. `tests/notifications/price-drops.test.ts` checks price-drop emails: once per price, at most one a day, drops that end, deals, hidden products, opted-out and unverified shoppers, the unsubscribe link (forged and tampered tokens) and simultaneous runs.
 - `tests/seller/orders.test.ts` checks Seller Center orders: only my paid packages, To ship by urgency, today's 6:00 PM deadline and late ones, search, the order page (my items only, address while it needs shipping, earnings, what's next), Mark as shipped (every field rule, the tracking number format, two clicks at once, fixing a typo, someone else's tracking number, after delivery, suspended stores), the new-order email (cash on delivery and online, a payment reported twice), privacy after delivery and Export CSV (formula injection from a buyer's name). `tests/checkout/delivery.test.ts` checks "Order received" (ledger lines and dates, the order completing, cash collected, pressing twice, not shipped yet, someone else's), the automatic confirmation after 7 days, and the buyer and the job at the same moment. `tests/checkout/cancellations.test.ts` checks cancellations and refunds: the seller's Cancel order (every rule, stock back or to 0, the refund amount with the delivery fee, emails, a cancel and a ship at the same moment), two-store orders, cash on delivery, the buyer's cancel within the hour (and after it), the warnings and the automatic cancel, refunds PayMongo refuses (hourly retries, given up after 3 days), a lost answer found by our id, two runs at once, and a late payment for a cancelled order. `tests/seller/dashboard.test.ts` checks the dashboard (sales and orders against the period before, cancelled orders left out, 7 and 30 days, Needs attention) and store visits (unique per day, no cookie, bots, the nightly copy, Redis down). `tests/seller/payouts.test.ts` checks payouts (waiting, available, Request payout once, paid, failed and paid again, the account and store rules, the Monday payout and two runs at once, statements) and the demo payout history. `tests/notifications/low-stock.test.ts` checks low-stock emails (once until restocked, typed-in numbers, the alert off, one email per store, simultaneous runs). `tests/deadlines.test.ts` checks ship-by times in Manila, CSV escaping and "Maria S.".
+- `tests/admin/approvals.test.ts` checks the admin pages: who gets in (shoppers, missing 2FA, the wrong role, a removed admin in an open session), making and removing admins, the queue (order, tabs, search), Show TIN and Open document with their audit rows, Approve with "Confirm it's you", Ask for changes and submitting again, Reject being final, two admins deciding at once, payout-account checks and the dashboard.
 - `tests/db/migration.test.ts` checks that every table, index, foreign key and safety rule really exists. CI also migrates and seeds a real PostgreSQL 18 server, the same major version as Neon.
 
 ## Structure
@@ -375,13 +401,14 @@ src/
   modules/seller/        Seller Center: becoming a seller (onboarding, documents, payout account), products, uploads,
                          orders (ship, CSV), the earnings ledger, the dashboard, payouts
   modules/notifications/ price-drop and low-stock emails (15-minute jobs), email settings, one-click unsubscribe
+  modules/admin/         the admin pages: access and roles, the audit log, seller approvals, the dashboard
   generated/prisma/      Prisma client (generated by `npm run db:generate`, not committed)
 prisma/
   schema.prisma          the 33 tables
   migrations/            SQL applied to the database, in order
   seed.ts, demo-data.ts  demo categories, stores, products and accounts (safe to run again)
   demo-reviews.ts        demo shoppers, their delivered orders and reviews
-scripts/                 npm run secrets, store:approve, payout:paid / payout:failed, demo:payouts
+scripts/                 npm run secrets, admin:create / admin:remove, store:approve, payout:paid / payout:failed, demo:payouts
 tests/                   API, database and unit tests (tests/support: test database, browser, harness)
 openapi/openapi.yaml     the API contract
 ```
@@ -399,7 +426,9 @@ openapi/openapi.yaml     the API contract
 | Deny JWTs issued before a password change | Reset and change set a per-user "invalid before" time in Redis and revoke every other sign-in chain, so older passes stop working at once. |
 | Password reset tokens | 256 random bits, stored only as a keyed hash, 30-minute expiry, single use, a newer link cancels older ones; at most 1 email a minute and 5 a day. The token sits after `#` in the link, so it never reaches server logs or other sites. |
 | Notify on security changes | Emails after a password reset or change, turning 2FA on or off, every backup-code sign-in, and a changed payout account, each with a way out if it wasn't them. |
-| Re-authenticate before high-value actions | "Confirm it's you" (app code → password → email code), 10 minutes, per device; changing the email needs it, plus a code from the new inbox; so does changing a store's payout account. |
+| Re-authenticate before high-value actions | "Confirm it's you" (app code → password → email code), 10 minutes, per device; changing the email needs it, plus a code from the new inbox; so does changing a store's payout account, and an admin approving a store or verifying a payout account. |
+| Admin access | Admins are made only by a command on the server; separate Support / Finance / Moderation roles; 2FA required; checked in the database on every request, so removing an admin works at once. |
+| Audit log | Every admin decision, and every look at a full TIN, a private document or a payout account number, is a row (who, what, when, IP) written in the same transaction as the change. |
 | Social sign-in (OAuth) safely | Authorization code + PKCE, state and nonce checked, ID token verified; code exchanged server to server; existing password accounts connect only after their password; unverified Google emails refused. |
 | Two-factor authentication | Authenticator app (TOTP, `otpauth`) + 10 single-use backup codes; required for sellers and admins; also asked after a password reset; replay-proof; wrong codes count toward the lockout. |
 | Encrypt sensitive data | The 2FA secret is encrypted with AES-256-GCM (`DATA_ENCRYPTION_KEY`), bound to its user, so a copy pasted into another account fails to decrypt. Sellers' TINs and payout account numbers are encrypted the same way, bound to their store; only the last digits are ever shown. Backup codes are keyed hashes. |

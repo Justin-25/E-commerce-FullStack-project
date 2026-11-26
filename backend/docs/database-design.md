@@ -46,6 +46,7 @@ erDiagram
     string name
     string phone "+63…"
     enum role "CUSTOMER | SELLER | ADMIN"
+    enum adminRoles "SUPPORT, FINANCE, MODERATION (a list, admins only; 7a)"
     enum status "ACTIVE | SUSPENDED"
     datetime passwordChangedAt "tokens issued before this are refused"
     string twoFactorSecret "AES-256-GCM, bound to the user id"
@@ -142,7 +143,10 @@ erDiagram
     string logoUrl
     string logoPublicId "to delete a replaced logo (6b)"
     string bannerUrl
-    enum status "DRAFT | PENDING | APPROVED | REJECTED | SUSPENDED"
+    enum status "DRAFT | PENDING | CHANGES_REQUESTED | APPROVED | REJECTED | SUSPENDED"
+    string reviewNote "the admin's note to the seller (7a)"
+    datetime reviewedAt
+    uuid reviewedById FK "the admin who decided"
     enum businessType "INDIVIDUAL | REGISTERED_BUSINESS"
     string legalName
     string registrationNo "DTI / SEC"
@@ -448,7 +452,7 @@ erDiagram
   audit_logs {
     uuid id PK
     uuid actorId FK
-    string action "seller.approve, product.remove, user.suspend…"
+    string action "store.approve, store.view_tin, payout_account.verify…"
     string targetType
     uuid targetId
     json metadata
@@ -460,7 +464,8 @@ erDiagram
 - **A seller's balance is the sum of their ledger entries,** not a number that gets overwritten. Every peso can be traced to an order, fee, refund or payout, the way accounting systems do it.
   - Example: a ₱9,998 sale (+999800), the fee (−50000), and later a payout (−949800).
   - **Written at delivery** (milestone 6c), in the same transaction that marks the package delivered: a `SALE` line and a `FEE` line (none in a store's first 30 days), both available 7 days after delivery. A partial unique index, `(sellerOrderId, type) WHERE type IN ('SALE', 'FEE')`, allows one of each per package, so a package can never be credited twice. The migration wrote these lines for packages delivered before 6c.
-- **Admin actions always write an `audit_logs` row.** That's what the "audit-logged" note on the admin AI panel refers to.
+- **Admin actions always write an `audit_logs` row,** in the same transaction as the change; so does every look at a full TIN, a private document or a payout account number. `actorId` is null when a command on the server did it (`npm run store:approve`, `admin:create`). Newest first through `audit_logs_createdAt_idx`.
+- **Seller approvals** (milestone 7a, migrations `20261128090000_admin_enums` and `20261128090100_admin`): `users.adminRoles` lists an admin's roles (CHECK `users_admin_roles_chk`: an ADMIN has at least one, nobody else has any). Stores get `CHANGES_REQUESTED` (the seller can edit and submit again; REJECTED is final), plus `reviewNote`, `reviewedAt` and `reviewedById` (CHECK `stores_review_note_chk`: CHANGES_REQUESTED and REJECTED always carry a note). The new enum value has its own migration, as in 6a.
 
 ## 6 · AI assistant (milestone 8)
 
