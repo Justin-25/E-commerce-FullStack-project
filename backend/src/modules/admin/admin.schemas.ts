@@ -41,3 +41,67 @@ export const approveSchema = z.strictObject({
 export const reviewNoteSchema = z.strictObject({ note });
 
 export type ApplicationListQuery = z.infer<typeof applicationListSchema>;
+
+// --- Payouts & refunds (Finance, milestone 7b) ---
+
+export const PAYOUT_TABS = ["in_progress", "failed", "paid"] as const;
+export type PayoutTab = (typeof PAYOUT_TABS)[number];
+export const REFUND_TABS = ["needs_person", "retrying", "sent"] as const;
+export type RefundTab = (typeof REFUND_TABS)[number];
+
+/** Payouts: in progress (oldest first, the ones to transfer), failed, paid. */
+export const payoutListSchema = z.object({
+  tab: z.enum(PAYOUT_TABS, { error: "Unknown tab" }).default("in_progress"),
+  /** The payout's reference (PO-2026-1123-K4Q2) or the store's name. */
+  q: search,
+  page
+});
+/** Refunds: needing a person (oldest first), retrying, sent. */
+export const refundListSchema = z.object({
+  tab: z.enum(REFUND_TABS, { error: "Unknown tab" }).default("needs_person"),
+  /** The order number (VD-21458) or the buyer's email. */
+  q: search,
+  page
+});
+
+export const payoutIdSchema = z.object({ payoutId: z.uuid({ error: "Payout not found" }) });
+export const refundIdSchema = z.object({ refundId: z.uuid({ error: "Refund not found" }) });
+
+/** A bank or GCash reference number as printed on the receipt: letters, digits, spaces and - / . # */
+const transferReference = z
+  .string({ error: "Enter the transfer's reference number" })
+  .trim()
+  .min(4, { error: "Enter the transfer's reference number (4 characters or more)" })
+  .max(100, { error: "Use 100 characters or fewer" })
+  .regex(/^[A-Za-z0-9][A-Za-z0-9 ./#-]*$/, { error: "Use letters, numbers, spaces and - / . # only" });
+
+/** "Mark paid": the transfer's reference, shown to the seller. */
+export const markPaidSchema = z.strictObject({ transferReference });
+/** "Mark failed": why (the seller reads it). */
+export const markFailedSchema = z.strictObject({
+  reason: z.string({ error: "Say why the transfer failed" }).trim().min(10, { error: "Say why the transfer failed (10 characters or more)" }).max(255, { error: "Use 255 characters or fewer" })
+});
+/** "Mark as refunded": a refund made in PayMongo's dashboard (its id, checked with PayMongo), or another transfer. */
+export const markRefundedSchema = z.discriminatedUnion(
+  "via",
+  [
+    z.strictObject({
+      via: z.literal("PAYMONGO_DASHBOARD"),
+      providerRefundId: z.string({ error: "Enter PayMongo's refund id" }).trim().regex(/^ref_[A-Za-z0-9_]{6,60}$/, { error: "PayMongo refund ids look like ref_ followed by letters and numbers" })
+    }),
+    z.strictObject({
+      via: z.literal("OTHER_TRANSFER"),
+      reference: transferReference,
+      note: z
+        .string()
+        .trim()
+        .max(255, { error: "Use 255 characters or fewer" })
+        .optional()
+        .transform((v) => v || null)
+    })
+  ],
+  { error: "Choose how the refund was sent" }
+);
+
+export type PayoutListQuery = z.infer<typeof payoutListSchema>;
+export type RefundListQuery = z.infer<typeof refundListSchema>;

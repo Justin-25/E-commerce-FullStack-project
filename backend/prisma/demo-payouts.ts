@@ -71,7 +71,7 @@ export async function seedDemoPayouts(prisma: PrismaClient, encryptionKey: strin
         orderCount: new Set(group.filter((l) => l.type === "SALE").map((l) => l.sellerOrderId)).size,
         grossCentavos: sum("SALE"),
         feesCentavos: -sum("FEE"),
-        ...(paidAt <= now ? { status: "PAID" as const, paidAt } : { status: "PROCESSING" as const }),
+        ...(paidAt <= now ? { status: "PAID" as const, paidAt, transferReference: `DEMO-${reference}` } : { status: "PROCESSING" as const }),
         createdAt,
         updatedAt: paidAt <= now ? paidAt : createdAt
       });

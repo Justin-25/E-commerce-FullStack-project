@@ -62,11 +62,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 50 foreign keys and 52 safety (CHECK) rules", async () => {
+  it("has the 52 foreign keys and 53 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
-    expect(fk.n).toBe(50);
-    expect(chk.n).toBe(52);
+    expect(fk.n).toBe(52);
+    expect(chk.n).toBe(53);
   });
 });
 
@@ -196,16 +196,17 @@ describe("orders, reviews & money", () => {
     await db.query(`UPDATE stores SET status = 'CHANGES_REQUESTED', "reviewNote" = 'Please upload a clearer ID.', "reviewedById" = $2, "reviewedAt" = now() WHERE id = $1`, [s, u]);
   });
 
-  it("keeps payouts consistent: one in progress per store, paid has a date, failed a reason, a payout line takes money out", async () => {
+  it("keeps payouts consistent: one in progress per store, paid has a date and a transfer reference, failed a reason, a payout line takes money out", async () => {
     const s = await store(await user());
     const payout = (reference: string, status = "PROCESSING", extra = "", values: unknown[] = []) =>
       db.query(`INSERT INTO payouts (id, "storeId", reference, "amountCentavos", method, "accountLast4", status, "updatedAt"${extra ? `, ${extra}` : ""}) VALUES (gen_random_uuid(), $1, $2, 10000, 'GCASH', '4567', $3, now()${values.map((_, i) => `, $${i + 4}`).join("")}) RETURNING id`, [s, reference, status, ...values]);
     const first = (await payout("PO-1")).rows[0] as { id: string };
     await expect(payout("PO-2")).rejects.toThrow(/unique/i); // a second one in progress
-    await expect(payout("PO-3", "PAID")).rejects.toThrow(/payouts_status_chk/); // paid without a date
+    await expect(payout("PO-3", "PAID", `"transferReference"`, ["BPI 0001"])).rejects.toThrow(/payouts_status_chk/); // paid without a date
+    await expect(payout("PO-3B", "PAID", `"paidAt"`, [new Date()])).rejects.toThrow(/payouts_paid_reference_chk/); // paid without the transfer's reference
     await expect(payout("PO-4", "FAILED")).rejects.toThrow(/payouts_status_chk/); // failed without a reason
-    await expect(payout("PO-5", "PAID", `"paidAt", "orderCount"`, [new Date(), -1])).rejects.toThrow(/payouts_breakdown_chk/);
-    await payout("PO-6", "PAID", `"paidAt"`, [new Date()]); // a paid one beside the one in progress is fine
+    await expect(payout("PO-5", "PAID", `"paidAt", "transferReference", "orderCount"`, [new Date(), "BPI 0001", -1])).rejects.toThrow(/payouts_breakdown_chk/);
+    await payout("PO-6", "PAID", `"paidAt", "transferReference"`, [new Date(), "BPI 0002"]); // a paid one beside the one in progress is fine
     const line = (amount: number, payoutId: string | null) =>
       db.query(`INSERT INTO ledger_entries (id, "storeId", "payoutId", type, "amountCentavos", "availableAt") VALUES (gen_random_uuid(), $1, $2, 'PAYOUT', $3, now())`, [s, payoutId, amount]);
     await expect(line(-10_000, null)).rejects.toThrow(/ledger_entries_payout_chk/);
@@ -214,7 +215,7 @@ describe("orders, reviews & money", () => {
     await fails(`INSERT INTO store_daily_visits ("storeId", day, visits) VALUES ($1, current_date, -1)`, [s], /store_daily_visits_visits_chk/);
   });
 
-  it("keeps cancellations and refunds consistent: who and why together, one refund per package, a sent refund has PayMongo's id", async () => {
+  it("keeps cancellations and refunds consistent: who and why together, one refund per package, a sent refund says how (PayMongo's id or a transfer's reference)", async () => {
     const s = await store(await user());
     const o = await order(await user());
     const pkg = (await one<{ id: string }>(`INSERT INTO seller_orders (id, "orderId", "storeId", "subtotalCentavos", "deliveryCentavos", "updatedAt") VALUES (gen_random_uuid(), $1, $2, 749900, 0, now()) RETURNING id`, [o.id, s])).id;
@@ -228,6 +229,13 @@ describe("orders, reviews & money", () => {
     await expect(refund(749_900, `status, "sentAt"`, ["SENT", new Date()])).rejects.toThrow(/refunds_sent_chk/);
     await refund(749_900);
     await expect(refund(100)).rejects.toThrow(/unique/i); // one refund per package
+    // Sent (7b): by our PayMongo call or a refund made in PayMongo's dashboard (PayMongo's id), or by another transfer (its reference).
+    const r = (await one<{ id: string }>(`SELECT id FROM refunds WHERE "sellerOrderId" = $1`, [pkg])).id;
+    const sent = (set: string) => db.query(`UPDATE refunds SET status = 'SENT', "sentAt" = now(), ${set} WHERE id = $1`, [r]);
+    await expect(sent(`"providerRefundId" = 'ref_abc123'`)).rejects.toThrow(/refunds_sent_chk/); // how it was sent is missing
+    await expect(sent(`"sentVia" = 'PAYMONGO_DASHBOARD'`)).rejects.toThrow(/refunds_sent_chk/); // no PayMongo id
+    await expect(sent(`"sentVia" = 'OTHER_TRANSFER', "providerRefundId" = 'ref_abc123'`)).rejects.toThrow(/refunds_sent_chk/); // no transfer reference
+    await sent(`"sentVia" = 'OTHER_TRANSFER', "manualReference" = 'GCASH 9012 3456'`);
   });
 
   it("keeps shipping and earnings consistent: tracking for shipped packages, one tracking number per package, one sale per package", async () => {

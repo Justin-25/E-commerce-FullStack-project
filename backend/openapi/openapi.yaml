@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.14.0
+  version: 0.15.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -60,8 +60,9 @@ tags:
   - name: admin
     description: |
       Admin pages (milestone 7). An ADMIN account with two-step verification on, checked in the database on
-      every request, holding the role a page needs: SUPPORT (seller applications, payout accounts), FINANCE,
-      MODERATION. Every action, and every look at sensitive data, is written to the audit log.
+      every request, holding the role a page needs: SUPPORT (seller applications, payout accounts), FINANCE
+      (payouts and refunds), MODERATION. Every action, and every look at sensitive data, is written to the audit
+      log; actions that move or decide where money goes also need "Confirm it's you".
 
 paths:
   /health:
@@ -2433,6 +2434,207 @@ paths:
           description: 'CONFLICT, with `details.reason`: already_verified, changed.'
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
+  /api/v1/admin/payouts:
+    get:
+      summary: Payouts (Finance)
+      description: In progress oldest first (the ones to transfer); failed and paid newest first; 20 a page. Search by the payout's reference or the store's name. `counts` ignore the search; `inProgressCentavos` is everything still to transfer.
+      operationId: listPayouts
+      tags: [admin]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: tab, in: query, schema: { type: string, enum: [in_progress, failed, paid], default: in_progress } }
+        - { name: q, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 1 } }
+      responses:
+        "200":
+          description: A page of payouts.
+          content: { application/json: { schema: { $ref: "#/components/schemas/AdminPayoutList" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+
+  /api/v1/admin/payouts/{payoutId}/account:
+    parameters:
+      - { name: payoutId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Show the account to transfer to (Finance, logged)
+      description: The seller's full GCash or bank number for an in-progress payout; each look is in the audit log. Never an account the seller changed after the payout was made (409 `account_changed`; mark the payout failed instead).
+      operationId: showPayoutAccount
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "200":
+          description: Where to send the money.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [account]
+                properties:
+                  account:
+                    type: object
+                    properties:
+                      method: { type: string, enum: [GCASH, BANK] }
+                      bankName: { type: [string, "null"] }
+                      accountName: { type: string }
+                      accountNumber: { type: string, example: "+639171234567" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: 'CONFLICT, with `details.reason`: not_processing (already paid or failed), account_changed.'
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/admin/payouts/{payoutId}/paid:
+    parameters:
+      - { name: payoutId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Mark a payout paid (Finance, Confirm it's you)
+      description: After the transfer, with its reference (shown to the seller, who is emailed). Only while it's in progress, checked in the same statement as the change, so two admins can't both mark it.
+      operationId: markPayoutPaid
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [transferReference]
+              properties:
+                transferReference: { type: string, minLength: 4, maxLength: 100, pattern: "^[A-Za-z0-9][A-Za-z0-9 ./#-]*$", example: GCASH 9012 3456 7890 }
+      responses:
+        "200": { $ref: "#/components/responses/AdminPayout" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/PayoutNotProcessing" }
+
+  /api/v1/admin/payouts/{payoutId}/failed:
+    parameters:
+      - { name: payoutId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Mark a payout failed (Finance, Confirm it's you)
+      description: The transfer didn't go through. Its money is back in the seller's balance for the next payout (a new ledger line; history is never edited); the seller is emailed the reason.
+      operationId: markPayoutFailed
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 10, maxLength: 255, example: The GCash account is closed }
+      responses:
+        "200": { $ref: "#/components/responses/AdminPayout" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/PayoutNotProcessing" }
+
+  /api/v1/admin/refunds:
+    get:
+      summary: Refunds (Finance)
+      description: Needing a person (PayMongo refused them for 3 days, or showed a refund we never recorded) oldest first; retrying (hourly) next try first; sent newest first; 20 a page. Search by order number (VD-21458) or the buyer's email.
+      operationId: listRefunds
+      tags: [admin]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: tab, in: query, schema: { type: string, enum: [needs_person, retrying, sent], default: needs_person } }
+        - { name: q, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 1 } }
+      responses:
+        "200":
+          description: A page of refunds.
+          content: { application/json: { schema: { $ref: "#/components/schemas/AdminRefundList" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+
+  /api/v1/admin/refunds/{refundId}/retry:
+    parameters:
+      - { name: refundId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Try a refund again now (Finance, Confirm it's you)
+      description: |
+        One try right away. First PayMongo's own list of the payment's refunds is checked: one we never recorded
+        (e.g. made in PayMongo's dashboard) refuses it (409 `unrecorded_refund`), so the buyer can't be refunded
+        twice. A refund the job is trying at this moment is left alone (409 `busy`). `result`: sent, or
+        still_failing (a refund that needed a person goes back there, without a second email to the buyer).
+      operationId: retryRefund
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "200":
+          description: How the try went, and the refund now.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [result, refund]
+                properties:
+                  result: { type: string, enum: [sent, still_failing] }
+                  refund: { $ref: "#/components/schemas/AdminRefund" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: 'CONFLICT, with `details.reason`: already_sent, busy, changed, unrecorded_refund.'
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/v1/admin/refunds/{refundId}/refunded:
+    parameters:
+      - { name: refundId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Mark a refund as refunded by hand (Finance, Confirm it's you)
+      description: |
+        For a refund that needs a person. Either the id of a refund made in PayMongo's dashboard (checked with
+        PayMongo: on this order's payment, the same amount, not failed, not recorded for another refund; a
+        problem is a 400 on `providerRefundId`), or another transfer (e.g. GCash) with its reference. The buyer
+        gets the email the "refund delayed" one promised; the change and its audit row are one transaction.
+      operationId: markRefunded
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required: [via, providerRefundId]
+                  properties:
+                    via: { const: PAYMONGO_DASHBOARD }
+                    providerRefundId: { type: string, pattern: "^ref_[A-Za-z0-9_]{6,60}$" }
+                - type: object
+                  additionalProperties: false
+                  required: [via, reference]
+                  properties:
+                    via: { const: OTHER_TRANSFER }
+                    reference: { type: string, minLength: 4, maxLength: 100, example: GCASH 9012 3456 7890 }
+                    note: { type: string, maxLength: 255, description: For the audit log only. }
+      responses:
+        "200":
+          description: The refund, now sent.
+          content: { application/json: { schema: { type: object, required: [refund], properties: { refund: { $ref: "#/components/schemas/AdminRefund" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: 'CONFLICT, with `details.reason`: already_sent, not_failed (still being retried, or changed meanwhile).'
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
   /api/v1/notifications/preferences:
     get:
       summary: My email settings
@@ -3771,6 +3973,7 @@ components:
                   status: { type: string, enum: [PROCESSING, PAID, FAILED] }
                   createdAt: { type: string, format: date-time }
                   paidAt: { type: [string, "null"], format: date-time }
+                  transferReference: { type: [string, "null"], description: The bank or GCash transfer's reference (paid payouts). }
                   failureReason: { type: [string, "null"] }
                   orders: { type: integer }
                   grossCentavos: { type: integer }
@@ -3782,6 +3985,64 @@ components:
             pageSize: { type: integer, const: 20 }
             totalItems: { type: integer }
             totalPages: { type: integer }
+    AdminPayout:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        reference: { type: string, example: PO-2026-1123-K4Q2 }
+        status: { type: string, enum: [PROCESSING, PAID, FAILED] }
+        store: { type: object, properties: { id: { type: string, format: uuid }, name: { type: string }, slug: { type: string } } }
+        amountCentavos: { type: integer }
+        orders: { type: integer }
+        method: { type: string, enum: [GCASH, BANK] }
+        accountLast4: { type: string }
+        accountChanged: { type: boolean, description: In progress only. The seller's account changed since; don't transfer, mark it failed. }
+        createdAt: { type: string, format: date-time }
+        paidAt: { type: [string, "null"], format: date-time }
+        transferReference: { type: [string, "null"] }
+        failureReason: { type: [string, "null"] }
+        handledBy: { type: [string, "null"], description: The Finance admin who marked it. }
+    AdminPayoutList:
+      type: object
+      required: [items, counts, inProgressCentavos, page, pageSize, totalItems, totalPages]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AdminPayout" } }
+        counts: { type: object, properties: { inProgress: { type: integer }, failed: { type: integer }, paid: { type: integer } } }
+        inProgressCentavos: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer, const: 20 }
+        totalItems: { type: integer }
+        totalPages: { type: integer }
+    AdminRefund:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        order: { type: object, properties: { id: { type: string, format: uuid }, number: { type: string, example: VD-21458 } } }
+        buyer: { type: object, properties: { name: { type: string }, email: { type: string } } }
+        store: { type: [string, "null"], description: The cancelled package's store (null for whole-payment refunds). }
+        amountCentavos: { type: integer }
+        reason: { type: string, enum: [PACKAGE_CANCELLED, DUPLICATE_PAYMENT, LATE_PAYMENT_SOLD_OUT] }
+        paymentMethod: { type: string, enum: [GCASH, MAYA, CARD, COD] }
+        status: { type: string, enum: [PENDING, SENT, FAILED] }
+        attempts: { type: integer }
+        lastError: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+        nextAttemptAt: { type: [string, "null"], format: date-time }
+        sentAt: { type: [string, "null"], format: date-time }
+        sentVia: { type: [string, "null"], enum: [PAYMONGO_API, PAYMONGO_DASHBOARD, OTHER_TRANSFER, null] }
+        providerRefundId: { type: [string, "null"] }
+        manualReference: { type: [string, "null"] }
+        handledBy: { type: [string, "null"] }
+    AdminRefundList:
+      type: object
+      required: [items, counts, page, pageSize, totalItems, totalPages]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AdminRefund" } }
+        counts: { type: object, properties: { needsPerson: { type: integer }, retrying: { type: integer }, sent: { type: integer } } }
+        page: { type: integer }
+        pageSize: { type: integer, const: 20 }
+        totalItems: { type: integer }
+        totalPages: { type: integer }
     AdminDashboard:
       type: object
       required: [admin, month, sales, orders, waiting, ordersPerDay, queues]
@@ -4098,6 +4359,12 @@ components:
                     accountName: { type: string }
                     last4: { type: string }
                     changedAt: { type: string, format: date-time }
+    AdminPayout:
+      description: The payout after the change.
+      content: { application/json: { schema: { type: object, required: [payout], properties: { payout: { $ref: "#/components/schemas/AdminPayout" } } } } }
+    PayoutNotProcessing:
+      description: CONFLICT (`not_processing`). It was already marked paid or failed (by another admin, perhaps).
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     AdminForbidden:
       description: FORBIDDEN, with `details.reason`; not_an_admin, two_factor_required, missing_role (with `details.role`). Actions that decide where money goes also need "Confirm it's you" (403 REAUTH_REQUIRED).
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }

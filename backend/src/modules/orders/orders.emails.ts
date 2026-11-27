@@ -121,6 +121,21 @@ export function refundSentEmail(to: string, r: { orderId: string; number: string
   };
 }
 
+/** A Finance admin sent a delayed refund another way (e.g. a GCash transfer), keeping the "refund delayed" email's promise. */
+export function refundSentByHandEmail(to: string, r: { orderId: string; number: string; amountCentavos: number; reference: string }, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "refund-sent-by-hand",
+    subject: `Refund sent: ${peso(r.amountCentavos)} for order ${r.number}`,
+    text: [
+      `As promised, our team has sent your refund of ${peso(r.amountCentavos)} for order ${r.number} by hand.`,
+      `Transfer reference: ${r.reference}. Depending on your bank or e-wallet, it can take a few days to appear.`,
+      "",
+      `Your order: ${appUrl}/orders/${r.orderId}`
+    ].join("\n")
+  };
+}
+
 /** PayMongo kept refusing the refund for 3 days: a person sends it by hand. */
 export function refundDelayedEmail(to: string, r: { orderId: string; number: string; amountCentavos: number }, appUrl: string): EmailMessage {
   return {

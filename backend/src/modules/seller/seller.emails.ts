@@ -171,12 +171,17 @@ export function payoutStartedEmail(to: string, storeName: string, p: PayoutInfo,
   };
 }
 
-export function payoutPaidEmail(to: string, storeName: string, p: PayoutInfo, appUrl: string): EmailMessage {
+export function payoutPaidEmail(to: string, storeName: string, p: PayoutInfo & { transferReference: string }, appUrl: string): EmailMessage {
   return {
     to,
     kind: "seller-payout-paid",
     subject: `Payout ${p.reference} paid: ${formatPeso(p.amountCentavos)}`,
-    text: [`${formatPeso(p.amountCentavos)} from ${storeName}'s sales was paid to your ${destination(p)}.`, "", `Payouts: ${appUrl}/seller/payouts`].join("\n")
+    text: [
+      `${formatPeso(p.amountCentavos)} from ${storeName}'s sales was paid to your ${destination(p)}.`,
+      `Transfer reference: ${p.transferReference} (quote it if the money hasn't arrived within 2 banking days).`,
+      "",
+      `Payouts: ${appUrl}/seller/payouts`
+    ].join("\n")
   };
 }
 

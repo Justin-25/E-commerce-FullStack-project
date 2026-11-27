@@ -377,6 +377,9 @@ erDiagram
     string providerRefundId UK "PayMongo ref_…"
     int attempts
     datetime nextAttemptAt "hourly retries, 3 days"
+    enum sentVia "PAYMONGO_API | PAYMONGO_DASHBOARD | OTHER_TRANSFER (7b)"
+    string manualReference "another transfer's reference"
+    uuid handledById FK "the Finance admin who closed it"
   }
   return_requests {
     uuid id PK
@@ -427,6 +430,8 @@ erDiagram
     int grossCentavos
     int feesCentavos
     datetime paidAt
+    string transferReference "bank or GCash reference (7b)"
+    uuid handledById FK "the Finance admin who marked it"
   }
   store_daily_visits {
     uuid storeId PK
@@ -465,6 +470,7 @@ erDiagram
   - Example: a ₱9,998 sale (+999800), the fee (−50000), and later a payout (−949800).
   - **Written at delivery** (milestone 6c), in the same transaction that marks the package delivered: a `SALE` line and a `FEE` line (none in a store's first 30 days), both available 7 days after delivery. A partial unique index, `(sellerOrderId, type) WHERE type IN ('SALE', 'FEE')`, allows one of each per package, so a package can never be credited twice. The migration wrote these lines for packages delivered before 6c.
 - **Admin actions always write an `audit_logs` row,** in the same transaction as the change; so does every look at a full TIN, a private document or a payout account number. `actorId` is null when a command on the server did it (`npm run store:approve`, `admin:create`). Newest first through `audit_logs_createdAt_idx`.
+- **Payouts and refunds by Finance** (milestone 7b, migration `20261129090000_money`): `payouts.transferReference` is the bank or GCash transfer's reference (CHECK `payouts_paid_reference_chk`: every PAID payout has one; the demo history was back-filled with `DEMO-…`), and `payouts.handledById` the Finance admin who marked it. `refunds.sentVia` says how a SENT refund reached the shopper: `PAYMONGO_API` (our call), `PAYMONGO_DASHBOARD` (an admin refunded in PayMongo's dashboard; its `providerRefundId` was checked with PayMongo) or `OTHER_TRANSFER` (`manualReference`, e.g. a GCash reference); `handledById` is the admin who closed it by hand. `refunds_sent_chk` was rewritten: a SENT refund has `sentAt`, a `sentVia` (tested first, because in SQL a NULL would make the rest "unknown", and a CHECK lets unknown through) and the matching id or reference.
 - **Seller approvals** (milestone 7a, migrations `20261128090000_admin_enums` and `20261128090100_admin`): `users.adminRoles` lists an admin's roles (CHECK `users_admin_roles_chk`: an ADMIN has at least one, nobody else has any). Stores get `CHANGES_REQUESTED` (the seller can edit and submit again; REJECTED is final), plus `reviewNote`, `reviewedAt` and `reviewedById` (CHECK `stores_review_note_chk`: CHANGES_REQUESTED and REJECTED always carry a note). The new enum value has its own migration, as in 6a.
 
 ## 6 · AI assistant (milestone 8)

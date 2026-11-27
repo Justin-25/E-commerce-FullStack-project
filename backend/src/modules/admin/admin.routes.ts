@@ -2,9 +2,23 @@ import { Router, type Request, type RequestHandler } from "express";
 import { privateNoStore } from "../../lib/httpCache.js";
 import { signedInUserId, type AuthGuards } from "../../middleware/auth.js";
 import type { SecurityService } from "../auth/security.service.js";
-import { applicationListSchema, approveSchema, documentParamsSchema, reviewNoteSchema, storeIdSchema } from "./admin.schemas.js";
+import {
+  applicationListSchema,
+  approveSchema,
+  documentParamsSchema,
+  markFailedSchema,
+  markPaidSchema,
+  markRefundedSchema,
+  payoutIdSchema,
+  payoutListSchema,
+  refundIdSchema,
+  refundListSchema,
+  reviewNoteSchema,
+  storeIdSchema
+} from "./admin.schemas.js";
 import type { ApplicationService } from "./applications.service.js";
 import type { AdminDashboardService } from "./dashboard.service.js";
+import type { MoneyService } from "./money.service.js";
 
 /**
  * The admin pages (milestone 7). Signed in, never cached; changes are CSRF-checked app-wide.
@@ -14,11 +28,13 @@ import type { AdminDashboardService } from "./dashboard.service.js";
 export function adminRouter({
   dashboard,
   applications,
+  money,
   security,
   guards
 }: {
   dashboard: AdminDashboardService;
   applications: ApplicationService;
+  money: MoneyService;
   security: Pick<SecurityService, "requireConfirmed">;
   guards: AuthGuards;
 }): Router {
@@ -84,6 +100,43 @@ export function adminRouter({
   router.post("/admin/payout-accounts/:storeId/verify", ...auth, async (req, res) => {
     const { storeId } = storeIdSchema.parse(req.params);
     res.json(await applications.verifyPayoutAccount(signedInUserId(req), storeId, { ensureConfirmed: confirmed(req), ip: ip(req) }));
+  });
+
+  // --- payouts & refunds (Finance, milestone 7b) ---
+
+  router.get("/admin/payouts", ...auth, async (req, res) => {
+    res.json(await money.payouts(signedInUserId(req), payoutListSchema.parse(req.query)));
+  });
+
+  router.post("/admin/payouts/:payoutId/account", ...auth, async (req, res) => {
+    res.json(await money.payoutAccount(signedInUserId(req), payoutIdSchema.parse(req.params).payoutId, ip(req)));
+  });
+
+  router.post("/admin/payouts/:payoutId/paid", ...auth, async (req, res) => {
+    const { payoutId } = payoutIdSchema.parse(req.params);
+    const { transferReference } = markPaidSchema.parse(req.body);
+    res.json(await money.markPayoutPaid(signedInUserId(req), payoutId, transferReference, { ensureConfirmed: confirmed(req), ip: ip(req) }));
+  });
+
+  router.post("/admin/payouts/:payoutId/failed", ...auth, async (req, res) => {
+    const { payoutId } = payoutIdSchema.parse(req.params);
+    const { reason } = markFailedSchema.parse(req.body);
+    res.json(await money.markPayoutFailed(signedInUserId(req), payoutId, reason, { ensureConfirmed: confirmed(req), ip: ip(req) }));
+  });
+
+  router.get("/admin/refunds", ...auth, async (req, res) => {
+    res.json(await money.refunds(signedInUserId(req), refundListSchema.parse(req.query)));
+  });
+
+  router.post("/admin/refunds/:refundId/retry", ...auth, async (req, res) => {
+    const { refundId } = refundIdSchema.parse(req.params);
+    res.json(await money.retryRefund(signedInUserId(req), refundId, { ensureConfirmed: confirmed(req), ip: ip(req) }));
+  });
+
+  router.post("/admin/refunds/:refundId/refunded", ...auth, async (req, res) => {
+    const { refundId } = refundIdSchema.parse(req.params);
+    const input = markRefundedSchema.parse(req.body);
+    res.json(await money.markRefunded(signedInUserId(req), refundId, input, { ensureConfirmed: confirmed(req), ip: ip(req) }));
   });
 
   return router;

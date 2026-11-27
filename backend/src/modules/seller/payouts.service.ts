@@ -6,6 +6,7 @@ import type { EmailSender } from "../../lib/email.js";
 import { AppError } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import { isUniqueViolation } from "../../lib/prismaErrors.js";
+import { audit } from "../admin/audit.js";
 import { lastPayoutTime, manilaMonth, manilaMonthStart, nextPayoutTime } from "../orders/deadlines.js";
 import { sellerStore } from "./access.js";
 import { payoutFailedEmail, payoutPaidEmail, payoutStartedEmail } from "./seller.emails.js";
@@ -43,9 +44,9 @@ export function payoutReference(at: Date): string {
  * and a partial unique index allows one payout in progress per store, even across servers.
  *
  * Automatic every Monday at 9:00 AM (Manila), or "Request payout" any time, from ₱100, only to a
- * verified payout account. The transfer itself is simulated until milestone 7: `npm run payout:paid`
- * or `payout:failed`. A failed payout gives its lines back (a new ADJUSTMENT line balances the
- * PAYOUT line), so the money is available again; history is never edited.
+ * verified payout account. A Finance admin makes the transfer and marks it paid (with the transfer's
+ * reference) or failed (milestone 7b). A failed payout gives its lines back (a new ADJUSTMENT line
+ * balances the PAYOUT line), so the money is available again; history is never edited.
  */
 export class PayoutService {
   private readonly mailer: BackgroundMailer;
@@ -122,6 +123,8 @@ export class PayoutService {
           status: p.status,
           createdAt: p.createdAt.toISOString(),
           paidAt: p.paidAt?.toISOString() ?? null,
+          /** The bank or GCash transfer's reference, to quote if the money doesn't arrive. */
+          transferReference: p.transferReference,
           failureReason: p.failureReason,
           orders: p.orderCount,
           grossCentavos: p.grossCentavos,
@@ -231,28 +234,55 @@ export class PayoutService {
     return { paid: true, reference: made.reference };
   }
 
-  // --- the transfer (simulated until milestone 7) ---------------------------------------
+  // --- the transfer (a Finance admin makes it, then marks it; milestone 7b) -------------------
 
-  /** The money arrived. */
-  async markPaid(reference: string): Promise<"paid" | "not_processing" | "not_found"> {
+  /**
+   * The money arrived: PAID with the transfer's reference (bank or GCash), only if it's still in
+   * progress (checked in the same statement, so two admins can't both mark it), audited in the same
+   * transaction. The seller is emailed with the reference.
+   */
+  async markPaid(payoutId: string, by: { adminId: string; transferReference: string; ip: string | null }): Promise<"paid" | "not_processing" | "not_found"> {
     const { prisma } = this.deps;
-    const payout = await prisma.payout.findUnique({ where: { reference }, include: { store: { select: { name: true, owner: { select: { email: true } } } } } });
+    const payout = await prisma.payout.findUnique({ where: { id: payoutId }, include: { store: { select: { name: true, owner: { select: { email: true } } } } } });
     if (!payout) return "not_found";
-    const won = await prisma.payout.updateMany({ where: { id: payout.id, status: "PROCESSING" }, data: { status: "PAID", paidAt: this.now() } });
-    if (won.count !== 1) return "not_processing";
-    this.mailer.send(payoutPaidEmail(payout.store.owner.email, payout.store.name, payout, this.deps.appUrl));
+    const done = await prisma.$transaction(async (tx) => {
+      const won = await tx.payout.updateMany({
+        where: { id: payout.id, status: "PROCESSING" },
+        data: { status: "PAID", paidAt: this.now(), transferReference: by.transferReference, handledById: by.adminId }
+      });
+      if (won.count !== 1) return false;
+      await audit(tx, {
+        actorId: by.adminId,
+        action: "payout.mark_paid",
+        targetType: "payout",
+        targetId: payout.id,
+        metadata: { reference: payout.reference, storeId: payout.storeId, amountCentavos: payout.amountCentavos, transferReference: by.transferReference },
+        ip: by.ip
+      });
+      return true;
+    });
+    if (!done) return "not_processing";
+    this.mailer.send(payoutPaidEmail(payout.store.owner.email, payout.store.name, { ...payout, transferReference: by.transferReference }, this.deps.appUrl));
     return "paid";
   }
 
   /** The transfer failed: its lines are available again, balanced by a new line (history is never edited). */
-  async markFailed(reference: string, reason: string): Promise<"failed" | "not_processing" | "not_found"> {
+  async markFailed(payoutId: string, reason: string, by: { adminId: string; ip: string | null }): Promise<"failed" | "not_processing" | "not_found"> {
     const { prisma } = this.deps;
     const now = this.now();
-    const payout = await prisma.payout.findUnique({ where: { reference }, include: { store: { select: { name: true, owner: { select: { email: true } } } } } });
+    const payout = await prisma.payout.findUnique({ where: { id: payoutId }, include: { store: { select: { name: true, owner: { select: { email: true } } } } } });
     if (!payout) return "not_found";
     const done = await prisma.$transaction(async (tx) => {
-      const won = await tx.payout.updateMany({ where: { id: payout.id, status: "PROCESSING" }, data: { status: "FAILED", failureReason: reason.slice(0, 255) } });
+      const won = await tx.payout.updateMany({ where: { id: payout.id, status: "PROCESSING" }, data: { status: "FAILED", failureReason: reason.slice(0, 255), handledById: by.adminId } });
       if (won.count !== 1) return false;
+      await audit(tx, {
+        actorId: by.adminId,
+        action: "payout.mark_failed",
+        targetType: "payout",
+        targetId: payout.id,
+        metadata: { reference: payout.reference, storeId: payout.storeId, amountCentavos: payout.amountCentavos, reason },
+        ip: by.ip
+      });
       await tx.ledgerEntry.updateMany({ where: { payoutId: payout.id, type: { not: "PAYOUT" } }, data: { payoutId: null } });
       await tx.ledgerEntry.create({
         data: { storeId: payout.storeId, payoutId: payout.id, type: "ADJUSTMENT", amountCentavos: payout.amountCentavos, description: `Payout ${payout.reference} failed: back in your balance`, availableAt: now, createdAt: now }

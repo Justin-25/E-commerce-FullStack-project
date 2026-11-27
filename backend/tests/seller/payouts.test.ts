@@ -5,6 +5,7 @@ import { createFieldCipher } from "../../src/lib/encryption.js";
 import { lastPayoutTime, nextPayoutTime } from "../../src/modules/orders/deadlines.js";
 import { seedDemoPayouts } from "../../prisma/demo-payouts.js";
 import { STORES } from "../../prisma/demo-data.js";
+import { admins } from "../support/admins.js";
 import type { Browser } from "../support/browser.js";
 import { createCatalogHarness, type CatalogHarness } from "../support/catalogHarness.js";
 import { sellers } from "../support/sellers.js";
@@ -14,10 +15,12 @@ import { testConfig } from "../helpers.js";
 let h: CatalogHarness;
 let sell: ReturnType<typeof sellers>;
 let shop: ReturnType<typeof shopping>;
+let adm: ReturnType<typeof admins>;
 beforeAll(async () => {
   h = await createCatalogHarness();
   sell = sellers(h);
   shop = shopping(h);
+  adm = admins(h);
 }, 120_000);
 beforeEach(() => {
   h.clock.offsetMs = 0;
@@ -35,7 +38,7 @@ type Payouts = {
   schedule: { nextAutomaticAt: string; minimumCentavos: number };
   canRequest: boolean;
   cannotRequest: { reason: string } | null;
-  history: { items: { reference: string; status: string; amountCentavos: number; orders: number; grossCentavos: number; feesCentavos: number; failureReason: string | null; accountLast4: string }[]; totalItems: number };
+  history: { items: { id: string; reference: string; status: string; transferReference: string | null; amountCentavos: number; orders: number; grossCentavos: number; feesCentavos: number; failureReason: string | null; accountLast4: string }[]; totalItems: number };
 };
 
 /** An approved seller past the fee-free days (5% fee) with a ₱1,500 product; its payout account is verified at approval. */
@@ -98,12 +101,16 @@ describe("Payouts", () => {
     const again = await seller.browser.post(P);
     expect([again.status, again.body.error?.details?.reason]).toEqual([409, "in_progress"]);
 
-    expect(await h.payouts().markPaid(payout?.reference ?? "")).toBe("paid");
-    expect(await h.payouts().markPaid(payout?.reference ?? "")).toBe("not_processing");
+    // A Finance admin transfers it and marks it paid with the transfer's reference (Admin → Payouts & refunds, 7b).
+    const finance = await adm.admin(["FINANCE"]);
+    const by = { adminId: finance.user.id, transferReference: "GCASH 9012 3456 7890", ip: null };
+    expect(await h.payouts().markPaid(payout?.id ?? "", by)).toBe("paid");
+    expect(await h.payouts().markPaid(payout?.id ?? "", by)).toBe("not_processing");
     view = await page(seller.browser);
-    expect(view.history.items[0]?.status).toBe("PAID");
+    expect(view.history.items[0]).toMatchObject({ status: "PAID", transferReference: "GCASH 9012 3456 7890" });
     expect(view.paidThisMonth.centavos).toBe(142_500);
     expect(mail(seller.user.email, "seller-payout-paid")).toHaveLength(1);
+    expect(mail(seller.user.email, "seller-payout-paid")[0]?.text).toContain("Transfer reference: GCASH 9012 3456 7890");
 
     // The next payout takes only what's new: the shipped order, once it's delivered and released.
     h.clock.offsetMs = 0;
@@ -119,7 +126,8 @@ describe("Payouts", () => {
     await sale(seller, sku, "delivered");
     h.clock.offsetMs = 7 * DAY + HOUR;
     const first = ((await seller.browser.post(P)).body as Payouts).history.items[0];
-    expect(await h.payouts().markFailed(first?.reference ?? "", "The GCash account is closed")).toBe("failed");
+    const finance = await adm.admin(["FINANCE"]);
+    expect(await h.payouts().markFailed(first?.id ?? "", "The GCash account is closed", { adminId: finance.user.id, ip: null })).toBe("failed");
 
     const view = await page(seller.browser);
     expect(view.history.items[0]).toMatchObject({ status: "FAILED", failureReason: "The GCash account is closed", orders: 1, amountCentavos: 142_500 });
@@ -181,7 +189,7 @@ describe("Payouts", () => {
     expect(payout).toMatchObject({ status: "PROCESSING", amountCentavos: 142_500 });
     expect(lastPayoutTime(payout.createdAt).getTime()).toBe(monday.getTime());
 
-    await h.payouts().markPaid(payout.reference);
+    await h.payouts().markPaid(payout.id, { adminId: (await adm.admin(["FINANCE"])).user.id, transferReference: "BPI 2026-1124-0001", ip: null });
     at(monday.getTime() + 2 * DAY); // later that week: already paid this week
     await h.payouts().runWeekly();
     expect(await mine()).toBe(1);
