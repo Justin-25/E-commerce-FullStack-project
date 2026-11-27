@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.16.0
+  version: 0.17.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -60,7 +60,7 @@ tags:
   - name: admin
     description: |
       Admin pages (milestone 7). An ADMIN account with two-step verification on, checked in the database on
-      every request, holding the role a page needs: SUPPORT (seller applications, payout accounts, users), FINANCE
+      every request, holding the role a page needs: SUPPORT (seller applications, payout accounts, users, stores), FINANCE
       (payouts and refunds), MODERATION. Every action, and every look at sensitive data, is written to the audit
       log; actions that move or decide where money goes also need "Confirm it's you".
 
@@ -2598,6 +2598,133 @@ paths:
           description: 'CONFLICT, with `details.reason`: two_factor_off, suspended.'
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
+  /api/v1/admin/stores:
+    get:
+      summary: Stores (Support)
+      description: Live and suspended stores (applications are on Seller approvals), newest approval first, 20 a page. Search by store name or address, or the owner's name or email.
+      operationId: listStores
+      tags: [admin]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: tab, in: query, schema: { type: string, enum: [live, suspended, all], default: all } }
+        - { name: q, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 1 } }
+      responses:
+        "200":
+          description: A page of stores.
+          content: { application/json: { schema: { $ref: "#/components/schemas/AdminStoreList" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+
+  /api/v1/admin/stores/{storeId}:
+    parameters:
+      - { name: storeId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: One store (Support)
+      operationId: getAdminStore
+      tags: [admin]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/AdminStore" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/admin/stores/{storeId}/suspend:
+    parameters:
+      - { name: storeId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Suspend a store (Support, Confirm it's you)
+      description: Hidden from shoppers; the seller can't change anything and isn't paid out, but still ships orders already paid. The seller is emailed the reason and sees it in Seller Center.
+      operationId: suspendStore
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [reason], properties: { reason: { type: string, minLength: 10, maxLength: 500 } } }
+      responses:
+        "200": { $ref: "#/components/responses/AdminStore" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT (`not_live`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/admin/stores/{storeId}/reactivate:
+    parameters:
+      - { name: storeId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Reactivate a store (Support, Confirm it's you)
+      description: A store Support (or warnings) suspended. One that went down with its owner's account comes back by reactivating the account (409 `suspended_with_account`).
+      operationId: reactivateStore
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/AdminStore" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: 'CONFLICT, with `details.reason`: not_suspended, suspended_with_account.'
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/admin/stores/{storeId}/rename:
+    parameters:
+      - { name: storeId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Rename a store (Support, Confirm it's you)
+      description: |
+        The same name rules sellers have (3–40 characters; unique however it's written; reserved words refused). The
+        old address redirects to the store forever and stays reserved; renaming back to an old name takes it back. The
+        seller is emailed.
+      operationId: renameStore
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [name], properties: { name: { type: string, minLength: 3, maxLength: 40 } } }
+      responses:
+        "200": { $ref: "#/components/responses/AdminStore" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: 'CONFLICT, with `details.reason` (and field `name`): name_taken (also an old address of another store), name_reserved, same_name.'
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/admin/audit:
+    get:
+      summary: The audit log (every admin)
+      description: |
+        Every admin action and every look at sensitive data, newest first, 50 a page, each in plain words (`summary`) with
+        who, when and from which IP. Filters: area, admin (`actor`), one record (`target`), Philippine dates (inclusive).
+        `admins` lists every admin for the filter. Read-only.
+      operationId: listAuditLog
+      tags: [admin]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: area, in: query, schema: { type: string, enum: [stores, users, payouts, refunds, admins] } }
+        - { name: actor, in: query, schema: { type: string, format: uuid } }
+        - { name: target, in: query, schema: { type: string, format: uuid } }
+        - { name: from, in: query, schema: { type: string, format: date, example: 2026-11-27 } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 1 } }
+      responses:
+        "200":
+          description: A page of the audit log.
+          content: { application/json: { schema: { $ref: "#/components/schemas/AuditLogPage" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+
   /api/v1/admin/payouts:
     get:
       summary: Payouts (Finance)
@@ -2859,6 +2986,9 @@ paths:
           content:
             application/json:
               schema: { type: object, required: [store], properties: { store: { $ref: "#/components/schemas/StorePage" } } }
+        "301":
+          description: An old address of a store Vendora renamed (7c-2); `Location` is the store's current address (old addresses redirect forever).
+          headers: { Location: { schema: { type: string, example: /api/v1/stores/kalye-sound } } }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
 
@@ -3832,6 +3962,13 @@ components:
                 status: { type: string, enum: [CHANGES_REQUESTED, REJECTED] }
                 note: { type: string }
                 reviewedAt: { type: [string, "null"], format: date-time }
+            suspension:
+              type: [object, "null"]
+              description: Suspended (7c-2). The store can look but not change anything; paid orders still ship.
+              properties:
+                at: { type: [string, "null"], format: date-time }
+                reason: { type: [string, "null"], description: "Support's reason (null when the store went down with the owner's account)." }
+                until: { type: [string, "null"], format: date-time }
         steps: { type: object, properties: { storeDetails: { type: boolean }, verification: { type: boolean }, payoutAccount: { type: boolean } } }
         missing:
           type: array
@@ -4149,6 +4286,77 @@ components:
             pageSize: { type: integer, const: 20 }
             totalItems: { type: integer }
             totalPages: { type: integer }
+    AdminStoreList:
+      type: object
+      required: [items, counts, page, pageSize, totalItems, totalPages]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              name: { type: string }
+              slug: { type: string }
+              logoUrl: { type: [string, "null"] }
+              owner: { type: object, properties: { id: { type: string, format: uuid }, name: { type: string }, email: { type: string } } }
+              category: { type: [string, "null"] }
+              products: { type: integer, description: Live products. }
+              rating: { type: object, properties: { average: { type: number }, count: { type: integer } } }
+              followers: { type: integer }
+              status: { type: string, enum: [APPROVED, SUSPENDED] }
+              suspendedCause: { type: [string, "null"], enum: [ACCOUNT, ADMIN, WARNINGS, null] }
+              approvedAt: { type: [string, "null"], format: date-time }
+        counts: { type: object, properties: { live: { type: integer }, suspended: { type: integer }, all: { type: integer } } }
+        page: { type: integer }
+        pageSize: { type: integer, const: 20 }
+        totalItems: { type: integer }
+        totalPages: { type: integer }
+    AdminStore:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        logoUrl: { type: [string, "null"] }
+        status: { type: string, enum: [APPROVED, SUSPENDED] }
+        category: { type: [string, "null"] }
+        shipsFrom: { type: [string, "null"] }
+        approvedAt: { type: [string, "null"], format: date-time }
+        owner: { type: object, properties: { id: { type: string, format: uuid }, name: { type: string }, email: { type: string }, status: { type: string, enum: [ACTIVE, SUSPENDED] } } }
+        suspension: { type: [object, "null"], properties: { at: { type: [string, "null"], format: date-time }, cause: { type: string, enum: [ACCOUNT, ADMIN, WARNINGS] }, reason: { type: [string, "null"] }, until: { type: [string, "null"], format: date-time } } }
+        rating: { type: object, properties: { average: { type: number }, count: { type: integer } } }
+        followers: { type: integer }
+        warnings: { type: integer }
+        products: { type: integer }
+        orders: { type: integer, description: Placed packages. }
+        payoutAccount: { type: [object, "null"], properties: { method: { type: string, enum: [GCASH, BANK] }, bankName: { type: [string, "null"] }, last4: { type: string }, verified: { type: boolean } } }
+        previousAddresses: { type: array, items: { type: object, properties: { slug: { type: string }, until: { type: string, format: date-time } } } }
+        canSuspend: { type: boolean }
+        canReactivate: { type: boolean }
+        history: { type: array, items: { type: object, properties: { action: { type: string }, by: { type: string }, at: { type: string, format: date-time }, metadata: {} } } }
+    AuditLogPage:
+      type: object
+      required: [items, admins, page, pageSize, totalItems, totalPages]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              at: { type: string, format: date-time }
+              action: { type: string, example: store.approve }
+              summary: { type: string, example: Approved store Lumen Home Studio }
+              actor: { type: [object, "null"], description: null when a command on the server did it., properties: { id: { type: string, format: uuid }, name: { type: string } } }
+              target: { type: [object, "null"], properties: { type: { type: string }, id: { type: string, format: uuid }, label: { type: [string, "null"] } } }
+              ip: { type: [string, "null"] }
+              metadata: {}
+        admins: { type: array, items: { type: object, properties: { id: { type: string, format: uuid }, name: { type: string } } } }
+        page: { type: integer }
+        pageSize: { type: integer, const: 50 }
+        totalItems: { type: integer }
+        totalPages: { type: integer }
     AdminUserRow:
       type: object
       properties:
@@ -4571,6 +4779,9 @@ components:
                     accountName: { type: string }
                     last4: { type: string }
                     changedAt: { type: string, format: date-time }
+    AdminStore:
+      description: The store (after the change).
+      content: { application/json: { schema: { type: object, required: [store], properties: { store: { $ref: "#/components/schemas/AdminStore" } } } } }
     AdminUser:
       description: The account (after the change).
       content: { application/json: { schema: { type: object, required: [user], properties: { user: { $ref: "#/components/schemas/AdminUser" } } } } }

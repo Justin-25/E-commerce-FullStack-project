@@ -37,6 +37,8 @@ import { ApplicationService } from "./modules/admin/applications.service.js";
 import { AdminDashboardService } from "./modules/admin/dashboard.service.js";
 import { MoneyService } from "./modules/admin/money.service.js";
 import { UserAdminService } from "./modules/admin/users.service.js";
+import { StoreAdminService } from "./modules/admin/stores.service.js";
+import { AuditLogService } from "./modules/admin/auditLog.service.js";
 import { sellerRouter } from "./modules/seller/seller.routes.js";
 import { notificationsRouter } from "./modules/notifications/notifications.routes.js";
 import { PriceDropService } from "./modules/notifications/priceDrops.service.js";
@@ -153,7 +155,9 @@ if (prisma) {
   const money = new MoneyService({ prisma, payouts, refunds, config });
   const users = new UserAdminService({ prisma, kv, email, config, logger });
   services.push(users);
-  routers.push(adminRouter({ dashboard: new AdminDashboardService({ prisma }), applications, money, users, security, guards }));
+  const adminStores = new StoreAdminService({ prisma, email, config, logger });
+  services.push(adminStores);
+  routers.push(adminRouter({ dashboard: new AdminDashboardService({ prisma }), applications, money, users, stores: adminStores, auditLog: new AuditLogService({ prisma }), security, guards }));
 
   const priceDrops = new PriceDropService({ prisma, email, config, logger });
   services.push(priceDrops);

@@ -88,7 +88,7 @@ describe("GET /stores/:slug (store page)", () => {
     expect((await storePage("no-such-store")).status).toBe(404);
     expect((await storePage("Robert'); DROP TABLE stores;--")).status).toBe(400);
     for (const status of ["PENDING", "SUSPENDED", "REJECTED"] as const) {
-      await h.db.prisma.store.update({ where: { slug: "sol-co" }, data: { status, reviewNote: status === "REJECTED" ? "Documents didn't match." : null, ...(status === "SUSPENDED" ? { suspendedAt: new Date(), suspendedCause: "ADMIN" as const } : {}) } });
+      await h.db.prisma.store.update({ where: { slug: "sol-co" }, data: { status, reviewNote: status === "REJECTED" ? "Documents didn't match." : null, ...(status === "SUSPENDED" ? { suspendedAt: new Date(), suspendedCause: "ADMIN" as const, suspendedReason: "Test: suspended" } : {}) } });
       expect((await storePage("sol-co")).status, status).toBe(404);
     }
     await h.db.prisma.store.update({ where: { slug: "sol-co" }, data: { status: "APPROVED", reviewNote: null } });
@@ -178,7 +178,7 @@ describe("Follow a store", () => {
     const { browser } = await shopper();
     expect((await browser.put(follow("nova-wearables"))).status).toBe(200);
     const followed = (await browser.get(follow("nova-wearables"))).body.followerCount as number;
-    await h.db.prisma.store.update({ where: { slug: "nova-wearables" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN" } });
+    await h.db.prisma.store.update({ where: { slug: "nova-wearables" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN", suspendedReason: "Test: suspended" } });
     try {
       const other = await shopper();
       expect((await other.browser.put(follow("nova-wearables"))).status).toBe(404);

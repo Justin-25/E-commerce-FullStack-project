@@ -114,7 +114,7 @@ describe("GET /home", () => {
   });
 
   it("leaves out suspended stores and their products everywhere", async () => {
-    await h.db.prisma.store.update({ where: { slug: "soundcraft-audio" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN" } });
+    await h.db.prisma.store.update({ where: { slug: "soundcraft-audio" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN", suspendedReason: "Test: suspended" } });
     try {
       const home = await freshHome();
       const cards = [...home.todaysDeals.items, ...home.bestSellers];

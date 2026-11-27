@@ -124,7 +124,7 @@ describe("Wishlist", () => {
     await withChange(
       () => Promise.all([
         h.db.prisma.product.update({ where: { id: lamp }, data: { status: "ARCHIVED" } }),
-        h.db.prisma.store.update({ where: { slug: "sol-co" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN" } })
+        h.db.prisma.store.update({ where: { slug: "sol-co" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN", suspendedReason: "Test: suspended" } })
       ]),
       () => Promise.all([
         h.db.prisma.product.update({ where: { id: lamp }, data: { status: "ACTIVE" } }),

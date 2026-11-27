@@ -51,6 +51,8 @@ export interface OnboardingView {
     payoutAccount: { method: "GCASH" | "BANK"; bankName: string | null; accountName: string; last4: string; verifiedAt: string | null } | null;
     /** The admin's answer when changes were requested (edit, then "Submit again") or the application was rejected (final). */
     review: { status: "CHANGES_REQUESTED" | "REJECTED"; note: string; reviewedAt: string | null } | null;
+    /** Suspended (7c-2): since when, and Support's reason (the seller can look but not change anything; paid orders still ship). */
+    suspension: { at: string | null; reason: string | null; until: string | null } | null;
   } | null;
   steps: { storeDetails: boolean; verification: boolean; payoutAccount: boolean };
   missing: MissingItem[];
@@ -166,6 +168,10 @@ export class OnboardingService {
         review:
           (store.status === "CHANGES_REQUESTED" || store.status === "REJECTED") && store.reviewNote
             ? { status: store.status, note: store.reviewNote, reviewedAt: store.reviewedAt?.toISOString() ?? null }
+            : null,
+        suspension:
+          store.status === "SUSPENDED"
+            ? { at: store.suspendedAt?.toISOString() ?? null, reason: store.suspendedReason, until: store.suspendedUntil?.toISOString() ?? null }
             : null
       },
       steps: { storeDetails: details, verification: legal && !missing.includes("gov_id") && !missing.includes("business_certificate"), payoutAccount: Boolean(store.payoutAccount) },
@@ -190,6 +196,9 @@ export class OnboardingService {
         await lockUser(tx, userId); // one onboarding change at a time per account
         const taken = await tx.store.findUnique({ where: { slug }, select: { ownerId: true } });
         if (taken && taken.ownerId !== userId) throw nameTaken();
+        // A renamed store's old address stays reserved forever (it redirects to that store, 7c-2).
+        const old = await tx.storeSlugRedirect.findUnique({ where: { slug }, select: { store: { select: { ownerId: true } } } });
+        if (old && old.store.ownerId !== userId) throw nameTaken();
         const existing = await tx.store.findUnique({ where: { ownerId: userId }, select: { id: true, name: true, status: true } });
         const data = { categoryId: category.id, description: input.description, shipsFrom: input.shipsFrom };
         if (!existing) {

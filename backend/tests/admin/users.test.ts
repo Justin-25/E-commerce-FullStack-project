@@ -168,11 +168,11 @@ describe("Suspend and reactivate", () => {
 
   it("a store Support suspended on its own stays suspended; a suspended owner's application can't be approved; two admins at once: one suspends", async () => {
     const seller = await sell.seller({ approve: true });
-    await h.db.prisma.store.update({ where: { id: seller.store.id }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN" } });
+    await h.db.prisma.store.update({ where: { id: seller.store.id }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN", suspendedReason: "Test: suspended" } });
     const s = await support();
     await s.browser.post(`${A}/users/${seller.user.id}/suspend`, { reason: "Chargebacks on several orders." });
     await s.browser.post(`${A}/users/${seller.user.id}/reactivate`);
-    expect(await h.db.prisma.store.findUniqueOrThrow({ where: { id: seller.store.id } })).toMatchObject({ status: "SUSPENDED", suspendedCause: "ADMIN" });
+    expect(await h.db.prisma.store.findUniqueOrThrow({ where: { id: seller.store.id } })).toMatchObject({ status: "SUSPENDED", suspendedCause: "ADMIN", suspendedReason: "Test: suspended" });
 
     const applicant = await sell.seller();
     expect((await s.browser.post(`${A}/users/${applicant.user.id}/suspend`, { reason: "A fake business (duplicate account)." })).status).toBe(200);

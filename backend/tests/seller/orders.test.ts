@@ -317,7 +317,7 @@ describe("Mark as shipped", () => {
   it("a suspended store can still ship orders that are already paid (the buyers are waiting)", async () => {
     const { seller, sku, mine } = await sellerWithProduct();
     const o = await shop.order(await shop.shopper(), [[sku, 1]]);
-    await h.db.prisma.store.update({ where: { id: seller.store.id }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN" } });
+    await h.db.prisma.store.update({ where: { id: seller.store.id }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN", suspendedReason: "Test: suspended" } });
     expect((await ship(seller.browser, mine(o))).status).toBe(200);
     expect((await list(seller.browser, "?tab=shipped")).totalItems).toBe(1);
   });

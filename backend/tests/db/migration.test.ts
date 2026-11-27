@@ -43,9 +43,9 @@ beforeAll(async () => {
 afterAll(async () => db?.close());
 
 describe("migration structure", () => {
-  it("creates all 34 tables (30 from milestone 2 + trusted_devices, refunds, store_daily_visits, two_factor_resets)", async () => {
+  it("creates all 35 tables (30 from milestone 2 + trusted_devices, refunds, store_daily_visits, two_factor_resets, store_slug_redirects)", async () => {
     const { n } = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`);
-    expect(n).toBe(34);
+    expect(n).toBe(35);
   });
 
   it("really builds every index the migration declares", async () => {
@@ -62,11 +62,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 55 foreign keys and 56 safety (CHECK) rules", async () => {
+  it("has the 56 foreign keys and 57 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
-    expect(fk.n).toBe(55);
-    expect(chk.n).toBe(56);
+    expect(fk.n).toBe(56);
+    expect(chk.n).toBe(57);
   });
 });
 
@@ -205,6 +205,11 @@ describe("orders, reviews & money", () => {
     await db.query(`UPDATE stores SET status = 'APPROVED', "submittedAt" = now(), "approvedAt" = now() WHERE id = $1`, [s]);
     await fails(`UPDATE stores SET status = 'SUSPENDED', "suspendedAt" = now() WHERE id = $1`, [s], /stores_suspended_chk/); // no cause
     await db.query(`UPDATE stores SET status = 'SUSPENDED', "suspendedAt" = now(), "suspendedCause" = 'ACCOUNT' WHERE id = $1`, [s]);
+    await fails(`UPDATE stores SET "suspendedCause" = 'ADMIN' WHERE id = $1`, [s], /stores_suspended_reason_chk/); // Support always says why (7c-2)
+    await db.query(`UPDATE stores SET "suspendedCause" = 'ADMIN', "suspendedReason" = 'Counterfeit listings.' WHERE id = $1`, [s]);
+    // An old address belongs to one store; it goes when the store goes.
+    await db.query(`INSERT INTO store_slug_redirects (slug, "storeId") VALUES ('old-name', $1)`, [s]);
+    await fails(`INSERT INTO store_slug_redirects (slug, "storeId") VALUES ('old-name', $1)`, [s], /duplicate key|unique/i);
     const reset = (done: string) =>
       db.query(`INSERT INTO two_factor_resets (id, "userId", "identityCheck", "tokenHash", "expiresAt", "confirmedAt", "cancelledAt") VALUES (gen_random_uuid(), $1, 'Matched the ID on file', md5(random()::text), now() + interval '1 day', ${done})`, [u]);
     await expect(reset("now(), now()")).rejects.toThrow(/two_factor_resets_done_chk/); // confirmed AND cancelled

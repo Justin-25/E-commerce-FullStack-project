@@ -446,44 +446,46 @@ model Address {
 // ============================ 2 · stores ============================
 
 model Store {
-  id             String               @id @default(uuid(7)) @db.Uuid
-  ownerId        String               @unique @db.Uuid // one store per seller account
-  name           String               @db.VarChar(80)
-  slug           String               @unique @db.VarChar(80)
-  description    String?              @db.Text
-  logoUrl        String?              @db.VarChar(500)
+  id              String               @id @default(uuid(7)) @db.Uuid
+  ownerId         String               @unique @db.Uuid // one store per seller account
+  name            String               @db.VarChar(80)
+  slug            String               @unique @db.VarChar(80)
+  description     String?              @db.Text
+  logoUrl         String?              @db.VarChar(500)
   /// The logo's storage id (Cloudinary), so a replaced logo can be deleted.
-  logoPublicId   String?              @db.VarChar(255)
-  bannerUrl      String?              @db.VarChar(500)
-  status         StoreStatus          @default(DRAFT)
+  logoPublicId    String?              @db.VarChar(255)
+  bannerUrl       String?              @db.VarChar(500)
+  status          StoreStatus          @default(DRAFT)
   /// What the store sells: a top-level category, chosen in onboarding step 1.
-  categoryId     String?              @db.Uuid
+  categoryId      String?              @db.Uuid
   /// When it was submitted for review (every store past DRAFT has one; CHECK).
-  submittedAt    DateTime?            @db.Timestamptz(3)
-  businessType   BusinessType
-  legalName      String?              @db.VarChar(150)
-  registrationNo String?              @db.VarChar(50) // DTI / SEC
-  tinEncrypted   String?              @db.VarChar(255)
-  shipsFrom      String?              @db.VarChar(100)
-  ratingAvg      Decimal              @default(0) @db.Decimal(3, 2)
-  ratingCount    Int                  @default(0)
-  followerCount  Int                  @default(0)
-  warningCount   Int                  @default(0)
-  approvedAt     DateTime?            @db.Timestamptz(3)
+  submittedAt     DateTime?            @db.Timestamptz(3)
+  businessType    BusinessType
+  legalName       String?              @db.VarChar(150)
+  registrationNo  String?              @db.VarChar(50) // DTI / SEC
+  tinEncrypted    String?              @db.VarChar(255)
+  shipsFrom       String?              @db.VarChar(100)
+  ratingAvg       Decimal              @default(0) @db.Decimal(3, 2)
+  ratingCount     Int                  @default(0)
+  followerCount   Int                  @default(0)
+  warningCount    Int                  @default(0)
+  approvedAt      DateTime?            @db.Timestamptz(3)
   /// The latest review of the application (7a): the note sent to the seller (required for changes/reject: CHECK).
-  reviewNote     String?              @db.VarChar(1000)
-  reviewedAt     DateTime?            @db.Timestamptz(3)
-  reviewedById   String?              @db.Uuid
+  reviewNote      String?              @db.VarChar(1000)
+  reviewedAt      DateTime?            @db.Timestamptz(3)
+  reviewedById    String?              @db.Uuid
   /// SUSPENDED (7c): since when and why (CHECK: a suspended store has both); suspendedUntil for the 7-day warning suspension (7d).
-  suspendedAt    DateTime?            @db.Timestamptz(3)
-  suspendedCause StoreSuspendedCause?
-  suspendedUntil DateTime?            @db.Timestamptz(3)
-  createdAt      DateTime             @default(now()) @db.Timestamptz(3)
-  updatedAt      DateTime             @updatedAt @db.Timestamptz(3)
+  suspendedAt     DateTime?            @db.Timestamptz(3)
+  suspendedCause  StoreSuspendedCause?
+  /// Why Support suspended it (7c-2; required for ADMIN: CHECK); the seller sees it in Seller Center.
+  suspendedReason String?              @db.VarChar(500)
+  suspendedUntil  DateTime?            @db.Timestamptz(3)
+  createdAt       DateTime             @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime             @updatedAt @db.Timestamptz(3)
 
-  owner         User              @relation("StoreOwner", fields: [ownerId], references: [id], onDelete: Restrict)
-  reviewedBy    User?             @relation("StoreReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
-  category      Category?         @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  owner         User                @relation("StoreOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  reviewedBy    User?               @relation("StoreReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  category      Category?           @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   documents     StoreDocument[]
   payoutAccount PayoutAccount?
   followers     StoreFollow[]
@@ -493,6 +495,7 @@ model Store {
   ledgerEntries LedgerEntry[]
   payouts       Payout[]
   dailyVisits   StoreDailyVisit[]
+  oldSlugs      StoreSlugRedirect[]
 
   @@index([status])
   @@index([categoryId])
@@ -548,6 +551,19 @@ model PayoutAccount {
   store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
 
   @@map("payout_accounts")
+}
+
+/// A store's old web addresses after Support renamed it (7c-2): they redirect to the store forever, and no
+/// other store can take them (checked when a name is chosen). Renaming back to an old name takes it back.
+model StoreSlugRedirect {
+  slug      String   @id @db.VarChar(80)
+  storeId   String   @db.Uuid
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([storeId])
+  @@map("store_slug_redirects")
 }
 
 model StoreFollow {

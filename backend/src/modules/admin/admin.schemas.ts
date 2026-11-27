@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { MAX_PAGE } from "../catalog/catalog.schemas.js";
+import { storeDetailsSchema } from "../seller/seller.schemas.js";
 
 export const APPLICATION_TABS = ["pending", "changes_requested", "rejected", "approved"] as const;
 export type ApplicationTab = (typeof APPLICATION_TABS)[number];
@@ -127,6 +128,41 @@ export const twoFactorResetRequestSchema = z.strictObject({
     .max(500, { error: "Use 500 characters or fewer" })
 });
 
+// --- Stores (Support) and the audit log (every admin), milestone 7c-2 ---
+
+export const STORE_TABS = ["live", "suspended", "all"] as const;
+export type StoreTab = (typeof STORE_TABS)[number];
+/** Live and suspended stores (applications stay on Seller approvals); search by store name, address, or the owner's name or email. */
+export const storeListSchema = z.object({ tab: z.enum(STORE_TABS, { error: "Unknown tab" }).default("all"), q: search, page });
+/** "Suspend store": the seller sees the reason. */
+export const suspendStoreSchema = z.strictObject({
+  reason: z.string({ error: "Say why (the seller is told)" }).trim().min(10, { error: "Say why (10 characters or more; the seller is told)" }).max(500, { error: "Use 500 characters or fewer" })
+});
+/** "Rename store": the same rules as a seller's own store name. */
+export const renameStoreSchema = z.strictObject({ name: storeDetailsSchema.shape.name });
+
+export const AUDIT_AREAS = ["stores", "users", "payouts", "refunds", "admins"] as const;
+export type AuditArea = (typeof AUDIT_AREAS)[number];
+export const AUDIT_PAGE_SIZE = 50;
+const manilaDate = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, { error: "Use a date like 2026-11-27" })
+  .refine((d) => !Number.isNaN(Date.parse(`${d}T00:00:00+08:00`)), { error: "Use a date like 2026-11-27" })
+  .optional();
+/** The audit log: newest first, by area, admin, record, and Philippine dates (inclusive). */
+export const auditListSchema = z
+  .object({
+    area: z.enum(AUDIT_AREAS, { error: "Unknown area" }).optional(),
+    actor: z.uuid({ error: "Unknown admin" }).optional(),
+    target: z.uuid({ error: "Unknown record" }).optional(),
+    from: manilaDate,
+    to: manilaDate,
+    page
+  })
+  .refine((q) => !q.from || !q.to || q.from <= q.to, { error: "The start date is after the end date", path: ["from"] });
+
+export type StoreListQuery = z.infer<typeof storeListSchema>;
+export type AuditListQuery = z.infer<typeof auditListSchema>;
 export type UserListQuery = z.infer<typeof userListSchema>;
 export type PayoutListQuery = z.infer<typeof payoutListSchema>;
 export type RefundListQuery = z.infer<typeof refundListSchema>;

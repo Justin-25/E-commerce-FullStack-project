@@ -231,7 +231,7 @@ describe("GET /products/:id (product page)", () => {
     expect((await request(h.app).get("/api/v1/products/not-an-id")).status).toBe(400);
 
     const lampId = await h.idOf("capiz-table-lamp");
-    await h.db.prisma.store.update({ where: { slug: "hearth-home" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN" } });
+    await h.db.prisma.store.update({ where: { slug: "hearth-home" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN", suspendedReason: "Test: suspended" } });
     try {
       expect((await request(h.app).get(`/api/v1/products/${lampId}`)).status).toBe(404);
       expect(slugs(await search("q=lamp"))).not.toContain("capiz-table-lamp");

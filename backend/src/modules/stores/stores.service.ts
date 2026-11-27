@@ -30,6 +30,12 @@ export class StoreService {
    * search with `store=<slug>` (and `deal=true` for the "Deals" chip), so filters,
    * sorting and pages behave exactly like everywhere else.
    */
+  /** An old address of a store Support renamed (7c-2): the store's current address, if it's live. */
+  async movedTo(slug: string): Promise<string | null> {
+    const old = await this.deps.prisma.storeSlugRedirect.findUnique({ where: { slug }, select: { store: { select: { slug: true, status: true } } } });
+    return old && old.store.status === "APPROVED" && old.store.slug !== slug ? old.store.slug : null;
+  }
+
   async page(slug: string) {
     const { prisma } = this.deps;
     const store = await prisma.store.findFirst({ where: { slug, status: "APPROVED" } });

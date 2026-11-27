@@ -39,6 +39,8 @@ import { ApplicationService } from "../../src/modules/admin/applications.service
 import { AdminDashboardService } from "../../src/modules/admin/dashboard.service.js";
 import { MoneyService } from "../../src/modules/admin/money.service.js";
 import { UserAdminService } from "../../src/modules/admin/users.service.js";
+import { StoreAdminService } from "../../src/modules/admin/stores.service.js";
+import { AuditLogService } from "../../src/modules/admin/auditLog.service.js";
 
 /**
  * The real catalog, reviews and store routes on a fresh test database filled with the
@@ -101,6 +103,8 @@ export async function createCatalogHarness() {
           applications: new ApplicationService({ prisma, media, email: deps.email, config: deps.config, logger, now }),
           money: new MoneyService({ prisma, payouts, refunds: orderServices(deps).refunds, config: deps.config }),
           users: new UserAdminService({ prisma, kv, email: deps.email, config: deps.config, logger, now }),
+          stores: new StoreAdminService({ prisma, email: deps.email, config: deps.config, logger, now }),
+          auditLog: new AuditLogService({ prisma }),
           security: new SecurityService({ prisma, kv, email: deps.email, config: deps.config, logger }),
           guards
         }),

@@ -243,6 +243,48 @@ export function storeRejectedEmail(to: string, storeName: string, note: string):
   };
 }
 
+// --- Support's store actions (milestone 7c-2) ---
+
+export function storeSuspendedEmail(to: string, storeName: string, reason: string, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "store-suspended",
+    subject: `${storeName} is suspended`,
+    text: [
+      `Vendora support has suspended ${storeName}: shoppers can't see it, and you can't change products or settings.`,
+      `Why: ${reason}`,
+      "",
+      "Orders that are already paid still need to be shipped by their ship-by time (late ones are cancelled and refunded). Payouts are paused while the store is suspended.",
+      "If you think this is a mistake, reply to this email or contact Vendora support.",
+      "",
+      `Seller Center: ${appUrl}/seller`
+    ].join("\n")
+  };
+}
+
+export function storeReactivatedEmail(to: string, storeName: string, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "store-reactivated",
+    subject: `${storeName} is live again`,
+    text: [`${storeName} is live for shoppers again, and payouts are back on schedule.`, "", `Seller Center: ${appUrl}/seller`].join("\n")
+  };
+}
+
+export function storeRenamedEmail(to: string, oldName: string, newName: string, newSlug: string, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "store-renamed",
+    subject: `Your store is now called ${newName}`,
+    text: [
+      `Vendora support renamed your store from ${oldName} to ${newName}.`,
+      `Its new address is ${appUrl}/stores/${newSlug}; links to the old one still lead there.`,
+      "",
+      "If you have questions about the change, reply to this email or contact Vendora support."
+    ].join("\n")
+  };
+}
+
 /** A changed payout account was checked: payouts go there now. */
 export function payoutAccountVerifiedEmail(to: string, storeName: string, summary: string, appUrl: string): EmailMessage {
   return {

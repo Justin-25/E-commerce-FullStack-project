@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { AppError } from "../../lib/errors.js";
 import { privateNoStore, publicCache } from "../../lib/httpCache.js";
 import { signedInUserId as signedInUser, type AuthGuards } from "../../middleware/auth.js";
 import { storeSlugSchema } from "./stores.schemas.js";
@@ -14,7 +15,18 @@ export function storesRouter({ stores, guards, visits }: { stores: StoreService;
   const router = Router();
 
   router.get("/stores/:slug", async (req, res) => {
-    const store = await stores.page(storeSlugSchema.parse(req.params).slug);
+    const { slug } = storeSlugSchema.parse(req.params);
+    let store: Awaited<ReturnType<StoreService["page"]>>;
+    try {
+      store = await stores.page(slug);
+    } catch (err) {
+      // Not a live store's address: maybe the old address of a store Support renamed (7c-2) → a permanent redirect.
+      const movedTo = err instanceof AppError && err.status === 404 ? await stores.movedTo(slug) : null;
+      if (!movedTo) throw err;
+      publicCache(res);
+      res.redirect(301, `/api/v1/stores/${movedTo}`);
+      return;
+    }
     void visits.record(store.id, { ip: req.ip, userAgent: req.get("user-agent") }); // the seller's "Store visits"
     publicCache(res);
     res.json({ store });
