@@ -116,7 +116,7 @@ describe("POST /auth/login", () => {
 
   it("refuses suspended accounts (after the right password) and accounts with no password", async () => {
     await h.signUp({ email: "suspended@example.com" });
-    await h.db.prisma.user.update({ where: { email: "suspended@example.com" }, data: { status: "SUSPENDED" } });
+    await h.db.prisma.user.update({ where: { email: "suspended@example.com" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedReason: "Test: suspended" } });
     expect((await login(await h.browser(), "suspended@example.com", GOOD_PASSWORD)).body.error.code).toBe("ACCOUNT_SUSPENDED");
 
     await h.db.prisma.user.create({ data: { email: "google-only@example.com", name: "Google User", emailVerifiedAt: new Date() } });

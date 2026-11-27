@@ -78,7 +78,7 @@ describe("POST /auth/forgot-password", () => {
 
   it("sends nothing to suspended accounts", async () => {
     await h.signUp({ email: "suspended-reset@example.com" });
-    await h.db.prisma.user.update({ where: { email: "suspended-reset@example.com" }, data: { status: "SUSPENDED" } });
+    await h.db.prisma.user.update({ where: { email: "suspended-reset@example.com" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedReason: "Test: suspended" } });
     const before = h.outbox.sent.length;
     expect((await (await h.browser()).post(AUTH.forgot, { email: "suspended-reset@example.com" })).status).toBe(202);
     expect(h.outbox.sent.length).toBe(before);

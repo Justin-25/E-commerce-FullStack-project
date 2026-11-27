@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.15.0
+  version: 0.16.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -60,7 +60,7 @@ tags:
   - name: admin
     description: |
       Admin pages (milestone 7). An ADMIN account with two-step verification on, checked in the database on
-      every request, holding the role a page needs: SUPPORT (seller applications, payout accounts), FINANCE
+      every request, holding the role a page needs: SUPPORT (seller applications, payout accounts, users), FINANCE
       (payouts and refunds), MODERATION. Every action, and every look at sensitive data, is written to the audit
       log; actions that move or decide where money goes also need "Confirm it's you".
 
@@ -336,6 +336,40 @@ paths:
           description: INVALID_LINK (expired, used or made-up) or VALIDATION_ERROR (field `password` or `token`).
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/v1/auth/two-factor-reset:
+    post:
+      summary: Confirm Support's reset of two-step verification (from the emailed link)
+      description: |
+        The owner's half of "Reset two-step verification" (milestone 7c): Support started it after checking
+        who they are; this link (24 hours, once; a newer request cancels it) proves the inbox is theirs. No
+        sign-in needed. Two-step verification, backup codes and trusted devices are removed, every sign-in
+        ends at once, and the owner is emailed. Sellers must set it up again at their next sign-in.
+      operationId: confirmTwoFactorReset
+      tags: [auth]
+      security: [{ csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token]
+              properties:
+                token: { type: string, pattern: "^[A-Za-z0-9_-]{43}$", description: From the link's fragment (after "#token="). }
+      responses:
+        "200":
+          description: Two-step verification is off; sign in with the password.
+          content: { application/json: { schema: { type: object, required: [reset], properties: { reset: { const: true } } } } }
+        "400":
+          description: INVALID_LINK (expired, used, cancelled by a newer request or by a suspension, or made-up) or VALIDATION_ERROR (`token`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403":
+          description: ACCOUNT_SUSPENDED, or CSRF_INVALID.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
@@ -2434,6 +2468,136 @@ paths:
           description: 'CONFLICT, with `details.reason`: already_verified, changed.'
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
+  /api/v1/admin/users:
+    get:
+      summary: Users (Support)
+      description: Newest first, 20 a page. Tabs by role, plus locked (after wrong passwords; locks end by themselves in 15 minutes, there's no unlock) or suspended. Search by name or email. `counts` ignore the search.
+      operationId: listUsers
+      tags: [admin]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: tab, in: query, schema: { type: string, enum: [all, customers, sellers, admins, locked_suspended], default: all } }
+        - { name: q, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 1 } }
+      responses:
+        "200":
+          description: A page of accounts.
+          content: { application/json: { schema: { $ref: "#/components/schemas/AdminUserList" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+
+  /api/v1/admin/users/export:
+    post:
+      summary: Export the list as CSV (Support, logged)
+      description: The tab and search's accounts (up to 5,000), only the list's columns; formula-safe cells. A POST because each export is written to the audit log.
+      operationId: exportUsers
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                tab: { type: string, enum: [all, customers, sellers, admins, locked_suspended], default: all }
+                q: { type: string, maxLength: 100 }
+      responses:
+        "200":
+          description: "vendora-users-<tab>-<date>.csv: Name, Email, Role, Two-step, Orders, Joined (PH time), Status."
+          content: { text/csv: { schema: { type: string } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+
+  /api/v1/admin/users/{userId}:
+    parameters:
+      - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: One account (Support)
+      operationId: getUser
+      tags: [admin]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/AdminUser" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/admin/users/{userId}/suspend:
+    parameters:
+      - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Suspend an account (Support, Confirm it's you)
+      description: |
+        At once, even in an open session: sign-in refused (ACCOUNT_SUSPENDED), every sign-in ended and its access
+        passes refused. A seller's live store is suspended with it (hidden; paid orders they can't ship are cancelled
+        and refunded after the ship-by deadline). An open 2FA-reset link is cancelled. The person is emailed the reason.
+        Admin accounts can't be suspended here (403 `admin_target`).
+      operationId: suspendUser
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [reason], properties: { reason: { type: string, minLength: 10, maxLength: 500 } } }
+      responses:
+        "200": { $ref: "#/components/responses/AdminUser" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT (`already_suspended`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/admin/users/{userId}/reactivate:
+    parameters:
+      - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Reactivate an account (Support, Confirm it's you)
+      description: The account, and the store if the suspension took it down (a store Support suspended on its own stays suspended). The person is emailed.
+      operationId: reactivateUser
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/AdminUser" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT (`not_suspended`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/admin/users/{userId}/two-factor-reset:
+    parameters:
+      - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Start a reset of two-step verification (Support, Confirm it's you)
+      description: |
+        For someone who lost their authenticator app and backup codes. Support writes how they checked who the person
+        is; the owner gets a link (24 hours, once) and nothing changes until they open it (POST /auth/two-factor-reset).
+        A newer request cancels older ones.
+      operationId: requestTwoFactorReset
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [identityCheck], properties: { identityCheck: { type: string, minLength: 10, maxLength: 500, example: Matched a selfie with the ID on file (video call). } } }
+      responses:
+        "200": { $ref: "#/components/responses/AdminUser" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: 'CONFLICT, with `details.reason`: two_factor_off, suspended.'
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
   /api/v1/admin/payouts:
     get:
       summary: Payouts (Finance)
@@ -3985,6 +4149,54 @@ components:
             pageSize: { type: integer, const: 20 }
             totalItems: { type: integer }
             totalPages: { type: integer }
+    AdminUserRow:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string }
+        role: { type: string, enum: [CUSTOMER, SELLER, ADMIN] }
+        adminRoles: { type: array, items: { type: string, enum: [SUPPORT, FINANCE, MODERATION] } }
+        twoFactor: { type: boolean }
+        orders: { type: integer, description: Placed orders. }
+        joinedAt: { type: string, format: date-time }
+        status: { type: string, enum: [ACTIVE, SUSPENDED] }
+        lockedUntil: { type: [string, "null"], format: date-time, description: Locked after wrong passwords (about; it ends by itself). }
+    AdminUserList:
+      type: object
+      required: [items, counts, page, pageSize, totalItems, totalPages]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AdminUserRow" } }
+        counts: { type: object, properties: { all: { type: integer }, customers: { type: integer }, sellers: { type: integer }, admins: { type: integer }, lockedSuspended: { type: integer } } }
+        page: { type: integer }
+        pageSize: { type: integer, const: 20 }
+        totalItems: { type: integer }
+        totalPages: { type: integer }
+    AdminUser:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string }
+        emailVerified: { type: boolean }
+        role: { type: string, enum: [CUSTOMER, SELLER, ADMIN] }
+        adminRoles: { type: array, items: { type: string } }
+        status: { type: string, enum: [ACTIVE, SUSPENDED] }
+        joinedAt: { type: string, format: date-time }
+        lastSignInAt: { type: [string, "null"], format: date-time }
+        suspended: { type: [object, "null"], properties: { at: { type: string, format: date-time }, reason: { type: string }, by: { type: [string, "null"] } } }
+        twoFactor: { type: object, properties: { enabled: { type: boolean }, enabledAt: { type: [string, "null"], format: date-time }, backupCodesLeft: { type: integer } } }
+        google: { type: boolean }
+        lockedUntil: { type: [string, "null"], format: date-time }
+        orders: { type: integer }
+        openSessions: { type: integer }
+        store: { type: [object, "null"], properties: { id: { type: string, format: uuid }, name: { type: string }, slug: { type: string }, status: { type: string }, suspendedWithAccount: { type: boolean } } }
+        twoFactorReset: { type: [object, "null"], description: An open reset link (waiting for the owner)., properties: { requestedAt: { type: string, format: date-time }, expiresAt: { type: string, format: date-time }, by: { type: [string, "null"] } } }
+        canSuspend: { type: boolean }
+        canReactivate: { type: boolean }
+        canResetTwoFactor: { type: boolean }
+        securityActivity: { type: array, items: { type: object, properties: { type: { type: string }, at: { type: string, format: date-time }, ip: { type: [string, "null"] }, device: { type: string }, location: { type: [string, "null"] } } } }
+        history: { type: array, items: { type: object, properties: { action: { type: string }, by: { type: string }, at: { type: string, format: date-time }, metadata: {} } } }
     AdminPayout:
       type: object
       properties:
@@ -4336,7 +4548,7 @@ components:
       description: The application after the change.
       content: { application/json: { schema: { type: object, required: [application], properties: { application: { $ref: "#/components/schemas/Application" } } } } }
     ApplicationConflict:
-      description: CONFLICT (`not_pending`). It isn't waiting for review any more (another admin decided, or the seller hasn't resubmitted).
+      description: "CONFLICT, with `details.reason`; not_pending (it isn't waiting for review any more: another admin decided, or the seller hasn't resubmitted), owner_suspended (on Approve: the owner's account is suspended)."
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     PayoutAccountsToCheck:
       description: The payout accounts waiting to be checked.
@@ -4359,6 +4571,9 @@ components:
                     accountName: { type: string }
                     last4: { type: string }
                     changedAt: { type: string, format: date-time }
+    AdminUser:
+      description: The account (after the change).
+      content: { application/json: { schema: { type: object, required: [user], properties: { user: { $ref: "#/components/schemas/AdminUser" } } } } }
     AdminPayout:
       description: The payout after the change.
       content: { application/json: { schema: { type: object, required: [payout], properties: { payout: { $ref: "#/components/schemas/AdminPayout" } } } } }

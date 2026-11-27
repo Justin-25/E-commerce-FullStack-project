@@ -44,7 +44,7 @@ describe("Who can use Seller Center products", () => {
     expect((await s.browser.get(P)).body.error?.details).toEqual({ reason: "two_factor_required" });
     await h.db.prisma.user.update({ where: { id: s.user.id }, data: { twoFactorEnabledAt: new Date() } });
 
-    await h.db.prisma.store.update({ where: { id: s.store.id }, data: { status: "SUSPENDED" } });
+    await h.db.prisma.store.update({ where: { id: s.store.id }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN" } });
     expect((await s.browser.get(P)).status).toBe(200);
     expect((await s.browser.get(`${P}/${product.id}`)).status).toBe(200);
     for (const res of [await s.browser.post(P, { intent: "draft", title: "Another", category: "headphones" }), await s.browser.delete(`${P}/${product.id}`)]) {

@@ -88,7 +88,7 @@ describe("GET /stores/:slug (store page)", () => {
     expect((await storePage("no-such-store")).status).toBe(404);
     expect((await storePage("Robert'); DROP TABLE stores;--")).status).toBe(400);
     for (const status of ["PENDING", "SUSPENDED", "REJECTED"] as const) {
-      await h.db.prisma.store.update({ where: { slug: "sol-co" }, data: { status, reviewNote: status === "REJECTED" ? "Documents didn't match." : null } });
+      await h.db.prisma.store.update({ where: { slug: "sol-co" }, data: { status, reviewNote: status === "REJECTED" ? "Documents didn't match." : null, ...(status === "SUSPENDED" ? { suspendedAt: new Date(), suspendedCause: "ADMIN" as const } : {}) } });
       expect((await storePage("sol-co")).status, status).toBe(404);
     }
     await h.db.prisma.store.update({ where: { slug: "sol-co" }, data: { status: "APPROVED", reviewNote: null } });
@@ -112,7 +112,8 @@ describe("GET /products?deal=true (the 'Deals' chip)", () => {
 
     const productId = await h.idOf("aurasound-pro");
     const original = await h.db.prisma.productVariant.findMany({ where: { productId }, select: { id: true, saleEndsAt: true } });
-    await h.db.prisma.productVariant.updateMany({ where: { productId }, data: { saleEndsAt: new Date(Date.now() - 1000) } });
+    // A minute ago, not a second: the test machine's clock and the database's can differ by more than a second (seen: 1.15 s with Neon).
+    await h.db.prisma.productVariant.updateMany({ where: { productId }, data: { saleEndsAt: new Date(Date.now() - 60_000) } });
     try {
       const after = await search("deal=true&pageSize=48");
       expect(after.body.totalItems).toBe(res.body.totalItems - 1);
@@ -177,7 +178,7 @@ describe("Follow a store", () => {
     const { browser } = await shopper();
     expect((await browser.put(follow("nova-wearables"))).status).toBe(200);
     const followed = (await browser.get(follow("nova-wearables"))).body.followerCount as number;
-    await h.db.prisma.store.update({ where: { slug: "nova-wearables" }, data: { status: "SUSPENDED" } });
+    await h.db.prisma.store.update({ where: { slug: "nova-wearables" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN" } });
     try {
       const other = await shopper();
       expect((await other.browser.put(follow("nova-wearables"))).status).toBe(404);

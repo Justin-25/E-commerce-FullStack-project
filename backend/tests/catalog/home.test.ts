@@ -89,7 +89,7 @@ describe("GET /home", () => {
   it("shows only running countdowns, even when there are fewer than 8", async () => {
     const keep = (await freshHome()).todaysDeals.items.slice(0, 3).map((c) => c.id);
     const others = await h.db.prisma.productVariant.findMany({ where: { saleEndsAt: { not: null }, productId: { notIn: keep } }, select: { id: true, saleEndsAt: true } });
-    await h.db.prisma.productVariant.updateMany({ where: { id: { in: others.map((v) => v.id) } }, data: { saleEndsAt: new Date(Date.now() - 1000) } });
+    await h.db.prisma.productVariant.updateMany({ where: { id: { in: others.map((v) => v.id) } }, data: { saleEndsAt: new Date(Date.now() - 60_000) } });
     try {
       const home = await freshHome();
       expect(home.todaysDeals.items.map((c) => c.id)).toEqual(keep);
@@ -103,7 +103,7 @@ describe("GET /home", () => {
     const before = await freshHome();
     const soonest = before.todaysDeals.items[0] as Card;
     const original = await h.db.prisma.productVariant.findMany({ where: { productId: soonest.id }, select: { id: true, saleEndsAt: true } });
-    await h.db.prisma.productVariant.updateMany({ where: { productId: soonest.id }, data: { saleEndsAt: new Date(Date.now() - 1000) } });
+    await h.db.prisma.productVariant.updateMany({ where: { productId: soonest.id }, data: { saleEndsAt: new Date(Date.now() - 60_000) } });
     try {
       const after = await freshHome();
       expect(after.todaysDeals.items.map((c) => c.id)).not.toContain(soonest.id);
@@ -114,7 +114,7 @@ describe("GET /home", () => {
   });
 
   it("leaves out suspended stores and their products everywhere", async () => {
-    await h.db.prisma.store.update({ where: { slug: "soundcraft-audio" }, data: { status: "SUSPENDED" } });
+    await h.db.prisma.store.update({ where: { slug: "soundcraft-audio" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN" } });
     try {
       const home = await freshHome();
       const cards = [...home.todaysDeals.items, ...home.bestSellers];

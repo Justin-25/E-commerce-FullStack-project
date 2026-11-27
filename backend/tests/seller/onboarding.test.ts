@@ -243,7 +243,7 @@ describe("Store details", () => {
     const s = await owner();
     const name = await ready(s);
     await s.browser.post(`${S}/store/submit`);
-    await h.db.prisma.store.update({ where: { ownerId: s.user.id }, data: { status: "SUSPENDED" } });
+    await h.db.prisma.store.update({ where: { ownerId: s.user.id }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN" } });
     for (const res of [
       await s.browser.put(`${S}/store`, details(name)),
       await s.browser.put(`${S}/store/payout-account`, { method: "GCASH", accountName: "Ana Reyes", accountNumber: "09181112222" }),

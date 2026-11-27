@@ -66,6 +66,14 @@ enum StoreStatus {
   CHANGES_REQUESTED // back with the seller: an admin asked for changes (7a); "Submit again" → PENDING
 }
 
+/// Why a store is SUSPENDED (7c): its owner's account was suspended (reactivating the account brings it
+/// back), Support suspended it (7c-2), or a second warning within 90 days (7d, for 7 days).
+enum StoreSuspendedCause {
+  ACCOUNT
+  ADMIN
+  WARNINGS
+}
+
 /// What an admin may do (7a): an admin holds at least one (CHECK).
 enum AdminRole {
   SUPPORT // seller applications, payout accounts, users, stores
@@ -241,6 +249,10 @@ model User {
   /// ADMIN accounts only (CHECK): what this admin may do.
   adminRoles         AdminRole[] @default([])
   status             UserStatus  @default(ACTIVE)
+  /// SUSPENDED by Support (7c): when, why (the user is told) and by whom (CHECK: a suspended account has both).
+  suspendedAt        DateTime?   @db.Timestamptz(3)
+  suspendedReason    String?     @db.VarChar(500)
+  suspendedById      String?     @db.Uuid
   passwordChangedAt  DateTime?   @db.Timestamptz(3) // tokens issued before this are refused
   twoFactorSecret    String?     @db.VarChar(255) // AES-256-GCM encrypted
   twoFactorEnabledAt DateTime?   @db.Timestamptz(3)
@@ -260,20 +272,24 @@ model User {
   trustedDevices    TrustedDevice[]
   securityEvents    SecurityEvent[]
   addresses         Address[]
-  store             Store?          @relation("StoreOwner")
+  store             Store?           @relation("StoreOwner")
   storeFollows      StoreFollow[]
   reviews           Review[]
   wishlistItems     WishlistItem[]
   cart              Cart?
   orders            Order[]
   returnRequests    ReturnRequest[]
-  reviewedDocuments StoreDocument[] @relation("DocumentReviewer")
-  reviewedStores    Store[]         @relation("StoreReviewer")
-  handledPayouts    Payout[]        @relation("PayoutHandler")
-  handledRefunds    Refund[]        @relation("RefundHandler")
-  reportedFlags     ProductFlag[]   @relation("FlagReporter")
-  resolvedFlags     ProductFlag[]   @relation("FlagResolver")
+  reviewedDocuments StoreDocument[]  @relation("DocumentReviewer")
+  reviewedStores    Store[]          @relation("StoreReviewer")
+  handledPayouts    Payout[]         @relation("PayoutHandler")
+  handledRefunds    Refund[]         @relation("RefundHandler")
+  reportedFlags     ProductFlag[]    @relation("FlagReporter")
+  resolvedFlags     ProductFlag[]    @relation("FlagResolver")
   auditLogs         AuditLog[]
+  suspendedBy       User?            @relation("UserSuspender", fields: [suspendedById], references: [id], onDelete: SetNull)
+  suspendedUsers    User[]           @relation("UserSuspender")
+  twoFactorResets   TwoFactorReset[] @relation("TwoFactorResetOwner")
+  requestedResets   TwoFactorReset[] @relation("TwoFactorResetRequester")
 
   @@index([role, status])
   @@map("users")
@@ -334,6 +350,27 @@ model AuthToken {
 
   @@index([userId, type])
   @@map("auth_tokens")
+}
+
+/// "Reset two-step verification" (7c): Support writes how they checked the person's identity, and the reset
+/// only happens when the owner opens the link sent to their verified email (24 hours, one use, keyed hash).
+/// A newer request cancels older ones (CHECK: never both confirmed and cancelled).
+model TwoFactorReset {
+  id            String    @id @default(uuid(7)) @db.Uuid
+  userId        String    @db.Uuid
+  requestedById String?   @db.Uuid
+  identityCheck String    @db.VarChar(500)
+  tokenHash     String    @unique @db.VarChar(64)
+  expiresAt     DateTime  @db.Timestamptz(3)
+  confirmedAt   DateTime? @db.Timestamptz(3)
+  cancelledAt   DateTime? @db.Timestamptz(3)
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+
+  user        User  @relation("TwoFactorResetOwner", fields: [userId], references: [id], onDelete: Cascade)
+  requestedBy User? @relation("TwoFactorResetRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("two_factor_resets")
 }
 
 model BackupCode {
@@ -409,37 +446,40 @@ model Address {
 // ============================ 2 · stores ============================
 
 model Store {
-  id             String       @id @default(uuid(7)) @db.Uuid
-  ownerId        String       @unique @db.Uuid // one store per seller account
-  name           String       @db.VarChar(80)
-  slug           String       @unique @db.VarChar(80)
-  description    String?      @db.Text
-  logoUrl        String?      @db.VarChar(500)
+  id             String               @id @default(uuid(7)) @db.Uuid
+  ownerId        String               @unique @db.Uuid // one store per seller account
+  name           String               @db.VarChar(80)
+  slug           String               @unique @db.VarChar(80)
+  description    String?              @db.Text
+  logoUrl        String?              @db.VarChar(500)
   /// The logo's storage id (Cloudinary), so a replaced logo can be deleted.
-  logoPublicId   String?      @db.VarChar(255)
-  bannerUrl      String?      @db.VarChar(500)
-  status         StoreStatus  @default(DRAFT)
+  logoPublicId   String?              @db.VarChar(255)
+  bannerUrl      String?              @db.VarChar(500)
+  status         StoreStatus          @default(DRAFT)
   /// What the store sells: a top-level category, chosen in onboarding step 1.
-  categoryId     String?      @db.Uuid
+  categoryId     String?              @db.Uuid
   /// When it was submitted for review (every store past DRAFT has one; CHECK).
-  submittedAt    DateTime?    @db.Timestamptz(3)
+  submittedAt    DateTime?            @db.Timestamptz(3)
   businessType   BusinessType
-  legalName      String?      @db.VarChar(150)
-  registrationNo String?      @db.VarChar(50) // DTI / SEC
-  tinEncrypted   String?      @db.VarChar(255)
-  shipsFrom      String?      @db.VarChar(100)
-  ratingAvg      Decimal      @default(0) @db.Decimal(3, 2)
-  ratingCount    Int          @default(0)
-  followerCount  Int          @default(0)
-  warningCount   Int          @default(0)
-  approvedAt     DateTime?    @db.Timestamptz(3)
+  legalName      String?              @db.VarChar(150)
+  registrationNo String?              @db.VarChar(50) // DTI / SEC
+  tinEncrypted   String?              @db.VarChar(255)
+  shipsFrom      String?              @db.VarChar(100)
+  ratingAvg      Decimal              @default(0) @db.Decimal(3, 2)
+  ratingCount    Int                  @default(0)
+  followerCount  Int                  @default(0)
+  warningCount   Int                  @default(0)
+  approvedAt     DateTime?            @db.Timestamptz(3)
   /// The latest review of the application (7a): the note sent to the seller (required for changes/reject: CHECK).
-  reviewNote     String?      @db.VarChar(1000)
-  reviewedAt     DateTime?    @db.Timestamptz(3)
-  reviewedById   String?      @db.Uuid
-  suspendedUntil DateTime?    @db.Timestamptz(3)
-  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
-  updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
+  reviewNote     String?              @db.VarChar(1000)
+  reviewedAt     DateTime?            @db.Timestamptz(3)
+  reviewedById   String?              @db.Uuid
+  /// SUSPENDED (7c): since when and why (CHECK: a suspended store has both); suspendedUntil for the 7-day warning suspension (7d).
+  suspendedAt    DateTime?            @db.Timestamptz(3)
+  suspendedCause StoreSuspendedCause?
+  suspendedUntil DateTime?            @db.Timestamptz(3)
+  createdAt      DateTime             @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime             @updatedAt @db.Timestamptz(3)
 
   owner         User              @relation("StoreOwner", fields: [ownerId], references: [id], onDelete: Restrict)
   reviewedBy    User?             @relation("StoreReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)

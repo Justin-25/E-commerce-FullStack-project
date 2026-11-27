@@ -72,7 +72,60 @@ export const twoFactorDisabledMessage = (to: string, name: string, appUrl: strin
   ].join("\n")
 });
 
-export const backupCodeUsedMessage = (to: string, name: string, left: number, appUrl: string): EmailMessage => ({
+// --- Support's account actions (milestone 7c) ---
+
+/** Support started "Reset two-step verification": nothing happens until the owner confirms from their inbox. */
+export const twoFactorResetRequestMessage = (to: string, name: string, link: string, hours: number): EmailMessage => ({
+  to,
+  kind: "two-factor-reset-request",
+  subject: "Confirm: reset two-step verification on your Vendora account",
+  text: [
+    `Hi ${name},`,
+    "",
+    "Vendora support started a reset of two-step verification on your account, after you told us you lost your authenticator app and your backup codes. If that was you, confirm here:",
+    link,
+    "",
+    `The link works once, for ${hours} hours. After the reset you sign in with your password, then set up two-step verification again.`,
+    "If you didn't ask for this, ignore this email: nothing changes. Please also tell Vendora support."
+  ].join("\n")
+});
+
+export const twoFactorResetDoneMessage = (to: string, name: string, appUrl: string): EmailMessage => ({
+  to,
+  kind: "two-factor-reset",
+  subject: "Two-step verification was reset",
+  text: [
+    `Hi ${name},`,
+    "",
+    "As you confirmed, two-step verification is off on your Vendora account. You were signed out everywhere, and no device is trusted anymore.",
+    `Sign in and set it up again: ${appUrl}/account/security (sellers need it before they can sell).`,
+    "",
+    `If this wasn't you, reset your password now (${appUrl}/forgot-password) and contact Vendora support.`
+  ].join("\n")
+});
+
+export const accountSuspendedMessage = (to: string, name: string, reason: string): EmailMessage => ({
+  to,
+  kind: "account-suspended",
+  subject: "Your Vendora account is suspended",
+  text: [
+    `Hi ${name},`,
+    "",
+    "Your Vendora account has been suspended, and you were signed out everywhere.",
+    `Why: ${reason}`,
+    "",
+    "If you think this is a mistake, reply to this email or contact Vendora support."
+  ].join("\n")
+});
+
+export const accountReactivatedMessage = (to: string, name: string, appUrl: string): EmailMessage => ({
+  to,
+  kind: "account-reactivated",
+  subject: "Your Vendora account is active again",
+  text: [`Hi ${name},`, "", "Your Vendora account is active again. You can sign in as usual.", "", `Sign in: ${appUrl}/sign-in`].join("\n")
+});
+
+export const backupCodeUsedMessage =(to: string, name: string, left: number, appUrl: string): EmailMessage => ({
   to,
   kind: "backup-code-used",
   subject: "A backup code was used to sign in",

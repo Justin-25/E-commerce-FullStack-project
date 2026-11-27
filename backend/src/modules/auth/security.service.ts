@@ -8,10 +8,11 @@ import type { KeyValueStore } from "../../lib/kv.js";
 import type { Logger } from "../../lib/logger.js";
 import { verifyPassword } from "../../lib/password.js";
 import { describeDevice, type DeviceType } from "../../lib/userAgent.js";
-import { confirmCodeMessage, emailChangeCodeMessage, emailChangedNoticeMessage } from "./auth.emails.js";
+import { audit } from "../admin/audit.js";
+import { confirmCodeMessage, emailChangeCodeMessage, emailChangedNoticeMessage, twoFactorResetDoneMessage } from "./auth.emails.js";
 import type { ConfirmInput } from "./auth.schemas.js";
 import { requiresTwoFactor, toPublicUser, type PublicUser } from "./auth.service.js";
-import { fieldError, invalidCode, locked, notSignedIn, reauthRequired } from "./authErrors.js";
+import { fieldError, invalidCode, invalidLink, locked, notSignedIn, reauthRequired, suspended } from "./authErrors.js";
 import { BackupCodes } from "./backupCodes.js";
 import { SignInChallenges } from "./challenges.js";
 import { OneTimeCodes } from "./codes.js";
@@ -19,8 +20,9 @@ import { recordSecurityEvent, type ClientInfo } from "./events.js";
 import { authKeys, emailKey } from "./keys.js";
 import { LoginLockout } from "./lockout.js";
 import { SecondFactorCheck } from "./secondFactor.js";
-import { SessionRevoker } from "./sessionRevoker.js";
-import type { AccessClaims } from "./tokens.js";
+import { bestEffort, SessionRevoker } from "./sessionRevoker.js";
+import { ACCESS_TTL_SECONDS, type AccessClaims } from "./tokens.js";
+import { twoFactorResetHash } from "./twoFactorReset.js";
 import { TotpCodes } from "./totp.js";
 import { TrustedDevices } from "./trustedDevices.js";
 
@@ -50,7 +52,7 @@ export interface SecurityServiceDeps {
   prisma: PrismaClient;
   kv: KeyValueStore;
   email: EmailSender;
-  config: Pick<Config, "CODE_HASH_SECRET" | "DATA_ENCRYPTION_KEY">;
+  config: Pick<Config, "CODE_HASH_SECRET" | "DATA_ENCRYPTION_KEY" | "APP_URL">;
   logger?: Logger;
   now?: () => Date;
 }
@@ -89,6 +91,39 @@ export class SecurityService {
     this.trustedDevices = new TrustedDevices(deps.prisma, this.now);
     this.revoker = new SessionRevoker(deps.prisma, deps.kv, deps.logger, this.now);
     this.mailer = new BackgroundMailer(deps.email, deps.logger);
+  }
+
+  // --- Support's "Reset two-step verification" (milestone 7c) -------------
+
+  /**
+   * The owner's half: Support started the reset after checking who they are (and wrote how); opening
+   * the emailed link proves the inbox is theirs. Two-step verification goes off with the backup codes
+   * and trusted devices, every sign-in ends (its access passes too, at once), and the owner is told.
+   * One use, 24 hours; a newer request cancels it; admin accounts never get one.
+   */
+  async confirmTwoFactorReset(token: string, client: ClientInfo): Promise<void> {
+    const { prisma, kv, config, logger } = this.deps;
+    const now = this.now();
+    const reset = await prisma.twoFactorReset.findUnique({ where: { tokenHash: twoFactorResetHash(config.CODE_HASH_SECRET, token) }, include: { user: true } });
+    if (!reset || reset.confirmedAt || reset.cancelledAt || reset.expiresAt <= now || reset.user.deletedAt || reset.user.role === "ADMIN") throw invalidLink();
+    if (reset.user.status !== "ACTIVE") throw suspended();
+    const families = await prisma.$transaction(async (tx) => {
+      // Once only, and only while it's still the open request (checked in the same statement).
+      const won = await tx.twoFactorReset.updateMany({ where: { id: reset.id, confirmedAt: null, cancelledAt: null }, data: { confirmedAt: now } });
+      if (won.count !== 1) throw invalidLink();
+      await tx.user.update({ where: { id: reset.userId }, data: { twoFactorSecret: null, twoFactorEnabledAt: null } });
+      await tx.backupCode.deleteMany({ where: { userId: reset.userId } });
+      await this.trustedDevices.revokeAll(tx, reset.userId);
+      const ended = await this.revoker.revokeAllSessions(tx, reset.userId, "two_factor_reset");
+      await recordSecurityEvent(tx, reset.userId, "TWO_FA_DISABLED", client);
+      await audit(tx, { actorId: reset.userId, action: "user.two_factor_reset", targetType: "user", targetId: reset.userId, metadata: { resetId: reset.id, requestedById: reset.requestedById }, ip: client.ip });
+      return ended;
+    });
+    await bestEffort(logger, "2FA reset time not saved; older access passes stay valid up to 15 minutes", () =>
+      kv.set(authKeys.invalidBefore(reset.userId), String(Math.floor(now.getTime() / 1000)), ACCESS_TTL_SECONDS + 60)
+    );
+    await this.revoker.markFamiliesRevoked(families);
+    this.mailer.send(twoFactorResetDoneMessage(reset.user.email, reset.user.name, config.APP_URL));
   }
 
   // --- overview -----------------------------------------------------------

@@ -55,7 +55,7 @@ describe("Admin access", () => {
     expect((await noTwoFactor.browser.get(`${A}/applications`)).body.error?.details?.reason).toBe("two_factor_required");
     // A suspended admin is refused by the admin check itself, whatever happened to their sessions.
     const suspended = await adm.admin(["SUPPORT"]);
-    await h.db.prisma.user.update({ where: { id: suspended.user.id }, data: { status: "SUSPENDED" } });
+    await h.db.prisma.user.update({ where: { id: suspended.user.id }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedReason: "Test: suspended" } });
     await expect(adminUser(h.db.prisma, suspended.user.id, "SUPPORT")).rejects.toMatchObject({ status: 403, details: { reason: "not_an_admin" } });
 
     const finance = await adm.admin(["FINANCE"]);

@@ -22,6 +22,7 @@ import {
   resetPasswordSchema,
   sessionIdSchema,
   twoFactorDisableSchema,
+  twoFactorResetSchema,
   twoFactorVerifySchema,
   verifyEmailSchema
 } from "./auth.schemas.js";
@@ -133,6 +134,12 @@ export function authRouter({ service, security, google, tokens, csrf, guards, co
 
   router.post("/auth/reset-password", authLimit, async (req, res) => {
     respond(req, res, await service.resetPassword(resetPasswordSchema.parse(req.body), clientInfo(req)));
+  });
+
+  // The owner's half of Support's "Reset two-step verification" (7c): no sign-in (they can't), the emailed link proves the inbox is theirs.
+  router.post("/auth/two-factor-reset", authLimit, async (req, res) => {
+    await security.confirmTwoFactorReset(twoFactorResetSchema.parse(req.body).token, clientInfo(req));
+    res.json({ reset: true });
   });
 
   router.post("/auth/change-password", authLimit, ...guards.requireAuth, async (req, res) => {

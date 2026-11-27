@@ -63,7 +63,7 @@ describe("GET /auth/me", () => {
 
   it("refuses a pass for an account that was suspended after signing in", async () => {
     const { browser } = await h.signUp({ email: "later-suspended@example.com" });
-    await h.db.prisma.user.update({ where: { email: "later-suspended@example.com" }, data: { status: "SUSPENDED" } });
+    await h.db.prisma.user.update({ where: { email: "later-suspended@example.com" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedReason: "Test: suspended" } });
     expect((await browser.get(AUTH.me)).status).toBe(401);
   });
 

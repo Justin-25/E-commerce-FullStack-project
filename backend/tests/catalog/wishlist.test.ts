@@ -102,7 +102,7 @@ describe("Wishlist", () => {
 
     const original = await h.db.prisma.productVariant.findMany({ where: { productId: id }, select: { id: true, saleEndsAt: true } });
     await withChange(
-      () => h.db.prisma.productVariant.updateMany({ where: { productId: id }, data: { saleEndsAt: new Date(Date.now() - 1000) } }),
+      () => h.db.prisma.productVariant.updateMany({ where: { productId: id }, data: { saleEndsAt: new Date(Date.now() - 60_000) } }),
       () => Promise.all(original.map((v) => h.db.prisma.productVariant.update({ where: { id: v.id }, data: { saleEndsAt: v.saleEndsAt } }))),
       async () => {
         const after = (await browser.get(W)).body as List;
@@ -124,7 +124,7 @@ describe("Wishlist", () => {
     await withChange(
       () => Promise.all([
         h.db.prisma.product.update({ where: { id: lamp }, data: { status: "ARCHIVED" } }),
-        h.db.prisma.store.update({ where: { slug: "sol-co" }, data: { status: "SUSPENDED" } })
+        h.db.prisma.store.update({ where: { slug: "sol-co" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN" } })
       ]),
       () => Promise.all([
         h.db.prisma.product.update({ where: { id: lamp }, data: { status: "ACTIVE" } }),

@@ -127,7 +127,7 @@ describe("signing in with Google", () => {
     expect(await h.db.prisma.user.count({ where: { email: "unverified@example.com" } })).toBe(0);
 
     await h.googleSignIn(await h.browser(), googleProfile("banned@gmail.com"));
-    await h.db.prisma.user.update({ where: { email: "banned@gmail.com" }, data: { status: "SUSPENDED" } });
+    await h.db.prisma.user.update({ where: { email: "banned@gmail.com" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedReason: "Test: suspended" } });
     expect(location(await h.googleSignIn(await h.browser(), googleProfile("banned@gmail.com")))).toBe(`${APP}/sign-in?error=account_suspended`);
 
     const b = await h.browser();

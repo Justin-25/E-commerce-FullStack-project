@@ -231,6 +231,9 @@ export class ApplicationService {
     if (s.status !== "PENDING") throw notPending();
     await ctx.ensureConfirmed();
     const result = await approveStore(prisma, s.slug, admin.id, this.now(), { note: input.note, ip: ctx.ip });
+    if (result === "owner_suspended") {
+      throw new AppError(409, "CONFLICT", "The owner's account is suspended, so the store can't go live. Reactivate the account first.", { details: { reason: "owner_suspended" } });
+    }
     if (result !== "approved") throw notPending();
     this.mailer.send(storeApprovedEmail(s.owner.email, s.name, this.deps.config.APP_URL, input.note));
     return this.load(storeId);

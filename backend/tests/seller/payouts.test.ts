@@ -159,7 +159,7 @@ describe("Payouts", () => {
     expect([res.status, res.body.error?.details?.reason]).toEqual([409, "account_not_verified"]);
     expect((await page(seller.browser)).account?.verified).toBe(false);
     await h.db.prisma.payoutAccount.update({ where: { storeId: seller.store.id }, data: { verifiedAt: new Date() } });
-    await h.db.prisma.store.update({ where: { id: seller.store.id }, data: { status: "SUSPENDED" } });
+    await h.db.prisma.store.update({ where: { id: seller.store.id }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN" } });
     res = await seller.browser.post(P);
     expect([res.status, res.body.error?.details?.reason]).toEqual([403, "store_suspended"]);
     expect((await page(seller.browser)).cannotRequest?.reason).toBe("store_not_approved");

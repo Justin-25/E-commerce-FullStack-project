@@ -15,10 +15,11 @@ export async function approveStore(
   reviewerId: string | null,
   now = new Date(),
   extra: { note?: string | null; ip?: string | null } = {}
-): Promise<"approved" | "not_pending" | "not_found"> {
+): Promise<"approved" | "not_pending" | "not_found" | "owner_suspended"> {
   return prisma.$transaction(async (tx) => {
-    const store = await tx.store.findUnique({ where: { slug }, select: { id: true, status: true } });
+    const store = await tx.store.findUnique({ where: { slug }, select: { id: true, status: true, owner: { select: { status: true } } } });
     if (!store) return "not_found";
+    if (store.owner.status !== "ACTIVE") return "owner_suspended"; // a suspended account's store never goes live
     const moved = await tx.store.updateMany({
       where: { id: store.id, status: "PENDING" },
       data: { status: "APPROVED", approvedAt: now, reviewedAt: now, reviewedById: reviewerId, reviewNote: extra.note ?? null }

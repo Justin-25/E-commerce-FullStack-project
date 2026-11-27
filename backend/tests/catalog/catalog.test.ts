@@ -176,7 +176,7 @@ describe("deals with a countdown", () => {
     expect(live).toMatchObject({ priceCentavos: 699_900, compareAtCentavos: 849_900, savingsPercent: 18, badges: { deal: true } });
     expect(new Date(live.saleEndsAt).getTime()).toBeGreaterThan(Date.now());
 
-    await h.db.prisma.productVariant.updateMany({ where: { sku: "SC-BOOM-MAX-BLK" }, data: { saleEndsAt: new Date(Date.now() - 1000) } });
+    await h.db.prisma.productVariant.updateMany({ where: { sku: "SC-BOOM-MAX-BLK" }, data: { saleEndsAt: new Date(Date.now() - 60_000) } });
     const ended = (await search("q=boom%20max")).body.items.find((i: Card) => i.slug === "boom-max");
     expect(ended).toMatchObject({ priceCentavos: 849_900, compareAtCentavos: null, savingsPercent: 0, saleEndsAt: null, badges: { deal: false } });
     const page = (await request(h.app).get(`/api/v1/products/${await h.idOf("boom-max")}`)).body.product;
@@ -231,7 +231,7 @@ describe("GET /products/:id (product page)", () => {
     expect((await request(h.app).get("/api/v1/products/not-an-id")).status).toBe(400);
 
     const lampId = await h.idOf("capiz-table-lamp");
-    await h.db.prisma.store.update({ where: { slug: "hearth-home" }, data: { status: "SUSPENDED" } });
+    await h.db.prisma.store.update({ where: { slug: "hearth-home" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN" } });
     try {
       expect((await request(h.app).get(`/api/v1/products/${lampId}`)).status).toBe(404);
       expect(slugs(await search("q=lamp"))).not.toContain("capiz-table-lamp");

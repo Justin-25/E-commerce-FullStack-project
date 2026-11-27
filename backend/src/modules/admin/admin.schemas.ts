@@ -103,5 +103,30 @@ export const markRefundedSchema = z.discriminatedUnion(
   { error: "Choose how the refund was sent" }
 );
 
+// --- Users (Support, milestone 7c) ---
+
+export const USER_TABS = ["all", "customers", "sellers", "admins", "locked_suspended"] as const;
+export type UserTab = (typeof USER_TABS)[number];
+/** Export CSV: at most this many accounts per file. */
+export const USER_EXPORT_LIMIT = 5000;
+
+/** Users: newest first; search by name or email. */
+export const userListSchema = z.object({ tab: z.enum(USER_TABS, { error: "Unknown tab" }).default("all"), q: search, page });
+export const userExportSchema = z.strictObject({ tab: z.enum(USER_TABS, { error: "Unknown tab" }).default("all"), q: search });
+export const userIdSchema = z.object({ userId: z.uuid({ error: "User not found" }) });
+/** "Suspend account": the reason is emailed to the person. */
+export const suspendUserSchema = z.strictObject({
+  reason: z.string({ error: "Say why (the person is told)" }).trim().min(10, { error: "Say why (10 characters or more; the person is told)" }).max(500, { error: "Use 500 characters or fewer" })
+});
+/** "Reset two-step verification": how Support checked who the person is. */
+export const twoFactorResetRequestSchema = z.strictObject({
+  identityCheck: z
+    .string({ error: "Write how you checked who they are" })
+    .trim()
+    .min(10, { error: "Write how you checked who they are (10 characters or more)" })
+    .max(500, { error: "Use 500 characters or fewer" })
+});
+
+export type UserListQuery = z.infer<typeof userListSchema>;
 export type PayoutListQuery = z.infer<typeof payoutListSchema>;
 export type RefundListQuery = z.infer<typeof refundListSchema>;

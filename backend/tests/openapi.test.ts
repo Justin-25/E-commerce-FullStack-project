@@ -38,6 +38,7 @@ import { adminRouter } from "../src/modules/admin/admin.routes.js";
 import type { ApplicationService } from "../src/modules/admin/applications.service.js";
 import type { AdminDashboardService } from "../src/modules/admin/dashboard.service.js";
 import type { MoneyService } from "../src/modules/admin/money.service.js";
+import type { UserAdminService } from "../src/modules/admin/users.service.js";
 import { sellerRouter } from "../src/modules/seller/seller.routes.js";
 import { notificationsRouter } from "../src/modules/notifications/notifications.routes.js";
 import type { PriceDropService } from "../src/modules/notifications/priceDrops.service.js";
@@ -97,7 +98,7 @@ describe("openapi.yaml", () => {
       webhooksRouter({ orders: {} as OrderService, secret: undefined }),
       sellerRouter({ onboarding: {} as OnboardingService, products: {} as SellerProductService, orders: {} as SellerOrderService, dashboard: {} as DashboardService, payouts: {} as PayoutService, security: {} as SecurityService, guards, config }),
       notificationsRouter({ priceDrops: {} as PriceDropService, guards }),
-      adminRouter({ dashboard: {} as AdminDashboardService, applications: {} as ApplicationService, money: {} as MoneyService, security: {} as SecurityService, guards })
+      adminRouter({ dashboard: {} as AdminDashboardService, applications: {} as ApplicationService, money: {} as MoneyService, users: {} as UserAdminService, security: {} as SecurityService, guards })
     ];
     const inCode = routers.flatMap((r) => routesOf(r, "/api/v1"));
     expect(documented("/api/v1/").sort()).toEqual(inCode.sort());

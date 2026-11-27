@@ -15,7 +15,7 @@ if (!slug) throw new Error("Usage: npm run store:approve -- <store-web-address>"
 const prisma = createPrisma(url);
 try {
   const result = await approveStore(prisma, slug, null);
-  const messages = { approved: `Approved "${slug}": it's now live for shoppers.`, not_pending: `"${slug}" isn't waiting for review.`, not_found: `No store "${slug}".` };
+  const messages = { approved: `Approved "${slug}": it's now live for shoppers.`, not_pending: `"${slug}" isn't waiting for review.`, not_found: `No store "${slug}".`, owner_suspended: `"${slug}"'s owner account is suspended: reactivate it first.` };
   console.log(messages[result]);
   if (result !== "approved") process.exitCode = 1;
 } finally {

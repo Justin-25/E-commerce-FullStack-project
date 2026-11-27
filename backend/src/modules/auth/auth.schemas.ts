@@ -39,6 +39,11 @@ export const loginSchema = z.object({
 
 export const forgotPasswordSchema = z.object({ email });
 
+/** The owner confirms "Reset two-step verification" (7c) from the link Support's request emailed them. */
+export const twoFactorResetSchema = z.strictObject({
+  token: z.string({ error: "This link is incomplete" }).regex(/^[A-Za-z0-9_-]{43}$/, { error: "This link is incomplete" })
+});
+
 export const resetPasswordSchema = z.object({
   // 32 random bytes in base64url = 43 characters; anything else can't be one of our links.
   token: z.string({ error: "This reset link is incomplete" }).regex(/^[A-Za-z0-9_-]{43}$/, { error: "This reset link is incomplete" }),

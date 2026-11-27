@@ -43,9 +43,9 @@ beforeAll(async () => {
 afterAll(async () => db?.close());
 
 describe("migration structure", () => {
-  it("creates all 33 tables (30 from milestone 2 + trusted_devices, refunds, store_daily_visits)", async () => {
+  it("creates all 34 tables (30 from milestone 2 + trusted_devices, refunds, store_daily_visits, two_factor_resets)", async () => {
     const { n } = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`);
-    expect(n).toBe(33);
+    expect(n).toBe(34);
   });
 
   it("really builds every index the migration declares", async () => {
@@ -62,11 +62,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 52 foreign keys and 53 safety (CHECK) rules", async () => {
+  it("has the 55 foreign keys and 56 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
-    expect(fk.n).toBe(52);
-    expect(chk.n).toBe(53);
+    expect(fk.n).toBe(55);
+    expect(chk.n).toBe(56);
   });
 });
 
@@ -194,6 +194,22 @@ describe("orders, reviews & money", () => {
     await db.query(`UPDATE stores SET status = 'PENDING', "submittedAt" = now() WHERE id = $1`, [s]);
     for (const status of ["CHANGES_REQUESTED", "REJECTED"]) await fails(`UPDATE stores SET status = $2 WHERE id = $1`, [s, status], /stores_review_note_chk/);
     await db.query(`UPDATE stores SET status = 'CHANGES_REQUESTED', "reviewNote" = 'Please upload a clearer ID.', "reviewedById" = $2, "reviewedAt" = now() WHERE id = $1`, [s, u]);
+  });
+
+  it("a suspended account or store says when and why; a 2FA reset request is confirmed or cancelled, never both", async () => {
+    const u = await user();
+    await fails(`UPDATE users SET status = 'SUSPENDED' WHERE id = $1`, [u], /users_suspended_chk/);
+    await fails(`UPDATE users SET status = 'SUSPENDED', "suspendedAt" = now() WHERE id = $1`, [u], /users_suspended_chk/); // no reason
+    await db.query(`UPDATE users SET status = 'SUSPENDED', "suspendedAt" = now(), "suspendedReason" = 'Selling counterfeit goods.' WHERE id = $1`, [u]);
+    const s = await store(await user());
+    await db.query(`UPDATE stores SET status = 'APPROVED', "submittedAt" = now(), "approvedAt" = now() WHERE id = $1`, [s]);
+    await fails(`UPDATE stores SET status = 'SUSPENDED', "suspendedAt" = now() WHERE id = $1`, [s], /stores_suspended_chk/); // no cause
+    await db.query(`UPDATE stores SET status = 'SUSPENDED', "suspendedAt" = now(), "suspendedCause" = 'ACCOUNT' WHERE id = $1`, [s]);
+    const reset = (done: string) =>
+      db.query(`INSERT INTO two_factor_resets (id, "userId", "identityCheck", "tokenHash", "expiresAt", "confirmedAt", "cancelledAt") VALUES (gen_random_uuid(), $1, 'Matched the ID on file', md5(random()::text), now() + interval '1 day', ${done})`, [u]);
+    await expect(reset("now(), now()")).rejects.toThrow(/two_factor_resets_done_chk/); // confirmed AND cancelled
+    await reset("now(), NULL");
+    await reset("NULL, now()");
   });
 
   it("keeps payouts consistent: one in progress per store, paid has a date and a transfer reference, failed a reason, a payout line takes money out", async () => {

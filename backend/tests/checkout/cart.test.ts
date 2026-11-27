@@ -142,7 +142,7 @@ describe("Cart (signed in)", () => {
     await browser.post(`${C}/items`, { variantId: serum });
     const original = await h.db.prisma.productVariant.findUniqueOrThrow({ where: { id: serum }, select: { saleEndsAt: true } });
     await withChange(
-      () => h.db.prisma.productVariant.update({ where: { id: serum }, data: { saleEndsAt: new Date(Date.now() - 1000) } }), // the deal ends
+      () => h.db.prisma.productVariant.update({ where: { id: serum }, data: { saleEndsAt: new Date(Date.now() - 60_000) } }), // the deal ends
       () => h.db.prisma.productVariant.update({ where: { id: serum }, data: { saleEndsAt: original.saleEndsAt } }),
       async () => {
         const line = lineOf((await browser.get(C)).body.cart, serum);

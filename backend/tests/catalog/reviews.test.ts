@@ -98,7 +98,7 @@ describe("GET /products/:id/reviews", () => {
     expect((await request(h.app).get("/api/v1/products/0193c0de-0000-7000-8000-000000000000/reviews")).status).toBe(404);
     expect((await request(h.app).get("/api/v1/products/not-a-uuid/reviews")).status).toBe(400);
 
-    await h.db.prisma.store.update({ where: { slug: "glow-lab" }, data: { status: "SUSPENDED" } });
+    await h.db.prisma.store.update({ where: { slug: "glow-lab" }, data: { status: "SUSPENDED", suspendedAt: new Date(), suspendedCause: "ADMIN" } });
     try {
       expect((await productReviews("vitamin-c-serum-30")).status).toBe(404);
     } finally {
