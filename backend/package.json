@@ -10,6 +10,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:ai-live": "vitest run --config vitest.live.config.ts",
     "check": "npm run db:generate && npm run typecheck && npm run lint && npm test",
     "db:generate": "prisma generate",
     "db:validate": "prisma validate",
@@ -25,6 +26,7 @@
   "type": "module",
   "private": "true",
   "dependencies": {
+    "@anthropic-ai/sdk": "1.8.0",
     "@prisma/adapter-pg": "^7.10.1",
     "@prisma/client": "^7.10.1",
     "cookie-parser": "^1.4.7",

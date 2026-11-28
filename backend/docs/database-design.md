@@ -11,7 +11,7 @@
 >
 > The CHECK safety rules are listed at the end of the migration SQL.
 
-PostgreSQL (Neon), accessed with Prisma. **31 tables in 5 areas (30 from milestone 2, plus `trusted_devices` added in milestone 3c), and 2 more for the AI assistant in milestone 8.** Short-lived security data (lockouts, rate limits, revoked tokens) lives in Redis, not here.
+PostgreSQL (Neon), accessed with Prisma. **31 tables in 5 areas (30 from milestone 2, plus `trusted_devices` added in milestone 3c), and 2 more for the AI assistant in milestone 8 (38 in all by milestone 8a, with the later additions listed below).** Short-lived security data (lockouts, rate limits, revoked tokens) lives in Redis, not here.
 The diagrams use Mermaid: GitHub shows them as pictures, and in VS Code install the "Markdown Preview Mermaid Support" extension to see them.
 
 ## Ground rules
@@ -490,7 +490,40 @@ erDiagram
 
 ## 6 · AI assistant (milestone 8)
 
-`ai_conversations` (user, scope SHOPPER/SELLER/ADMIN) and `ai_messages` (role, content, tool calls, tokens used). They're designed now but created in milestone 8.
+Built in milestone 8a (migration `20261205090000_ai_assistant`).
+
+```mermaid
+erDiagram
+  users ||--o{ ai_conversations : "owns (signed in)"
+  products ||--o{ ai_conversations : "Ask about this product"
+  ai_conversations ||--o{ ai_messages : "transcript, in order"
+  ai_conversations {
+    uuid id PK
+    enum scope "SHOPPER, SELLER, ADMIN"
+    uuid userId FK "or visitorHash (CHECK: exactly one)"
+    char64 visitorHash "SHA-256 of the signed-out browser's cookie"
+    uuid productId FK
+    varchar title "the first question"
+    int questionCount "0-20 (CHECK)"
+    timestamptz busyUntil "one answer at a time"
+    timestamptz lastMessageAt "deleted after 30 days"
+  }
+  ai_messages {
+    uuid id PK
+    uuid conversationId FK
+    int seq "unique per chat"
+    enum role "USER, ASSISTANT"
+    json content "exact API blocks (CHECK: non-empty array)"
+    text text "what the chat shows"
+    jsonb cards "linked product ids and order numbers"
+    int inputTokens "plus output, cache read, cache write"
+  }
+```
+
+- A chat has **exactly one owner** (CHECK `ai_conversations_owner_chk`): an account, or, signed out, one browser (`visitorHash` is the SHA-256 of a random httpOnly cookie; the cookie itself is never stored). Signed-out chats are shopper chats only (CHECK `ai_conversations_visitor_chk`). At most 20 questions per chat (CHECK `ai_conversations_questions_chk`, also when two arrive at once).
+- `ai_messages` is the **transcript sent to Claude**, one row per API message in `seq` order (unique per chat), replayed byte for byte on every later question: append-only, because Claude's thinking blocks are only valid in the exact conversation that produced them. `content` is `json`, not `jsonb`: `jsonb` would reorder keys, changing what's replayed (and missing the prompt cache). CHECK `ai_messages_content_chk`: always a non-empty array, so a stored message can always be sent back. `text` is what the chat shows (the question, or the whole answer); lookup steps have none. `cards` keeps only ids and order numbers: the cards are read live.
+- Tokens per answer step are kept for cost reporting; the daily spending total itself lives in Redis (below).
+- Chats are deleted 30 days after `lastMessageAt` (messages cascade). Seller and admin scopes come in 8b.
 
 ## What lives in Redis instead
 
@@ -503,3 +536,4 @@ erDiagram
 | Authenticator codes already used (replay protection) | 2 min |
 | "Confirm it's you" done on a sign-in chain (device) | 10 min |
 | Product/category cache (milestone 4) | minutes |
+| Vendora AI: questions asked today (per account, or per network address signed out) and today's spending in millionths of a dollar (milestone 8a) | 2 days (the key names the Philippine day) |

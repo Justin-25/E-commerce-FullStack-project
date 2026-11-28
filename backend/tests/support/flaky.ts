@@ -30,6 +30,9 @@ export class FlakyKv implements KeyValueStore {
   increment(key: string, ttl: number) {
     return this.redis.down ? fail() : this.inner.increment(key, ttl);
   }
+  incrementBy(key: string, amount: number, ttl: number) {
+    return this.redis.down ? fail() : this.inner.incrementBy(key, amount, ttl);
+  }
   ttl(key: string) {
     return this.redis.down ? fail() : this.inner.ttl(key);
   }

@@ -413,6 +413,26 @@ How it works:
 - **Restore** brings a removed listing back as inactive (the seller turns it on). Moderation can also withdraw the warning given with the removal; if that leaves fewer than two warnings in 90 days, a 7-day warning suspension ends right away.
 - AI flags (and the AI tab) come with the AI assistant (milestone 8); `product_flags` already has a `source` for them.
 
+## Vendora AI: the shopping assistant (milestone 8a)
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/v1/ai/status` | Can it be used now: off, resting (today's budget is spent), or how many questions are left today |
+| `GET` / `POST /api/v1/ai/conversations` | My latest chats; start one (optionally from a product page: "Ask about this product") |
+| `GET` / `DELETE /api/v1/ai/conversations/{id}` | One chat (questions, answers, live cards); delete it |
+| `POST /api/v1/ai/conversations/{id}/messages` | Ask; the answer streams back as server-sent events (`status`, `text`, `discard`, `cards`, `done`, `error`) |
+
+How it works:
+- **Claude never touches the database.** It gets six read-only lookups ("tools"): search products, a product's details, the categories and, signed in, my orders, one order and my cart. Claude only picks a tool and its arguments; our code checks them (zod) and runs a fixed query limited to the chat's owner. No tool writes anything and Claude never writes SQL, so no wording of a question (or of a product description) can reach someone else's data.
+- **The loop** (`AssistantService`): Claude streams its answer; when it asks for lookups we run them, send the results back and go round again, at most 4 times, then it must answer. Claude Opus 5.5 (`AI_MODEL`) at low effort; the whole prefix is cached (instructions, tools, the chat so far), so later turns re-read it at about 5% of the price; and Anthropic's automatic fallback answers if a safety check declines a harmless question.
+- **The transcript is append-only and stored exactly** (`ai_messages.content` is a `json` column, not `jsonb`, so key order survives): every earlier message goes back byte for byte, because Claude's thinking is only valid in the conversation that produced it. Lookups an interrupted answer left open get "not run" results on the next question; after a mid-answer fallback, only what Anthropic allows is kept.
+- **Signed in or out.** Signed in, a chat belongs to the account and can see its orders and cart. Signed out, it belongs to the browser through a random httpOnly cookie (only its hash is stored) and answers product and policy questions; order and cart lookups answer "sign in". A chat started signed out never gets account data, even if the person signs in later.
+- **Privacy.** Claude gets only what an answer needs: never an address, phone number or email. Text written by sellers and shoppers (descriptions, specifications, reviews) is passed as data, with a note to ignore any instructions in it. Chats are deleted 30 days after their last message (an hourly job), or at once with Delete.
+- **Cards come from the database**, not from the answer's text: the answer links products (`/products/{id}`) and orders (`/orders/VD-…`), and the server reads those live (orders only from the chat owner's account). An invented id simply gets no card.
+- **Costs are bounded before anything is sent:** 10 questions a day per network address when signed out (the real visitor IP behind proxies, IPv6 by /56) and 30 per account; 20 questions per chat; one answer at a time per chat (a conditional update, so two at once can't both run); 1,000 characters per question; and a site-wide daily budget (`AI_DAILY_BUDGET_USD`, default US$2) added up from the real token counts of every answer, priced per model. When it's spent, the assistant rests until midnight. If Redis is down these can't be checked, so nothing is sent (503).
+- Closing the chat aborts Claude's stream (no paying for an answer nobody reads). A declined or cut-off answer is replaced by a short message, in the chat and in the transcript.
+- The policies Claude quotes (delivery fees, cash on delivery, deadlines) are built from the same constants checkout uses. Off when `ANTHROPIC_API_KEY` is empty (`/ai/status` says so).
+
 ## If Redis (Upstash) goes down
 
 Redis commands give up after 1 second instead of waiting, and each part of the API then does what's safest for it:
@@ -424,13 +444,14 @@ Redis commands give up after 1 second instead of waiting, and each part of the A
 | Sign-in, sign-up, codes, passwords | **503 `SERVICE_UNAVAILABLE`** with `Retry-After: 30`, before touching the database. Brute-force protection is never silently switched off. |
 | Already signed-in shoppers | Keep working: their pass is accepted without the sign-out check (logged) |
 | Refresh, sign-out | Keep working: they only need the database. The known trade-off: a pass signed out during the outage stays valid until it expires (at most 15 minutes), but it can't be renewed. |
+| Vendora AI | **503** before anything is sent to Claude: the daily limits and the spending cap can't be checked, and they must never be skipped. |
 
 Measured with Redis pointed at an unreachable address: before this, every API request failed with a 500 after 25–32 seconds.
 
 ## How it's tested
 
 - `tests/auth/*` drive the real routes, service and middleware with a pretend browser that keeps cookies and sends the CSRF token. Redis is faked in memory with a clock the tests can move forward.
-- **On your PC** the database is PGlite (Postgres inside Node): a fresh copy of the real migrations for each test file, with no internet needed. **In CI** (`TEST_DATABASE_URL`) the same tests run on a real PostgreSQL 18 server, each file in its own throwaway schema.
+- **On your PC** the database is PGlite (Postgres inside Node): a fresh copy of the real migrations for each test file, with no internet needed, in UTC like Neon (so Philippine-day math is tested the same at any hour). **In CI** (`TEST_DATABASE_URL`) the same tests run on a real PostgreSQL 18 server, each file in its own throwaway schema.
 - `tests/auth/outage.test.ts` and `tests/resilience.test.ts` switch the Redis stand-in off and check the table above, including a real Redis client timing out against an unreachable address.
 - `tests/openapi.test.ts` checks the contract matches the code: every route is documented (and every documented route exists), the error codes match, and no `$ref` is broken.
 - `tests/catalog/catalog.test.ts` seeds the 63 demo products and checks search (words, typos, `-excluded` words, an injection attempt), every filter with its counts, every sort, deal prices before and after the countdown, stock labels, hidden products (draft, suspended store, no variant on sale) and the category cache with Redis down.
@@ -447,6 +468,7 @@ Measured with Redis pointed at an unreachable address: before this, every API re
 - `tests/admin/users.test.ts` checks Users: Support only, the list (newest first, tabs and counts, search, a lock that ends by itself), Export CSV (columns, formula injection, logged), one account (admins view-only), Suspend ("Confirm it's you", a reason, an open session ending at once, sign-in refused, the store hidden, two admins at once) and Reactivate (the store back, but not one Support suspended on its own; a suspended owner's application can't be approved), and the two-step reset (Support's note, a newer link cancelling the old, expiry, once only, signed out everywhere, set up again at sign-in, cancelled by a suspension).
 - `tests/admin/money.test.ts` checks Payouts & refunds: Finance only, the lists (order, tabs, search), Show account (logged, refused after the seller changed their account), Mark paid with "Confirm it's you" and a reference (the seller's history and email, once only, two admins at once), Mark failed (money back), Try again now (sent, still failing without a second email, a refund the job is trying right now), a refund made in PayMongo's dashboard stopping every retry, Mark as refunded with a PayMongo id (checked: unknown, another payment's, the wrong amount, already used) or another transfer (two admins at once).
 - `tests/admin/approvals.test.ts` checks the admin pages: who gets in (shoppers, missing 2FA, the wrong role, a removed admin in an open session), making and removing admins, the queue (order, tabs, search), Show TIN and Open document with their audit rows, Approve with "Confirm it's you", Ask for changes and submitting again, Reject being final, two admins deciding at once, payout-account checks and the dashboard.
+- `tests/ai/assistant.test.ts` drives Vendora AI end to end with a fake Claude (scripted replies, no network or cost; it streams in pieces and keeps every request it got): the streamed events and live cards, the transcript replayed byte for byte with fixed instructions and tools, visitor chats never reaching account data, another shopper's order "not found" with nothing of it (and no address, phone or email) sent, "Ask about this product", only the owner opening a chat (a forged cookie too), the daily limits per address and per account, the budget from real token prices (each fallback attempt at its own model's price, cache reads and writes), Redis down, one answer at a time (two at once, also on real Postgres), the 20-question chat, the 4-round lookup limit and "not run" results, invalid and unknown lookups, refusals, mid-answer fallbacks, Claude not answering, a closed chat aborting the stream, the 30-day clean-up, the assistant switched off and the database rules.
 - `tests/db/migration.test.ts` checks that every table, index, foreign key and safety rule really exists. CI also migrates and seeds a real PostgreSQL 18 server, the same major version as Neon.
 
 ## Structure
@@ -477,10 +499,12 @@ src/
                          orders (ship, CSV), the earnings ledger, the dashboard, payouts
   modules/moderation/    shoppers' "Report this listing"
   modules/notifications/ price-drop and low-stock emails (15-minute jobs), email settings, one-click unsubscribe
+  lib/ai.ts              Claude (Anthropic SDK, streamed) behind a small interface, and per-model prices for the budget
+  modules/ai/            Vendora AI: routes (server-sent events) → AssistantService (the loop) → read-only tools, limits, cards
   modules/admin/         the admin pages: access and roles, the audit log, seller approvals, the dashboard, payouts & refunds, users, stores, the audit log page, product moderation
   generated/prisma/      Prisma client (generated by `npm run db:generate`, not committed)
 prisma/
-  schema.prisma          the 36 tables
+  schema.prisma          the 38 tables
   migrations/            SQL applied to the database, in order
   seed.ts, demo-data.ts  demo categories, stores, products and accounts (safe to run again)
   demo-reviews.ts        demo shoppers, their delivered orders and reviews
@@ -505,6 +529,8 @@ openapi/openapi.yaml     the API contract
 | Re-authenticate before high-value actions | "Confirm it's you" (app code → password → email code), 10 minutes, per device; changing the email needs it, plus a code from the new inbox; so does changing a store's payout account, and an admin approving a store, verifying a payout account, marking a payout paid or failed, closing a refund, suspending or reactivating an account, or starting a two-step reset. |
 | Admin access | Admins are made only by a command on the server; separate Support / Finance / Moderation roles; 2FA required; checked in the database on every request, so removing an admin works at once. |
 | Audit log | Every admin decision (approvals, payouts, refunds, account and store suspensions, renames, two-step resets, user exports, listing moderation and warnings), and every look at a full TIN, a private document or a payout account number, is a row (who, what, when, IP) written in the same transaction as the change; every admin can read it on the Audit log page, nobody can edit it. |
+| AI assistant | Claude only chooses among fixed, read-only lookups that our code validates and runs with the chat owner's permissions (never SQL, never a write), so a cleverly worded question or a product description with hidden instructions can't reach anyone else's data. Seller and shopper text is passed as data; no address, phone or email is ever sent; chats are deleted after 30 days. |
+| AI costs | Daily question limits (per account, or per network address signed out), 20 questions per chat, one answer at a time, a daily spending cap from real token counts, and a Redis outage refuses instead of skipping the limits. |
 | Social sign-in (OAuth) safely | Authorization code + PKCE, state and nonce checked, ID token verified; code exchanged server to server; existing password accounts connect only after their password; unverified Google emails refused. |
 | Two-factor authentication | Authenticator app (TOTP, `otpauth`) + 10 single-use backup codes; required for sellers and admins; also asked after a password reset; replay-proof; wrong codes count toward the lockout. Lost both the app and the backup codes? Support's reset needs a written identity check AND the owner's confirmation from their email. |
 | Encrypt sensitive data | The 2FA secret is encrypted with AES-256-GCM (`DATA_ENCRYPTION_KEY`), bound to its user, so a copy pasted into another account fails to decrypt. Sellers' TINs and payout account numbers are encrypted the same way, bound to their store; only the last digits are ever shown. Backup codes are keyed hashes. |

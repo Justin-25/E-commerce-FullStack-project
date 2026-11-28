@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.18.0
+  version: 0.19.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -11,6 +11,7 @@ info:
     Account security (milestone 3d): "Confirm it's you", signed-in devices, security activity, change email.
     Google sign-in (milestone 3e): "Continue with Google" (authorization code + PKCE), connect and disconnect.
     Catalog (milestone 4a): categories, product search with filters and sort, product pages.
+    Vendora AI (milestone 8a): the shopper assistant, answers streamed as server-sent events.
     Money is always an integer number of centavos (₱7,499 = 749900).
 
     **How signing in works**
@@ -63,6 +64,8 @@ tags:
       every request, holding the role a page needs: SUPPORT (seller applications, payout accounts, users, stores), FINANCE
       (payouts and refunds), MODERATION (reported listings, warnings). Every action, and every look at sensitive data, is written to the audit
       log; actions that move or decide where money goes also need "Confirm it's you".
+  - name: ai
+    description: Vendora AI, the shopping assistant (milestone 8a). Signed in or out; answers stream as server-sent events.
 
 paths:
   /health:
@@ -3232,6 +3235,145 @@ paths:
           description: UNAUTHORIZED. Not signed in, or the access pass expired (call refresh).
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
+  /api/v1/ai/status:
+    get:
+      summary: Can Vendora AI be used now?
+      description: |
+        For the chat panel. `available` is false when the assistant is off (no API key), resting (today's spending cap
+        is used up) or the person has no questions left today. Signed out: 10 questions a day per network address;
+        signed in: 30 a day per account. Counts restart at midnight, Philippine time.
+      operationId: getAiStatus
+      tags: [ai]
+      responses:
+        "200":
+          description: The assistant's state for this person.
+          content: { application/json: { schema: { $ref: "#/components/schemas/AiStatus" } } }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/v1/ai/conversations:
+    get:
+      summary: My recent chats
+      description: The 10 latest chats of this account (signed in) or this browser (signed out), newest first.
+      operationId: listAiConversations
+      tags: [ai]
+      responses:
+        "200":
+          description: Chats, newest first.
+          content:
+            application/json:
+              schema: { type: object, required: [conversations], properties: { conversations: { type: array, items: { $ref: "#/components/schemas/AiConversation" } } } }
+    post:
+      summary: Start a chat
+      description: |
+        Signed in, the chat belongs to the account and can use its orders and cart. Signed out, it belongs to this
+        browser through a random httpOnly cookie (`vd_ai`, `__Host-vd_ai` in production; only its hash is stored) and
+        can answer product and policy questions only. With `productId` ("Ask about this product"), the chat knows which
+        product page it came from; that product must be on sale (404 otherwise).
+      operationId: startAiConversation
+      tags: [ai]
+      security: [{}, { accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, properties: { productId: { type: string, format: uuid } } }
+      responses:
+        "201":
+          description: The new chat (sets the `vd_ai` cookie when signed out and the browser has none).
+          headers:
+            Set-Cookie: { schema: { type: string } }
+          content: { application/json: { schema: { type: object, required: [conversation], properties: { conversation: { $ref: "#/components/schemas/AiConversation" } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503":
+          description: SERVICE_UNAVAILABLE with `details.reason` ai_off (no API key configured).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/ai/conversations/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: One chat
+      description: The questions and answers (lookup steps stay internal), with each answer's cards read live. 404 unless it's yours.
+      operationId: getAiConversation
+      tags: [ai]
+      responses:
+        "200":
+          description: The chat and its messages, oldest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [conversation, messages]
+                properties:
+                  conversation: { $ref: "#/components/schemas/AiConversation" }
+                  messages: { type: array, items: { $ref: "#/components/schemas/AiMessage" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      summary: Delete a chat
+      description: Deletes the chat and all its messages. (Chats are also deleted automatically 30 days after their last message.)
+      operationId: deleteAiConversation
+      tags: [ai]
+      security: [{}, { accessCookie: [], csrfHeader: [] }]
+      responses:
+        "204": { description: Deleted. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/ai/conversations/{id}/messages:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Ask a question (the answer streams)
+      description: |
+        Every check runs first and fails as a normal JSON error: the chat is yours (404), not full (409 `chat_full`,
+        20 questions per chat), not still answering (409 `answer_in_progress`), the assistant isn't resting (503
+        `ai_resting`) and you have questions left today (429 `ai_daily_limit`).
+
+        Then the answer streams as server-sent events (`text/event-stream`), each `event: <type>` with a JSON `data:` line:
+        - `status` `{ text }`: a lookup is running ("Searching products…").
+        - `text` `{ delta }`: the next piece of the answer (Markdown-light: **bold**, "- " bullets, and links to
+          `/products/{id}` and `/orders/{number}`).
+        - `discard` `{}`: clear the answer shown so far (it was declined or cut off); a short message follows.
+        - `cards` `{ products, orders }`: the products and orders the answer links to, from the database.
+        - `done` `{ messageId, suggestions, questionsLeftToday, questionsLeftInChat }`: the answer is complete.
+        - `error` `{ message }`: Claude didn't answer; show the message (the question can be asked again).
+        Closing the connection stops the answer (and its cost).
+      operationId: askAi
+      tags: [ai]
+      security: [{}, { accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [question]
+              properties:
+                question: { type: string, minLength: 1, maxLength: 1000 }
+      responses:
+        "200":
+          description: The answer, as server-sent events.
+          content:
+            text/event-stream:
+              schema: { type: string }
+              example: "event: status\ndata: {\"text\":\"Searching products…\"}\n\nevent: text\ndata: {\"delta\":\"Try the \"}\n\nevent: done\ndata: {\"messageId\":\"0193…\",\"suggestions\":[\"Compare these\"],\"questionsLeftToday\":9,\"questionsLeftInChat\":19}\n\n"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: 'CONFLICT, with `details.reason`: chat_full, answer_in_progress.'
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429":
+          description: RATE_LIMITED (`ai_daily_limit`, with `limit` and `retryAfterSeconds`) or the general rate limit.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: SERVICE_UNAVAILABLE with `details.reason` ai_resting (today's spending cap is used up; `retryAfterSeconds` until midnight) or ai_off; or Redis didn't answer (the limits can't be checked, so nothing is sent to Claude).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
 components:
   securitySchemes:
     accessCookie:
@@ -3268,6 +3410,82 @@ components:
       schema: { type: string, maxLength: 64 }
 
   schemas:
+    AiStatus:
+      type: object
+      required: [available, reason, resting, signedIn, questionsPerDay, questionsLeftToday, questionsPerChat, resetsInSeconds]
+      properties:
+        available: { type: boolean }
+        reason: { type: [string, "null"], enum: [ai_off, ai_resting, ai_daily_limit, null], description: Why it can't be used now (null when available). }
+        resting: { type: boolean, description: "Today's spending cap is used up." }
+        signedIn: { type: boolean }
+        questionsPerDay: { type: integer, description: 10 signed out (per network address), 30 signed in. }
+        questionsLeftToday: { type: integer }
+        questionsPerChat: { type: integer, const: 20 }
+        resetsInSeconds: { type: [integer, "null"], description: Until midnight in Manila, when it isn't available. }
+    AiConversation:
+      type: object
+      required: [id, scope, title, productId, signedIn, questionCount, questionsLeft, createdAt, lastMessageAt]
+      properties:
+        id: { type: string, format: uuid }
+        scope: { type: string, enum: [shopper] }
+        title: { type: [string, "null"], description: The first question, shortened (null before it). }
+        productId: { type: [string, "null"], format: uuid, description: '"Ask about this product": the product page it came from.' }
+        signedIn: { type: boolean, description: The chat belongs to an account (false = this browser; no orders or cart). }
+        questionCount: { type: integer }
+        questionsLeft: { type: integer }
+        createdAt: { type: string, format: date-time }
+        lastMessageAt: { type: string, format: date-time }
+    AiMessage:
+      type: object
+      required: [id, role, text, cards, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        role: { type: string, enum: [user, assistant] }
+        text: { type: string }
+        cards:
+          oneOf:
+            - { type: "null" }
+            - { $ref: "#/components/schemas/AiCards" }
+        createdAt: { type: string, format: date-time }
+    AiCards:
+      type: object
+      description: What an answer links to, read from the database (current prices, stock and statuses). Orders only for the chat's own account.
+      required: [products, orders]
+      properties:
+        products: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/ProductCard" } }
+        orders: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/AiOrderCard" } }
+    AiOrderCard:
+      type: object
+      description: '"Order #VD-20931 · 2 items", status, the tracking stepper, arriving dates, "Sold by … · Tracking …".'
+      required: [id, number, status, itemCount, totalCentavos, packages]
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: string, example: VD-20931 }
+        status: { type: string, enum: [PENDING_PAYMENT, PLACED, COMPLETED, CANCELLED] }
+        itemCount: { type: integer }
+        totalCentavos: { type: integer }
+        packages:
+          type: array
+          items:
+            type: object
+            required: [store, status, courier, trackingNumber, estimatedDelivery, deliveredAt, steps, firstItem]
+            properties:
+              store: { type: object, required: [slug, name], properties: { slug: { type: string }, name: { type: string } } }
+              status: { type: string }
+              courier: { type: [string, "null"] }
+              trackingNumber: { type: [string, "null"] }
+              estimatedDelivery:
+                oneOf:
+                  - { type: "null" }
+                  - { type: object, required: [earliest, latest], properties: { earliest: { type: string, format: date-time }, latest: { type: string, format: date-time } } }
+              deliveredAt: { type: [string, "null"], format: date-time }
+              steps:
+                type: array
+                items: { type: object, required: [step, at], properties: { step: { type: string, enum: [ORDERED, PREPARING, SHIPPED, DELIVERED] }, at: { type: [string, "null"], format: date-time } } }
+              firstItem:
+                oneOf:
+                  - { type: "null" }
+                  - { type: object, required: [title, imageUrl], properties: { title: { type: string }, imageUrl: { type: [string, "null"] } } }
     Health:
       type: object
       required: [status, uptimeSeconds]

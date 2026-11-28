@@ -44,15 +44,22 @@ import { AuditLogService } from "../../src/modules/admin/auditLog.service.js";
 import { ModerationService } from "../../src/modules/admin/moderation.service.js";
 import { reportsRouter } from "../../src/modules/moderation/reports.routes.js";
 import { ReportService } from "../../src/modules/moderation/reports.service.js";
+import { aiRouter } from "../../src/modules/ai/ai.routes.js";
+import { AssistantService } from "../../src/modules/ai/assistant.service.js";
+import { AiLimits } from "../../src/modules/ai/limits.js";
+import { FakeClaude } from "./fakeClaude.js";
+import type { AiModel } from "../../src/lib/ai.js";
 
 /**
  * The real catalog, reviews and store routes on a fresh test database filled with the
  * demo data (63 products, demo shoppers, orders and reviews), plus the real sign-in
  * stack, so signed-in actions like Follow are tested with real cookies and CSRF tokens.
+ * Vendora AI runs on a scripted fake Claude unless `opts.model` is given (the live check).
  */
-export async function createCatalogHarness() {
+export async function createCatalogHarness(opts: { model?: AiModel } = {}) {
   const paymongo = new FakePaymongo();
   const media = new FakeMedia();
+  const claude = new FakeClaude();
   /** The order service of the most recently built app (tests call its background job directly). */
   const services: {
     orders?: OrderService;
@@ -65,6 +72,7 @@ export async function createCatalogHarness() {
     visits?: VisitService;
     payouts?: PayoutService;
     moderation?: ModerationService;
+    assistant?: AssistantService;
   } = {};
   /** Moves the clock of the background jobs and Seller Center orders (a day, a week) without waiting. */
   const clock = { offsetMs: 0 };
@@ -100,7 +108,21 @@ export async function createCatalogHarness() {
       services.payouts = payouts;
       services.sellerOrders = sellerOrders;
       services.lowStock = new LowStockService({ prisma, email: deps.email, config: deps.config, logger, now });
+      const catalogForAi = new CatalogService({ prisma, kv, logger });
+      const assistant = new AssistantService({
+        prisma,
+        model: opts.model ?? claude, // the live check passes the real Claude
+        limits: new AiLimits({ kv, budgetUsd: 2, now }),
+        catalog: catalogForAi,
+        orders: orderService(deps),
+        cart: new CartService({ prisma }),
+        secret: deps.config.CODE_HASH_SECRET,
+        logger,
+        now
+      });
+      services.assistant = assistant;
       return [
+        aiRouter({ assistant, guards, config: deps.config }),
         notificationsRouter({ priceDrops, guards }),
         reportsRouter({ reports: new ReportService({ prisma, now }), guards }),
         adminRouter({
@@ -153,7 +175,7 @@ export async function createCatalogHarness() {
     if (!s) throw new Error(`no ${name} service yet`);
     return s as NonNullable<(typeof services)[K]>;
   };
-  return { ...h, demo, idOf, paymongo, media, orders, priceDrops, clock, delivery: service("delivery"), sellerOrders: service("sellerOrders"), lowStock: service("lowStock"), refunds: service("refunds"), cancellation: service("cancellation"), visits: service("visits"), payouts: service("payouts"), moderation: service("moderation") };
+  return { ...h, demo, idOf, paymongo, media, orders, priceDrops, clock, delivery: service("delivery"), sellerOrders: service("sellerOrders"), lowStock: service("lowStock"), refunds: service("refunds"), cancellation: service("cancellation"), visits: service("visits"), payouts: service("payouts"), moderation: service("moderation"), assistant: service("assistant"), claude };
 }
 
 export type CatalogHarness = Awaited<ReturnType<typeof createCatalogHarness>>;

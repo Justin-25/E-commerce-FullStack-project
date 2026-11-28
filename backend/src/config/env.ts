@@ -59,7 +59,15 @@ const schema = z
 
     // --- Cloudinary (6a): store logos, product photos, private verification documents. Uploads are off when empty. ---
     /** The "API environment variable" from the Cloudinary dashboard: cloudinary://<api key>:<api secret>@<cloud name>. */
-    CLOUDINARY_URL: optional(z.string().regex(/^cloudinary:\/\/\d{6,20}:[A-Za-z0-9_-]{16,64}@[a-z0-9_-]{1,64}$/, "must be the API environment variable from Cloudinary (cloudinary://<key>:<secret>@<cloud name>)"))
+    CLOUDINARY_URL: optional(z.string().regex(/^cloudinary:\/\/\d{6,20}:[A-Za-z0-9_-]{16,64}@[a-z0-9_-]{1,64}$/, "must be the API environment variable from Cloudinary (cloudinary://<key>:<secret>@<cloud name>)")),
+
+    // --- Vendora AI (milestone 8). The assistant is off when the key is empty. ---
+    /** A key from the Claude Console (sk-ant-…). */
+    ANTHROPIC_API_KEY: optional(z.string().regex(/^sk-ant-[A-Za-z0-9_-]{20,}$/, "must be an Anthropic API key (sk-ant-…)")),
+    /** Which Claude model answers. Changing it needs no code change (prices for the budget are in src/lib/ai.ts). */
+    AI_MODEL: z.preprocess((v) => (v === "" ? undefined : v), z.string().regex(/^claude-[a-z0-9-]{3,60}$/, "must be a Claude model id like claude-opus-5-5").default("claude-opus-5-5")),
+    /** Spending cap per Philippine day, in US dollars. When it's reached, the assistant rests until midnight. */
+    AI_DAILY_BUDGET_USD: z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().positive().max(1000).default(2))
   })
   .superRefine((env, ctx) => {
     if (new Set(SECRET_KEYS.map((k) => env[k])).size !== SECRET_KEYS.length) {

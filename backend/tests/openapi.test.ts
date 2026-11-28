@@ -55,6 +55,8 @@ import type { StoreService } from "../src/modules/stores/stores.service.js";
 import { wishlistRouter } from "../src/modules/wishlist/wishlist.routes.js";
 import type { WishlistService } from "../src/modules/wishlist/wishlist.service.js";
 import { TokenService } from "../src/modules/auth/tokens.js";
+import { aiRouter } from "../src/modules/ai/ai.routes.js";
+import type { AssistantService } from "../src/modules/ai/assistant.service.js";
 import { testConfig } from "./helpers.js";
 
 type Spec = { paths: Record<string, Record<string, { operationId?: string }>>; components: Record<string, unknown> };
@@ -104,6 +106,7 @@ describe("openapi.yaml", () => {
       sellerRouter({ onboarding: {} as OnboardingService, products: {} as SellerProductService, orders: {} as SellerOrderService, dashboard: {} as DashboardService, payouts: {} as PayoutService, security: {} as SecurityService, guards, config }),
       notificationsRouter({ priceDrops: {} as PriceDropService, guards }),
       reportsRouter({ reports: {} as ReportService, guards }),
+      aiRouter({ assistant: {} as AssistantService, guards, config }),
       adminRouter({ dashboard: {} as AdminDashboardService, applications: {} as ApplicationService, money: {} as MoneyService, users: {} as UserAdminService, stores: {} as StoreAdminService, auditLog: {} as AuditLogService, moderation: {} as ModerationService, security: {} as SecurityService, guards })
     ];
     const inCode = routers.flatMap((r) => routesOf(r, "/api/v1"));

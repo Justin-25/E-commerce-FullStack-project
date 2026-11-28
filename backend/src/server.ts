@@ -59,6 +59,10 @@ import { wishlistRouter } from "./modules/wishlist/wishlist.routes.js";
 import { WishlistService } from "./modules/wishlist/wishlist.service.js";
 import { createGoogleIdentity } from "./lib/google.js";
 import { TokenService } from "./modules/auth/tokens.js";
+import { AnthropicModel } from "./lib/ai.js";
+import { aiRouter } from "./modules/ai/ai.routes.js";
+import { AssistantService } from "./modules/ai/assistant.service.js";
+import { AiLimits } from "./modules/ai/limits.js";
 
 loadEnvFile();
 const config = loadConfig();
@@ -125,6 +129,22 @@ if (prisma) {
   every(FIFTEEN_MINUTES, "the refund retries", () => refunds.sendDue());
   routers.push(reviewsRouter({ reviews: new ReviewService({ prisma }), guards }));
   routers.push(storesRouter({ stores: new StoreService({ prisma }), guards, visits }));
+
+  const model = config.ANTHROPIC_API_KEY ? new AnthropicModel(config.ANTHROPIC_API_KEY, config.AI_MODEL, logger) : null;
+  if (!model) logger.info("ANTHROPIC_API_KEY is not set — Vendora AI is off");
+  const assistant = new AssistantService({
+    prisma,
+    model,
+    limits: new AiLimits({ kv, budgetUsd: config.AI_DAILY_BUDGET_USD }),
+    catalog,
+    orders,
+    cart,
+    secret: config.CODE_HASH_SECRET,
+    logger
+  });
+  routers.push(aiRouter({ assistant, guards, config }));
+  // Chats are kept 30 days after their last message.
+  every(60 * 60_000, "the old AI chats clean-up", () => assistant.deleteOld());
 
   const media = config.CLOUDINARY_URL ? new CloudinaryStorage(config.CLOUDINARY_URL, logger) : null;
   if (!media) logger.info("CLOUDINARY_URL is not set — uploads (logos, photos, documents) are off");

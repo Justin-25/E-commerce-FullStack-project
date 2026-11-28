@@ -14,6 +14,8 @@ export interface KeyValueStore {
   setIfAbsent(key: string, value: string, ttlSeconds: number): Promise<boolean>;
   /** Adds 1 and returns the new count. The expiry starts at the first increment (fixed window). */
   increment(key: string, ttlSeconds: number): Promise<number>;
+  /** Adds a whole number (e.g. micro-dollars spent) and returns the new total. Same fixed-window expiry as `increment`. */
+  incrementBy(key: string, amount: number, ttlSeconds: number): Promise<number>;
   /** Seconds until the key expires, or 0 if it doesn't exist. */
   ttl(key: string): Promise<number>;
   delete(...keys: string[]): Promise<void>;
@@ -28,6 +30,8 @@ export interface KeyValueStore {
 
 // INCR + EXPIRE in one atomic step, so a crash between them can't leave a counter that never expires.
 const INCREMENT_SCRIPT = `local n = redis.call('INCR', KEYS[1]) if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end return n`;
+// INCRBY + EXPIRE (only if it has none yet) in one atomic step, for the same reason.
+const INCREMENT_BY_SCRIPT = `local n = redis.call('INCRBY', KEYS[1], ARGV[1]) if redis.call('TTL', KEYS[1]) < 0 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end return n`;
 // PFADD + EXPIRE (only if it has none yet) in one atomic step, for the same reason.
 const COUNT_UNIQUE_SCRIPT = `redis.call('PFADD', KEYS[1], ARGV[1]) if redis.call('TTL', KEYS[1]) < 0 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end return 1`;
 
@@ -59,6 +63,9 @@ export class RedisKv implements KeyValueStore {
   }
   increment(key: string, ttlSeconds: number) {
     return this.run(async () => Number(await this.redis.eval(INCREMENT_SCRIPT, 1, key, ttlSeconds)));
+  }
+  incrementBy(key: string, amount: number, ttlSeconds: number) {
+    return this.run(async () => Number(await this.redis.eval(INCREMENT_BY_SCRIPT, 1, key, Math.round(amount), ttlSeconds)));
   }
   ttl(key: string) {
     return this.run(async () => Math.max(0, await this.redis.ttl(key)));
@@ -104,8 +111,11 @@ export class MemoryKv implements KeyValueStore {
     return true;
   }
   async increment(key: string, ttlSeconds: number) {
+    return this.incrementBy(key, 1, ttlSeconds);
+  }
+  async incrementBy(key: string, amount: number, ttlSeconds: number) {
     const entry = this.live(key);
-    const next = Number(entry?.value ?? 0) + 1;
+    const next = Number(entry?.value ?? 0) + Math.round(amount);
     this.data.set(key, { value: String(next), expiresAt: entry?.expiresAt ?? this.now() + ttlSeconds * 1000 });
     return next;
   }

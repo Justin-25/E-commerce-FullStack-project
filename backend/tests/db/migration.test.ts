@@ -43,9 +43,9 @@ beforeAll(async () => {
 afterAll(async () => db?.close());
 
 describe("migration structure", () => {
-  it("creates all 36 tables (30 from milestone 2 + trusted_devices, refunds, store_daily_visits, two_factor_resets, store_slug_redirects, store_warnings)", async () => {
+  it("creates all 38 tables (30 from milestone 2 + trusted_devices, refunds, store_daily_visits, two_factor_resets, store_slug_redirects, store_warnings, ai_conversations, ai_messages)", async () => {
     const { n } = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`);
-    expect(n).toBe(36);
+    expect(n).toBe(38);
   });
 
   it("really builds every index the migration declares", async () => {
@@ -62,11 +62,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 62 foreign keys and 60 safety (CHECK) rules", async () => {
+  it("has the 65 foreign keys and 66 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
-    expect(fk.n).toBe(62);
-    expect(chk.n).toBe(60);
+    expect(fk.n).toBe(65);
+    expect(chk.n).toBe(66);
   });
 });
 

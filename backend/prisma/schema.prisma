@@ -293,6 +293,7 @@ model User {
   removedProducts   Product[]        @relation("ProductRemover")
   issuedWarnings    StoreWarning[]   @relation("WarningIssuer")
   withdrawnWarnings StoreWarning[]   @relation("WarningWithdrawer")
+  aiConversations   AiConversation[]
 
   @@index([role, status])
   @@map("users")
@@ -655,16 +656,18 @@ model Product {
   createdAt        DateTime                 @default(now()) @db.Timestamptz(3)
   updatedAt        DateTime                 @updatedAt @db.Timestamptz(3)
 
-  store         Store            @relation(fields: [storeId], references: [id], onDelete: Restrict)
-  category      Category         @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  removedBy     User?            @relation("ProductRemover", fields: [removedById], references: [id], onDelete: SetNull)
-  warnings      StoreWarning[]
-  variants      ProductVariant[]
-  images        ProductImage[]
-  reviews       Review[]
-  wishlistItems WishlistItem[]
-  orderItems    OrderItem[]
-  flags         ProductFlag[]
+  store           Store            @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  category        Category         @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  removedBy       User?            @relation("ProductRemover", fields: [removedById], references: [id], onDelete: SetNull)
+  warnings        StoreWarning[]
+  variants        ProductVariant[]
+  images          ProductImage[]
+  reviews         Review[]
+  wishlistItems   WishlistItem[]
+  orderItems      OrderItem[]
+  flags           ProductFlag[]
+  /// Chats opened from this product page ("Ask about this product").
+  aiConversations AiConversation[]
 
   @@unique([storeId, slug])
   @@index([categoryId, status])
@@ -1097,4 +1100,78 @@ model AuditLog {
   @@index([actorId, createdAt(sort: Desc)])
   @@index([createdAt(sort: Desc)])
   @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// 6 · AI assistant (milestone 8)
+// ---------------------------------------------------------------------------
+
+/// Whose data a chat may use: a shopper's own (8a), a seller's own store (8b) or the whole marketplace (admins, 8b).
+enum AiScope {
+  SHOPPER
+  SELLER
+  ADMIN
+}
+
+enum AiRole {
+  USER
+  ASSISTANT
+}
+
+/// One chat with Vendora AI. It belongs to an account, or (signed out, shoppers only) to one browser.
+model AiConversation {
+  id            String    @id @default(uuid(7)) @db.Uuid
+  scope         AiScope
+  userId        String?   @db.Uuid
+  /// Signed out: SHA-256 of the random visitor cookie (the cookie itself is never stored). Exactly one owner (CHECK).
+  visitorHash   String?   @db.Char(64)
+  /// Opened from a product page ("Ask about this product").
+  productId     String?   @db.Uuid
+  /// The first question, shortened (the chat list).
+  title         String?   @db.VarChar(120)
+  /// Questions asked so far (a chat holds at most 20; then "Start a new chat").
+  questionCount Int       @default(0)
+  /// While an answer is being written: one question at a time per chat. Expires by itself if a server stops mid-answer.
+  busyUntil     DateTime? @db.Timestamptz(3)
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  /// Chats are deleted 30 days after their last message.
+  lastMessageAt DateTime  @default(now()) @db.Timestamptz(3)
+
+  user     User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product  Product?    @relation(fields: [productId], references: [id], onDelete: SetNull)
+  messages AiMessage[]
+
+  @@index([userId, lastMessageAt(sort: Desc)])
+  @@index([visitorHash, lastMessageAt(sort: Desc)])
+  @@index([lastMessageAt])
+  @@map("ai_conversations")
+}
+
+/// One message of the transcript sent to Claude, in order. It is replayed byte for byte on every later turn (append-only):
+/// Claude's thinking blocks are only valid in the exact conversation that produced them.
+model AiMessage {
+  id               String   @id @default(uuid(7)) @db.Uuid
+  conversationId   String   @db.Uuid
+  /// 0, 1, 2…: the order of the transcript.
+  seq              Int
+  role             AiRole
+  /// The exact content blocks sent to or received from Claude (text, thinking, tool_use, tool_result, fallback).
+  content          Json           @db.Json
+  /// What the chat shows: the question, or the whole answer of a turn. Null for lookup steps.
+  text             String?  @db.Text
+  /// The product ids and order numbers shown as cards under the answer (read live when the chat is opened).
+  cards            Json?
+  /// Assistant messages: the model that answered, why it stopped and the tokens it used (for the daily budget).
+  model            String?  @db.VarChar(64)
+  stopReason       String?  @db.VarChar(40)
+  inputTokens      Int      @default(0)
+  outputTokens     Int      @default(0)
+  cacheReadTokens  Int      @default(0)
+  cacheWriteTokens Int      @default(0)
+  createdAt        DateTime @default(now()) @db.Timestamptz(3)
+
+  conversation AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, seq])
+  @@map("ai_messages")
 }

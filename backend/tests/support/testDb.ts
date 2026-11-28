@@ -37,6 +37,9 @@ export async function createTestDb(): Promise<TestDb> {
 
 async function createPgliteDb(): Promise<TestDb> {
   const db = new PGlite({ extensions: { pg_trgm } }); // the catalog search uses pg_trgm (built into real PostgreSQL)
+  // PGlite takes this PC's time zone (UTC+8 in Manila); Neon's sessions are in UTC. Match Neon, or SQL that turns
+  // timestamps into Philippine days (AT TIME ZONE 'Asia/Manila') sees times 8 hours off between midnight and 8 AM.
+  await db.exec("SET TIME ZONE 'UTC'");
   for (const sql of migrationSql) await db.exec(sql);
   const prisma = new PrismaClient({ adapter: new PrismaPGlite(db) });
   return {
