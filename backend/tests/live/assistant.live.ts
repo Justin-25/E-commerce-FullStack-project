@@ -17,6 +17,7 @@ import { AnthropicModel, type AiModel, type AiRequest, type AiResponse, type AiU
 import { formatPeso } from "../../src/lib/money.js";
 import { Browser } from "../support/browser.js";
 import { createCatalogHarness, type CatalogHarness } from "../support/catalogHarness.js";
+import { sellers } from "../support/sellers.js";
 import { shopping } from "../support/shopping.js";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
@@ -44,6 +45,7 @@ interface Asked {
   tools: string[];
   products: { id: string; priceCentavos: number; title: string }[];
   orders: { number: string }[];
+  tables: { title: string; rows: { title: string; detail: string }[] }[];
   events: Event[];
 }
 
@@ -83,15 +85,16 @@ async function ask(b: Browser, id: string, question: string): Promise<Asked> {
     .filter((c) => c.trim())
     .map((c) => ({ type: /^event: (.+)$/m.exec(c)?.[1] ?? "?", ...(JSON.parse(/^data: (.*)$/m.exec(c)?.[1] ?? "{}") as object) }) as Event);
   const text = events.filter((e) => e.type === "text").map((e) => String(e.delta)).join("");
-  const cards = (events.find((e) => e.type === "cards") ?? { products: [], orders: [] }) as unknown as { products: Asked["products"]; orders: Asked["orders"] };
+  const cards = (events.find((e) => e.type === "cards") ?? { products: [], orders: [], tables: [] }) as unknown as { products: Asked["products"]; orders: Asked["orders"]; tables?: Asked["tables"] };
+  const tables = cards.tables ?? [];
   const calls = claude.calls.slice(before);
   const tools = calls.flatMap((c) => c.tools);
   const cost = calls.reduce((s, c) => s + c.usage.costMicroUsd, 0);
   report.push(
-    `## ${question}\n\n- Lookups: ${tools.join(", ") || "none"} · ${calls.length} call(s) · US$${(cost / 1_000_000).toFixed(4)} · cache read ${calls.reduce((s, c) => s + c.usage.cacheReadTokens, 0)} tokens\n- Cards: ${cards.products.map((p) => `${p.title} (${formatPeso(p.priceCentavos)})`).join("; ") || "none"}${cards.orders.length ? ` · orders ${cards.orders.map((o) => o.number).join(", ")}` : ""}\n- Events: ${[...new Set(events.map((e) => e.type))].join(", ")}\n\n${text}\n`
+    `## ${question}\n\n- Lookups: ${tools.join(", ") || "none"} · ${calls.length} call(s) · US$${(cost / 1_000_000).toFixed(4)} · cache read ${calls.reduce((s, c) => s + c.usage.cacheReadTokens, 0)} tokens\n- Cards: ${cards.products.map((p) => `${p.title} (${formatPeso(p.priceCentavos)})`).join("; ") || "none"}${cards.orders.length ? ` · orders ${cards.orders.map((o) => o.number).join(", ")}` : ""}${tables.length ? ` · tables ${tables.map((t) => `${t.title} (${t.rows.length} rows)`).join(", ")}` : ""}\n- Events: ${[...new Set(events.map((e) => e.type))].join(", ")}\n\n${text}\n`
   );
   expect(events.at(-1)?.type, `the answer ended with: ${JSON.stringify(events.at(-1))}`).toBe("done");
-  return { text, tools, products: cards.products, orders: cards.orders, events };
+  return { text, tools, products: cards.products, orders: cards.orders, tables, events };
 }
 
 describe("Vendora AI with the real Claude", () => {
@@ -173,6 +176,22 @@ describe("Vendora AI with the real Claude", () => {
     const id = await chat(b, { productId: await h.idOf("aurasound-pro") });
     const a = await ask(b, id, "How long does the battery last?");
     expect(a.text).toMatch(/30/);
+  });
+
+  it("Ask your data (Seller Center): sales and stock from the seller's own store, with a table from the data, naming no buyer", async () => {
+    const sell = sellers(h);
+    const seller = await sell.seller({ approve: true });
+    await sell.publish(seller.browser, { title: "Desk Lamp Aria", category: "lighting", variants: [{ name: "Black", sku: "LIVE-LAMP-BLK", priceCentavos: 30_000, stock: 20 }] });
+    const shop = shopping(h);
+    await shop.order(await shop.shopper("Liza Dela Cruz"), [["LIVE-LAMP-BLK", 14]]); // ₱4,200; 6 left, about 1 a day
+    const id = await chat(seller.browser, { scope: "seller" });
+    const a = await ask(seller.browser, id, "How did my store do this week, and what's running low?");
+    expect(a.tools).toEqual(expect.arrayContaining(["sales_summary", "stock_forecast"]));
+    expect(a.text).toContain("₱4,200");
+    expect(a.text).not.toMatch(/Liza|Dela Cruz/);
+    expect(a.tables.map((t) => t.title)).toContain("Running low");
+    const other = await ask(seller.browser, id, "How much did the other stores on Vendora sell this week?");
+    expect(other.tools.every((t) => ["sales_summary", "best_sellers", "stock_forecast", "orders_to_ship", "payouts", "reviews", "store_visits"].includes(t))).toBe(true);
   });
 
   it("kept the transcript valid (no thinking dropped) and used the prompt cache", () => {

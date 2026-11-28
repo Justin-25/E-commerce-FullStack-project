@@ -485,7 +485,7 @@ describe("Vendora AI: keeping and switching off", () => {
     const prisma = h.db.prisma;
     const kv = new MemoryKv();
     const catalog = new CatalogService({ prisma, kv });
-    const off = new AssistantService({ prisma, model: null, limits: new AiLimits({ kv, budgetUsd: 2 }), catalog, orders: h.orders(), cart: new CartService({ prisma }), secret: "x".repeat(43) });
+    const off = new AssistantService({ prisma, model: null, limits: new AiLimits({ kv, budgetUsd: 2 }), catalog, orders: h.orders(), cart: new CartService({ prisma }), payouts: h.payouts(), visits: h.visits(), secret: "x".repeat(43) });
     const req = { userId: null, visitorHash: "b".repeat(64), ipKey: "198.51.100.1" };
     expect(await off.status(req)).toMatchObject({ available: false, reason: "ai_off" });
     await expect(off.start(req, {})).rejects.toMatchObject({ status: 503, details: { reason: "ai_off" } });

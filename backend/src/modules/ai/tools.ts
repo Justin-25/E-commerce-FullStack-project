@@ -5,7 +5,38 @@ import { z } from "zod";
 export interface ToolContext {
   /** The account that owns the chat; null for a signed-out visitor's chat (no account data at all). */
   userId: string | null;
+  /** Seller chats: the owner's store, checked in the database for this question. Seller lookups read only this store. */
+  storeId?: string;
 }
+
+/** One row of an answer table: "Boom Mini Speaker · Blue", "6 left · about 4 days", a "Low" badge. */
+export interface TableRow {
+  title: string;
+  detail: string;
+  badge?: { label: string; tone: "danger" | "warning" | "neutral" | "success" };
+  /** Where the row opens in the app (e.g. the product in Seller Center). */
+  href?: string;
+}
+
+/** A small table under an answer. Built by our code from the lookup's data, never from Claude's text. */
+export interface AnswerTable {
+  id: string;
+  title: string;
+  rows: TableRow[];
+}
+
+/**
+ * A lookup result that can also be shown as a table: Claude gets `data` plus a `table_id`, and shows the table by
+ * writing [[table:ID]] in its answer; the rows sent to the chat come from here.
+ */
+export class WithTable {
+  constructor(
+    readonly data: Record<string, unknown>,
+    readonly table: Omit<AnswerTable, "id">
+  ) {}
+}
+/** Tables are short: the first rows only. */
+export const TABLE_ROWS = 10;
 
 /**
  * One lookup Claude can ask for. Claude only picks the tool and its arguments; our code checks the arguments

@@ -2,11 +2,14 @@ import type { PrismaClient } from "../../generated/prisma/client.js";
 import type { CatalogService, ProductCard } from "../catalog/catalog.service.js";
 import type { OrderService, OrderView, TrackingStep } from "../orders/orders.service.js";
 import { parseOrderNumber } from "./shopperTools.js";
+import type { AnswerTable } from "./tools.js";
 
 /** What an answer links to, kept with the message: the cards are read live whenever the chat is shown. */
 export interface CardRefs {
   products: string[];
   orders: string[];
+  /** "Ask your data" tables the answer showed: a snapshot of the data as it was answered. */
+  tables?: AnswerTable[];
 }
 
 /** The design's order card: "Order #VD-20931 · 2 items", status, stepper, arriving, "Sold by … · Tracking …". */
@@ -31,6 +34,7 @@ export interface OrderCard {
 export interface Cards {
   products: ProductCard[];
   orders: OrderCard[];
+  tables: AnswerTable[];
 }
 
 const MAX_PRODUCTS = 6;
@@ -63,7 +67,7 @@ export async function resolveCards(deps: { prisma: PrismaClient; catalog: Catalo
       if (row) orders.push(orderCard(await deps.orders.view(row.id)));
     }
   }
-  return { products, orders };
+  return { products, orders, tables: refs.tables ?? [] };
 }
 
 function orderCard(o: OrderView): OrderCard {

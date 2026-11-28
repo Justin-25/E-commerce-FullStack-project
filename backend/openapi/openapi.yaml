@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.19.0
+  version: 0.20.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -11,7 +11,7 @@ info:
     Account security (milestone 3d): "Confirm it's you", signed-in devices, security activity, change email.
     Google sign-in (milestone 3e): "Continue with Google" (authorization code + PKCE), connect and disconnect.
     Catalog (milestone 4a): categories, product search with filters and sort, product pages.
-    Vendora AI (milestone 8a): the shopper assistant, answers streamed as server-sent events.
+    Vendora AI (milestone 8a): the shopper assistant, answers streamed as server-sent events; "Ask your data" in Seller Center (8b-1).
     Money is always an integer number of centavos (₱7,499 = 749900).
 
     **How signing in works**
@@ -65,7 +65,7 @@ tags:
       (payouts and refunds), MODERATION (reported listings, warnings). Every action, and every look at sensitive data, is written to the audit
       log; actions that move or decide where money goes also need "Confirm it's you".
   - name: ai
-    description: Vendora AI, the shopping assistant (milestone 8a). Signed in or out; answers stream as server-sent events.
+    description: Vendora AI, the shopping assistant (milestone 8a; signed in or out) and "Ask your data" in Seller Center (8b-1; the seller's own store). Answers stream as server-sent events.
 
 paths:
   /health:
@@ -3241,27 +3241,41 @@ paths:
       description: |
         For the chat panel. `available` is false when the assistant is off (no API key), resting (today's spending cap
         is used up) or the person has no questions left today. Signed out: 10 questions a day per network address;
-        signed in: 30 a day per account. Counts restart at midnight, Philippine time.
+        signed in: 30 a day per account. Seller chats: 50 a day per account, counted apart. Counts restart at midnight, Philippine time.
       operationId: getAiStatus
       tags: [ai]
+      parameters:
+        - { name: scope, in: query, schema: { type: string, enum: [shopper, seller], default: shopper }, description: 'shopper: the shopping assistant; seller: "Ask your data" in Seller Center (Seller Center access needed: 401 signed out, 403 otherwise).' }
       responses:
         "200":
           description: The assistant's state for this person.
           content: { application/json: { schema: { $ref: "#/components/schemas/AiStatus" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: 'FORBIDDEN (seller chats) - no Seller Center access (`details.reason` not_a_seller, two_factor_required, admin_account).'
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /api/v1/ai/conversations:
     get:
       summary: My recent chats
-      description: The 10 latest chats of this account (signed in) or this browser (signed out), newest first.
+      description: The 10 latest chats of one kind (`scope`) of this account (signed in) or this browser (signed out, shopper chats only), newest first.
       operationId: listAiConversations
       tags: [ai]
+      parameters:
+        - { name: scope, in: query, schema: { type: string, enum: [shopper, seller], default: shopper }, description: 'shopper: the shopping assistant; seller: "Ask your data" in Seller Center (Seller Center access needed: 401 signed out, 403 otherwise).' }
       responses:
         "200":
           description: Chats, newest first.
           content:
             application/json:
               schema: { type: object, required: [conversations], properties: { conversations: { type: array, items: { $ref: "#/components/schemas/AiConversation" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: FORBIDDEN (seller chats) - no Seller Center access.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     post:
       summary: Start a chat
       description: |
@@ -3269,13 +3283,20 @@ paths:
         browser through a random httpOnly cookie (`vd_ai`, `__Host-vd_ai` in production; only its hash is stored) and
         can answer product and policy questions only. With `productId` ("Ask about this product"), the chat knows which
         product page it came from; that product must be on sale (404 otherwise).
+        With `scope: seller` it's "Ask your data" in Seller Center: it needs Seller Center access (401 signed out, 403 otherwise;
+        checked again on every question) and answers only about the seller's own store, never naming buyers.
       operationId: startAiConversation
       tags: [ai]
       security: [{}, { accessCookie: [], csrfHeader: [] }]
       requestBody:
         content:
           application/json:
-            schema: { type: object, additionalProperties: false, properties: { productId: { type: string, format: uuid } } }
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                scope: { type: string, enum: [shopper, seller], default: shopper }
+                productId: { type: string, format: uuid, description: Shopper chats only. }
       responses:
         "201":
           description: The new chat (sets the `vd_ai` cookie when signed out and the browser has none).
@@ -3283,7 +3304,10 @@ paths:
             Set-Cookie: { schema: { type: string } }
           content: { application/json: { schema: { type: object, required: [conversation], properties: { conversation: { $ref: "#/components/schemas/AiConversation" } } } } }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: CSRF_INVALID, or FORBIDDEN for a seller chat without Seller Center access.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "404": { $ref: "#/components/responses/NotFound" }
         "503":
           description: SERVICE_UNAVAILABLE with `details.reason` ai_off (no API key configured).
@@ -3337,7 +3361,8 @@ paths:
         - `text` `{ delta }`: the next piece of the answer (Markdown-light: **bold**, "- " bullets, and links to
           `/products/{id}` and `/orders/{number}`).
         - `discard` `{}`: clear the answer shown so far (it was declined or cut off); a short message follows.
-        - `cards` `{ products, orders }`: the products and orders the answer links to, from the database.
+        - `cards` `{ products, orders, tables }`: the products and orders the answer links to (from the database), and the
+          tables it shows ("Ask your data"): the answer's text holds a `[[table:ID]]` marker on its own line where each goes.
         - `done` `{ messageId, suggestions, questionsLeftToday, questionsLeftInChat }`: the answer is complete.
         - `error` `{ message }`: Claude didn't answer; show the message (the question can be asked again).
         Closing the connection stops the answer (and its cost).
@@ -3362,7 +3387,9 @@ paths:
               schema: { type: string }
               example: "event: status\ndata: {\"text\":\"Searching products…\"}\n\nevent: text\ndata: {\"delta\":\"Try the \"}\n\nevent: done\ndata: {\"messageId\":\"0193…\",\"suggestions\":[\"Compare these\"],\"questionsLeftToday\":9,\"questionsLeftInChat\":19}\n\n"
         "400": { $ref: "#/components/responses/BadRequest" }
-        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "403":
+          description: CSRF_INVALID, or FORBIDDEN in a seller chat whose owner lost Seller Center access.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
           description: 'CONFLICT, with `details.reason`: chat_full, answer_in_progress.'
@@ -3412,13 +3439,14 @@ components:
   schemas:
     AiStatus:
       type: object
-      required: [available, reason, resting, signedIn, questionsPerDay, questionsLeftToday, questionsPerChat, resetsInSeconds]
+      required: [scope, available, reason, resting, signedIn, questionsPerDay, questionsLeftToday, questionsPerChat, resetsInSeconds]
       properties:
+        scope: { type: string, enum: [shopper, seller] }
         available: { type: boolean }
         reason: { type: [string, "null"], enum: [ai_off, ai_resting, ai_daily_limit, null], description: Why it can't be used now (null when available). }
         resting: { type: boolean, description: "Today's spending cap is used up." }
         signedIn: { type: boolean }
-        questionsPerDay: { type: integer, description: 10 signed out (per network address), 30 signed in. }
+        questionsPerDay: { type: integer, description: 10 signed out (per network address), 30 signed in, 50 in seller chats. }
         questionsLeftToday: { type: integer }
         questionsPerChat: { type: integer, const: 20 }
         resetsInSeconds: { type: [integer, "null"], description: Until midnight in Manila, when it isn't available. }
@@ -3427,7 +3455,7 @@ components:
       required: [id, scope, title, productId, signedIn, questionCount, questionsLeft, createdAt, lastMessageAt]
       properties:
         id: { type: string, format: uuid }
-        scope: { type: string, enum: [shopper] }
+        scope: { type: string, enum: [shopper, seller] }
         title: { type: [string, "null"], description: The first question, shortened (null before it). }
         productId: { type: [string, "null"], format: uuid, description: '"Ask about this product": the product page it came from.' }
         signedIn: { type: boolean, description: The chat belongs to an account (false = this browser; no orders or cart). }
@@ -3450,10 +3478,29 @@ components:
     AiCards:
       type: object
       description: What an answer links to, read from the database (current prices, stock and statuses). Orders only for the chat's own account.
-      required: [products, orders]
+      required: [products, orders, tables]
       properties:
         products: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/ProductCard" } }
         orders: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/AiOrderCard" } }
+        tables: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/AiAnswerTable" } }
+    AiAnswerTable:
+      type: object
+      description: 'A small table under an "Ask your data" answer, shown where the text says [[table:ID]]. Built from the lookup''s data (kept as it was when answered), never from Claude''s text.'
+      required: [id, title, rows]
+      properties:
+        id: { type: string, example: t7-1 }
+        title: { type: string, example: Running low }
+        rows:
+          type: array
+          maxItems: 10
+          items:
+            type: object
+            required: [title, detail]
+            properties:
+              title: { type: string, example: 'Boom Mini Speaker · Blue' }
+              detail: { type: string, example: '6 left · about 4 days' }
+              badge: { type: object, required: [label, tone], properties: { label: { type: string, example: Low }, tone: { type: string, enum: [danger, warning, neutral, success] } } }
+              href: { type: string, description: 'Where the row opens in the app, e.g. /seller/products/{id}.' }
     AiOrderCard:
       type: object
       description: '"Order #VD-20931 · 2 items", status, the tracking stepper, arriving dates, "Sold by … · Tracking …".'

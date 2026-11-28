@@ -116,6 +116,8 @@ export async function createCatalogHarness(opts: { model?: AiModel } = {}) {
         catalog: catalogForAi,
         orders: orderService(deps),
         cart: new CartService({ prisma }),
+        payouts,
+        visits,
         secret: deps.config.CODE_HASH_SECRET,
         logger,
         now

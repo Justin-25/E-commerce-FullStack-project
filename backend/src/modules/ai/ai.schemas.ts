@@ -1,14 +1,20 @@
 import { z } from "zod";
-import { QUESTION_MAX_CHARS } from "./assistant.service.js";
+import { CHAT_SCOPES, QUESTION_MAX_CHARS } from "./assistant.service.js";
+
+/** Which kind of chat: the shopping assistant (default) or "Ask your data" in Seller Center. */
+const scope = z.enum(CHAT_SCOPES, { error: "Unknown kind of chat" });
+export const scopeQuerySchema = z.object({ scope: scope.default("shopper") });
 
 export const conversationIdSchema = z.object({ id: z.uuid({ error: "Chat not found" }) });
 
 export const startSchema = z
   .object({
-    /** "Ask about this product": the chat starts knowing which product page it came from. */
+    scope: scope.default("shopper"),
+    /** "Ask about this product" (shopper chats): the chat starts knowing which product page it came from. */
     productId: z.uuid({ error: "Product not found" }).optional()
   })
-  .strict();
+  .strict()
+  .refine((v) => v.scope === "shopper" || v.productId === undefined, { error: "Only shopper chats start from a product", path: ["productId"] });
 
 export const questionSchema = z
   .object({

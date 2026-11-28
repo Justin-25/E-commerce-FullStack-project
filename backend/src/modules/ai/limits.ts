@@ -11,7 +11,7 @@ const KEEP_SECONDS = 2 * 24 * 60 * 60;
 export const QUESTIONS_PER_DAY = { visitor: 10, shopper: 30, staff: 50 } as const;
 
 /** Who is asking, for the daily count: a signed-in account, or a signed-out visitor's network address. */
-export type Asker = { kind: "user"; userId: string; perDay: number } | { kind: "visitor"; ipKey: string; perDay: number };
+export type Asker = { kind: "user"; userId: string; perDay: number; bucket?: "staff" } | { kind: "visitor"; ipKey: string; perDay: number };
 
 /**
  * The assistant's two cost limits, kept in Redis:
@@ -38,7 +38,8 @@ export class AiLimits {
   }
 
   private questionKey(asker: Asker) {
-    const who = asker.kind === "user" ? `u:${asker.userId}` : `ip:${asker.ipKey}`;
+    // Seller and admin chats ("staff") are counted apart from the same person's shopping questions.
+    const who = asker.kind === "user" ? `u:${asker.userId}${asker.bucket ? `:${asker.bucket}` : ""}` : `ip:${asker.ipKey}`;
     return `ai:q:${who}:${manilaDay(this.now())}`;
   }
 

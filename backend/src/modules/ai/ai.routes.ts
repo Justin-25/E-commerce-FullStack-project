@@ -4,17 +4,18 @@ import type { Config } from "../../config/env.js";
 import { randomToken, sha256Hex } from "../../lib/crypto.js";
 import { privateNoStore } from "../../lib/httpCache.js";
 import type { AuthGuards } from "../../middleware/auth.js";
-import { conversationIdSchema, questionSchema, startSchema } from "./ai.schemas.js";
+import { conversationIdSchema, questionSchema, scopeQuerySchema, startSchema } from "./ai.schemas.js";
 import { KEEP_DAYS, type AssistantService, type ChatEvent, type Requester } from "./assistant.service.js";
 
 const VISITOR_COOKIE_MAX_AGE_MS = KEEP_DAYS * 24 * 60 * 60 * 1000;
 const VISITOR_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
 /**
- * Vendora AI (8a). Works signed in or out:
+ * Vendora AI. Shopper chats (8a) work signed in or out:
  * - signed in, chats belong to the account and can use its orders and cart;
  * - signed out, a chat belongs to this browser through a random httpOnly cookie (only its hash is stored)
  *   and can only answer product and policy questions.
+ * Seller chats (8b-1, `scope: "seller"`, "Ask your data") need Seller Center access and see only the seller's store.
  * Changes are CSRF-checked app-wide. Answers stream as server-sent events (POST …/messages); every limit
  * and permission is checked before the stream opens, so those come back as normal JSON errors.
  */
@@ -41,21 +42,21 @@ export function aiRouter({ assistant, guards, config }: { assistant: AssistantSe
   router.use("/ai", guards.authenticate, live);
 
   router.get("/ai/status", async (req, res) => {
-    res.json(await assistant.status(requester(req)));
+    res.json(await assistant.status(requester(req), scopeQuerySchema.parse(req.query).scope));
   });
 
   router.get("/ai/conversations", async (req, res) => {
-    res.json({ conversations: await assistant.list(requester(req)) });
+    res.json({ conversations: await assistant.list(requester(req), scopeQuerySchema.parse(req.query).scope) });
   });
 
   router.post("/ai/conversations", async (req, res) => {
-    const { productId } = startSchema.parse(req.body ?? {});
+    const { scope, productId } = startSchema.parse(req.body ?? {});
     let token = visitorToken(req);
-    if (!req.auth && !token) {
+    if (!req.auth && !token && scope === "shopper") {
       token = randomToken(32);
       res.cookie(cookieName, token, { httpOnly: true, secure, sameSite: "lax", path: "/", maxAge: VISITOR_COOKIE_MAX_AGE_MS });
     }
-    const conversation = await assistant.start(requester(req, token), productId ? { productId } : {});
+    const conversation = await assistant.start(requester(req, token), { scope, ...(productId ? { productId } : {}) });
     res.status(201).json({ conversation });
   });
 
