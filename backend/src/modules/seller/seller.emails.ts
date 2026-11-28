@@ -243,6 +243,65 @@ export function storeRejectedEmail(to: string, storeName: string, note: string):
   };
 }
 
+// --- Moderation (milestone 7d) ---
+
+/** A warning's consequences, in the seller's words: how many count now, and a suspension if this was the second. */
+export interface WarningOutcome {
+  /** Warnings that count (not withdrawn) in the last 90 days, this one included. */
+  count: number;
+  /** Set when this warning suspended the store (the second within 90 days). */
+  suspendedUntil: Date | null;
+}
+const warningLines = (w: WarningOutcome) =>
+  w.suspendedUntil
+    ? [
+        "",
+        `This is your second warning within 90 days, so your store is suspended until ${manilaTime.format(w.suspendedUntil)} (Philippine time).`,
+        "Shoppers can't see it meanwhile; orders already paid still have to be shipped. It comes back by itself."
+      ]
+    : ["", `This counts as a warning (${w.count} in the last 90 days). A second warning within 90 days suspends your store for 7 days.`];
+
+export function listingRemovedEmail(to: string, storeName: string, title: string, reason: string, warning: WarningOutcome | null, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "listing-removed",
+    subject: `Vendora removed "${title}"`,
+    text: [
+      `We removed "${title}" from ${storeName}: shoppers can't see or buy it any more. Orders already placed are not affected.`,
+      `Why: ${reason}`,
+      ...(warning ? warningLines(warning) : []),
+      "",
+      "If you think this is a mistake, reply to this email or contact Vendora support.",
+      `Seller Center: ${appUrl}/seller/products`
+    ].join("\n")
+  };
+}
+
+/** A warning without a removal (the listing was kept, but something had to change). */
+export function sellerWarnedEmail(to: string, storeName: string, title: string, reason: string, warning: WarningOutcome, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "seller-warned",
+    subject: `A warning for ${storeName}`,
+    text: [`After reviewing reports about "${title}", Vendora is giving ${storeName} a warning.`, `Why: ${reason}`, ...warningLines(warning), "", `Seller Center: ${appUrl}/seller/products`].join("\n")
+  };
+}
+
+export function listingRestoredEmail(to: string, storeName: string, title: string, opts: { warningWithdrawn: boolean; storeBack: boolean }, appUrl: string): EmailMessage {
+  return {
+    to,
+    kind: "listing-restored",
+    subject: `"${title}" is back in ${storeName}`,
+    text: [
+      `We've restored "${title}". It's inactive for now: turn it on in Seller Center when you're ready.`,
+      ...(opts.warningWithdrawn ? ["The warning given with its removal was withdrawn."] : []),
+      ...(opts.storeBack ? ["Your store is live again."] : []),
+      "",
+      `Seller Center: ${appUrl}/seller/products`
+    ].join("\n")
+  };
+}
+
 // --- Support's store actions (milestone 7c-2) ---
 
 export function storeSuspendedEmail(to: string, storeName: string, reason: string, appUrl: string): EmailMessage {

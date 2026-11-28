@@ -39,6 +39,9 @@ import { MoneyService } from "./modules/admin/money.service.js";
 import { UserAdminService } from "./modules/admin/users.service.js";
 import { StoreAdminService } from "./modules/admin/stores.service.js";
 import { AuditLogService } from "./modules/admin/auditLog.service.js";
+import { ModerationService } from "./modules/admin/moderation.service.js";
+import { reportsRouter } from "./modules/moderation/reports.routes.js";
+import { ReportService } from "./modules/moderation/reports.service.js";
 import { sellerRouter } from "./modules/seller/seller.routes.js";
 import { notificationsRouter } from "./modules/notifications/notifications.routes.js";
 import { PriceDropService } from "./modules/notifications/priceDrops.service.js";
@@ -157,7 +160,14 @@ if (prisma) {
   services.push(users);
   const adminStores = new StoreAdminService({ prisma, email, config, logger });
   services.push(adminStores);
-  routers.push(adminRouter({ dashboard: new AdminDashboardService({ prisma }), applications, money, users, stores: adminStores, auditLog: new AuditLogService({ prisma }), security, guards }));
+  const moderation = new ModerationService({ prisma, email, config, logger });
+  services.push(moderation);
+  routers.push(
+    adminRouter({ dashboard: new AdminDashboardService({ prisma }), applications, money, users, stores: adminStores, auditLog: new AuditLogService({ prisma }), moderation, security, guards })
+  );
+  routers.push(reportsRouter({ reports: new ReportService({ prisma }), guards }));
+  // A store's 7-day suspension after a second warning ends by itself.
+  every(FIFTEEN_MINUTES, "the end of 7-day warning suspensions", () => moderation.liftEndedSuspensions());
 
   const priceDrops = new PriceDropService({ prisma, email, config, logger });
   services.push(priceDrops);

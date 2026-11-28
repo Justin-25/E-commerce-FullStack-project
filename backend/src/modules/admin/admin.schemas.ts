@@ -141,7 +141,7 @@ export const suspendStoreSchema = z.strictObject({
 /** "Rename store": the same rules as a seller's own store name. */
 export const renameStoreSchema = z.strictObject({ name: storeDetailsSchema.shape.name });
 
-export const AUDIT_AREAS = ["stores", "users", "payouts", "refunds", "admins"] as const;
+export const AUDIT_AREAS = ["stores", "users", "payouts", "refunds", "listings", "admins"] as const;
 export type AuditArea = (typeof AUDIT_AREAS)[number];
 export const AUDIT_PAGE_SIZE = 50;
 const manilaDate = z
@@ -161,6 +161,23 @@ export const auditListSchema = z
   })
   .refine((q) => !q.from || !q.to || q.from <= q.to, { error: "The start date is after the end date", path: ["from"] });
 
+// --- Moderation (milestone 7d) ---
+
+export const MODERATION_TABS = ["open", "resolved"] as const;
+export type ModerationTab = (typeof MODERATION_TABS)[number];
+/** Listings with reports: open ones (most reports first), or decided ones (newest decision first); search by title or store. */
+export const moderationListSchema = z.object({ tab: z.enum(MODERATION_TABS, { error: "Unknown tab" }).default("open"), q: search, page });
+export const productIdSchema = z.object({ productId: z.uuid({ error: "Listing not found" }) });
+const sellerReason = (what: string) =>
+  z.string({ error: `Say why (the seller is told)` }).trim().min(10, { error: `Say why ${what} (10 characters or more; the seller is told)` }).max(500, { error: "Use 500 characters or fewer" });
+/** "Keep listing": optionally with a warning (its reason is emailed to the seller). */
+export const keepListingSchema = z.strictObject({ warning: sellerReason("you're warning the seller").optional().transform((v) => v ?? null) });
+/** "Remove listing": why (the seller sees it), and whether it also counts as a warning. */
+export const removeListingSchema = z.strictObject({ reason: sellerReason("it's removed"), warn: z.boolean().default(false) });
+/** "Restore listing": comes back inactive; optionally withdraws the warning given with the removal. */
+export const restoreListingSchema = z.strictObject({ withdrawWarning: z.boolean().default(false) });
+
+export type ModerationListQuery = z.infer<typeof moderationListSchema>;
 export type StoreListQuery = z.infer<typeof storeListSchema>;
 export type AuditListQuery = z.infer<typeof auditListSchema>;
 export type UserListQuery = z.infer<typeof userListSchema>;

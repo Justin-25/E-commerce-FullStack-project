@@ -7,6 +7,11 @@ import {
   approveSchema,
   auditListSchema,
   documentParamsSchema,
+  keepListingSchema,
+  moderationListSchema,
+  productIdSchema,
+  removeListingSchema,
+  restoreListingSchema,
   markFailedSchema,
   markPaidSchema,
   markRefundedSchema,
@@ -28,6 +33,7 @@ import {
 import type { ApplicationService } from "./applications.service.js";
 import type { AuditLogService } from "./auditLog.service.js";
 import type { AdminDashboardService } from "./dashboard.service.js";
+import type { ModerationService } from "./moderation.service.js";
 import type { MoneyService } from "./money.service.js";
 import type { StoreAdminService } from "./stores.service.js";
 import type { UserAdminService } from "./users.service.js";
@@ -44,6 +50,7 @@ export function adminRouter({
   users,
   stores,
   auditLog,
+  moderation,
   security,
   guards
 }: {
@@ -53,6 +60,7 @@ export function adminRouter({
   users: UserAdminService;
   stores: StoreAdminService;
   auditLog: AuditLogService;
+  moderation: ModerationService;
   security: Pick<SecurityService, "requireConfirmed">;
   guards: AuthGuards;
 }): Router {
@@ -178,6 +186,33 @@ export function adminRouter({
     const { storeId } = storeIdSchema.parse(req.params);
     const { name } = renameStoreSchema.parse(req.body);
     res.json({ store: await stores.rename(signedInUserId(req), storeId, name, { ensureConfirmed: confirmed(req), ip: ip(req) }) });
+  });
+
+  // --- product moderation (Moderation, milestone 7d) ---
+
+  router.get("/admin/moderation", ...auth, async (req, res) => {
+    res.json(await moderation.queue(signedInUserId(req), moderationListSchema.parse(req.query)));
+  });
+
+  router.get("/admin/moderation/:productId", ...auth, async (req, res) => {
+    res.json({ listing: await moderation.listing(signedInUserId(req), productIdSchema.parse(req.params).productId) });
+  });
+
+  router.post("/admin/moderation/:productId/keep", ...auth, async (req, res) => {
+    const { productId } = productIdSchema.parse(req.params);
+    const { warning } = keepListingSchema.parse(req.body);
+    res.json({ listing: await moderation.keep(signedInUserId(req), productId, warning, ip(req)) });
+  });
+
+  router.post("/admin/moderation/:productId/remove", ...auth, async (req, res) => {
+    const { productId } = productIdSchema.parse(req.params);
+    res.json({ listing: await moderation.remove(signedInUserId(req), productId, removeListingSchema.parse(req.body), ip(req)) });
+  });
+
+  router.post("/admin/moderation/:productId/restore", ...auth, async (req, res) => {
+    const { productId } = productIdSchema.parse(req.params);
+    const { withdrawWarning } = restoreListingSchema.parse(req.body);
+    res.json({ listing: await moderation.restore(signedInUserId(req), productId, withdrawWarning, ip(req)) });
   });
 
   // --- the audit log (every admin, milestone 7c-2) ---

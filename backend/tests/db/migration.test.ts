@@ -43,9 +43,9 @@ beforeAll(async () => {
 afterAll(async () => db?.close());
 
 describe("migration structure", () => {
-  it("creates all 35 tables (30 from milestone 2 + trusted_devices, refunds, store_daily_visits, two_factor_resets, store_slug_redirects)", async () => {
+  it("creates all 36 tables (30 from milestone 2 + trusted_devices, refunds, store_daily_visits, two_factor_resets, store_slug_redirects, store_warnings)", async () => {
     const { n } = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`);
-    expect(n).toBe(35);
+    expect(n).toBe(36);
   });
 
   it("really builds every index the migration declares", async () => {
@@ -62,11 +62,11 @@ describe("migration structure", () => {
     }
   });
 
-  it("has the 56 foreign keys and 57 safety (CHECK) rules", async () => {
+  it("has the 62 foreign keys and 60 safety (CHECK) rules", async () => {
     const fk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'`);
     const chk = await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'c' AND conname LIKE '%\\_chk'`);
-    expect(fk.n).toBe(56);
-    expect(chk.n).toBe(57);
+    expect(fk.n).toBe(62);
+    expect(chk.n).toBe(60);
   });
 });
 
@@ -215,6 +215,20 @@ describe("orders, reviews & money", () => {
     await expect(reset("now(), now()")).rejects.toThrow(/two_factor_resets_done_chk/); // confirmed AND cancelled
     await reset("now(), NULL");
     await reset("NULL, now()");
+  });
+
+  it("a removed listing says why; a shopper's report has a form reason; one open report per listing per shopper", async () => {
+    const s = await store(await user());
+    const p = await product(s);
+    await fails(`UPDATE products SET status = 'REMOVED' WHERE id = $1`, [p], /products_removed_chk/);
+    await db.query(`UPDATE products SET status = 'REMOVED', "removedAt" = now(), "removedReason" = 'Counterfeit (3 buyer reports).' WHERE id = $1`, [p]);
+    const shopper = await user();
+    const report = (reason: string, extra = "") => db.query(`INSERT INTO product_flags (id, "productId", source, reason, "reporterId"${extra}) VALUES (gen_random_uuid(), $1, 'BUYER_REPORT', $2, $3${extra ? ", now(), 'KEPT'" : ""})`, [p, reason, shopper]);
+    await fails(`INSERT INTO product_flags (id, "productId", source, reason, "reporterId") VALUES (gen_random_uuid(), $1, 'BUYER_REPORT', 'I just dislike it', $2)`, [p, shopper], /product_flags_reason_chk/);
+    await report("COUNTERFEIT");
+    await expect(report("MISLEADING")).rejects.toThrow(/product_flags_one_open_report|unique/i); // a second open one from the same shopper
+    await report("MISLEADING", `, "resolvedAt", status`); // a decided one beside it is fine
+    await fails(`UPDATE product_flags SET status = 'KEPT' WHERE "productId" = $1 AND status = 'OPEN'`, [p], /product_flags_resolved_chk/);
   });
 
   it("keeps payouts consistent: one in progress per store, paid has a date and a transfer reference, failed a reason, a payout line takes money out", async () => {

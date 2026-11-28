@@ -290,6 +290,9 @@ model User {
   suspendedUsers    User[]           @relation("UserSuspender")
   twoFactorResets   TwoFactorReset[] @relation("TwoFactorResetOwner")
   requestedResets   TwoFactorReset[] @relation("TwoFactorResetRequester")
+  removedProducts   Product[]        @relation("ProductRemover")
+  issuedWarnings    StoreWarning[]   @relation("WarningIssuer")
+  withdrawnWarnings StoreWarning[]   @relation("WarningWithdrawer")
 
   @@index([role, status])
   @@map("users")
@@ -496,6 +499,7 @@ model Store {
   payouts       Payout[]
   dailyVisits   StoreDailyVisit[]
   oldSlugs      StoreSlugRedirect[]
+  warnings      StoreWarning[]
 
   @@index([status])
   @@index([categoryId])
@@ -566,6 +570,27 @@ model StoreSlugRedirect {
   @@map("store_slug_redirects")
 }
 
+/// A warning Moderation gave a store (7d): a second one within 90 days suspends the store for 7 days. A
+/// withdrawn warning (e.g. the listing was restored) no longer counts.
+model StoreWarning {
+  id            String    @id @default(uuid(7)) @db.Uuid
+  storeId       String    @db.Uuid
+  productId     String?   @db.Uuid
+  reason        String    @db.VarChar(500)
+  issuedById    String?   @db.Uuid
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  withdrawnAt   DateTime? @db.Timestamptz(3)
+  withdrawnById String?   @db.Uuid
+
+  store       Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  product     Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  issuedBy    User?    @relation("WarningIssuer", fields: [issuedById], references: [id], onDelete: SetNull)
+  withdrawnBy User?    @relation("WarningWithdrawer", fields: [withdrawnById], references: [id], onDelete: SetNull)
+
+  @@index([storeId, createdAt(sort: Desc)])
+  @@map("store_warnings")
+}
+
 model StoreFollow {
   userId    String   @db.Uuid
   storeId   String   @db.Uuid
@@ -623,11 +648,17 @@ model Product {
   lowStockAlert    Boolean                  @default(true)
   /// Raised by every seller edit; an edit from an out-of-date form is refused (orders and reviews don't change it).
   version          Int                      @default(1)
+  /// REMOVED by Moderation (7d): when, why (the seller sees it; CHECK) and by whom. "Restore" makes it inactive again.
+  removedAt        DateTime?                @db.Timestamptz(3)
+  removedReason    String?                  @db.VarChar(500)
+  removedById      String?                  @db.Uuid
   createdAt        DateTime                 @default(now()) @db.Timestamptz(3)
   updatedAt        DateTime                 @updatedAt @db.Timestamptz(3)
 
   store         Store            @relation(fields: [storeId], references: [id], onDelete: Restrict)
   category      Category         @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  removedBy     User?            @relation("ProductRemover", fields: [removedById], references: [id], onDelete: SetNull)
+  warnings      StoreWarning[]
   variants      ProductVariant[]
   images        ProductImage[]
   reviews       Review[]
@@ -779,6 +810,7 @@ model Order {
   user         User          @relation(fields: [userId], references: [id], onDelete: Restrict)
   sellerOrders SellerOrder[]
   payments     Payment[]
+  flags        ProductFlag[]
 
   @@unique([userId, idempotencyKey])
   @@index([userId, createdAt(sort: Desc)])
@@ -1034,9 +1066,12 @@ model ProductFlag {
   resolvedById   String?    @db.Uuid
   resolvedAt     DateTime?  @db.Timestamptz(3)
   resolutionNote String?    @db.VarChar(500)
+  /// The reporter's own order with this product, if they attached one (7d): Moderation sees which reports come from buyers.
+  orderId        String?    @db.Uuid
   createdAt      DateTime   @default(now()) @db.Timestamptz(3)
 
   product    Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  order      Order?  @relation(fields: [orderId], references: [id], onDelete: SetNull)
   reporter   User?   @relation("FlagReporter", fields: [reporterId], references: [id], onDelete: SetNull)
   resolvedBy User?   @relation("FlagResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
 

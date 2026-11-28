@@ -358,7 +358,7 @@ describe("Edit product", () => {
   it("a product Vendora removed can't be changed or deleted", async () => {
     const s = await sell.seller();
     const p = await sell.publish(s.browser);
-    await h.db.prisma.product.update({ where: { id: p.id }, data: { status: "REMOVED" } });
+    await h.db.prisma.product.update({ where: { id: p.id }, data: { status: "REMOVED", removedAt: new Date(), removedReason: "Test: removed" } });
     expect((await s.browser.get(`${P}/${p.id}`)).body.product).toMatchObject({ status: "removed", canDelete: false });
     for (const res of [await s.browser.put(`${P}/${p.id}`, sell.editForm(p)), await s.browser.delete(`${P}/${p.id}`)]) {
       expect(res.status).toBe(403);

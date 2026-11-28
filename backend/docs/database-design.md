@@ -212,6 +212,7 @@ erDiagram
     string slug "unique per store"
     text description
     enum status "DRAFT | ACTIVE | ARCHIVED | REMOVED"
+    string removedReason "why Moderation removed it (7d)"
     decimal ratingAvg
     int ratingCount
     int soldCount
@@ -455,6 +456,15 @@ erDiagram
     int riskScore "0-100 (AI)"
     enum status "OPEN | KEPT | REMOVED"
     uuid resolvedById FK
+    uuid orderId FK "the reporter's own order (7d)"
+  }
+  store_warnings {
+    uuid id PK
+    uuid storeId FK
+    uuid productId FK
+    string reason
+    uuid issuedById FK
+    datetime withdrawnAt "a restore can withdraw it (7d)"
   }
   audit_logs {
     uuid id PK
@@ -472,6 +482,7 @@ erDiagram
   - Example: a ₱9,998 sale (+999800), the fee (−50000), and later a payout (−949800).
   - **Written at delivery** (milestone 6c), in the same transaction that marks the package delivered: a `SALE` line and a `FEE` line (none in a store's first 30 days), both available 7 days after delivery. A partial unique index, `(sellerOrderId, type) WHERE type IN ('SALE', 'FEE')`, allows one of each per package, so a package can never be credited twice. The migration wrote these lines for packages delivered before 6c.
 - **Admin actions always write an `audit_logs` row,** in the same transaction as the change; so does every look at a full TIN, a private document or a payout account number. `actorId` is null when a command on the server did it (`npm run store:approve`, `admin:create`). Newest first through `audit_logs_createdAt_idx`.
+- **Moderation** (milestone 7d, migration `20261203090000_moderation`): a shopper's report is a `product_flags` row (source BUYER_REPORT; CHECK: one of the form's reasons; `orderId` = their own order, if attached). A partial unique index allows one OPEN report per listing per shopper; a decided flag has `resolvedAt` (CHECK). A removed product keeps `removedAt`, `removedReason` (CHECK: required while REMOVED; the seller sees it) and `removedById`; Restore makes it ARCHIVED (inactive). `store_warnings` holds every warning (reason, listing, who, when, and `withdrawnAt` when a restore withdrew it); `stores.warningCount` counts the ones not withdrawn. Two warnings within 90 days suspend the store for 7 days: `suspendedCause` WARNINGS with `suspendedUntil`, which a job clears.
 - **Stores by Support** (milestone 7c-2, migration `20261201090000_stores_admin`): `stores.suspendedReason` is Support's reason, shown to the seller (CHECK `stores_suspended_reason_chk`: a store suspended by Support always has one). `store_slug_redirects` keeps a renamed store's old addresses: each redirects to the store forever and is reserved (the name checks look here too), so no other store can take a renamed store's old name. Renaming back to an old name deletes that row.
 - **Users by Support** (milestone 7c-1, migration `20261130090000_users_admin`): a suspended account has `suspendedAt`, `suspendedReason` (the person is told) and `suspendedById` (CHECK `users_suspended_chk`); a suspended store has `suspendedAt` and `suspendedCause` (ACCOUNT: its owner's account was suspended, and reactivating the account brings it back; ADMIN: Support, 7c-2; WARNINGS: 7d) (CHECK `stores_suspended_chk`). `two_factor_resets` holds Support's reset requests: the written identity check, who asked, a keyed hash of the owner's link, 24 hours; confirmed or cancelled, never both (CHECK). The rules only demand the facts while suspended (reactivating clears them; history lives in the audit log).
 - **Payouts and refunds by Finance** (milestone 7b, migration `20261129090000_money`): `payouts.transferReference` is the bank or GCash transfer's reference (CHECK `payouts_paid_reference_chk`: every PAID payout has one; the demo history was back-filled with `DEMO-…`), and `payouts.handledById` the Finance admin who marked it. `refunds.sentVia` says how a SENT refund reached the shopper: `PAYMONGO_API` (our call), `PAYMONGO_DASHBOARD` (an admin refunded in PayMongo's dashboard; its `providerRefundId` was checked with PayMongo) or `OTHER_TRANSFER` (`manualReference`, e.g. a GCash reference); `handledById` is the admin who closed it by hand. `refunds_sent_chk` was rewritten: a SENT refund has `sentAt`, a `sentVia` (tested first, because in SQL a NULL would make the rest "unknown", and a CHECK lets unknown through) and the matching id or reference.

@@ -41,6 +41,9 @@ import type { MoneyService } from "../src/modules/admin/money.service.js";
 import type { UserAdminService } from "../src/modules/admin/users.service.js";
 import type { StoreAdminService } from "../src/modules/admin/stores.service.js";
 import type { AuditLogService } from "../src/modules/admin/auditLog.service.js";
+import type { ModerationService } from "../src/modules/admin/moderation.service.js";
+import { reportsRouter } from "../src/modules/moderation/reports.routes.js";
+import type { ReportService } from "../src/modules/moderation/reports.service.js";
 import { sellerRouter } from "../src/modules/seller/seller.routes.js";
 import { notificationsRouter } from "../src/modules/notifications/notifications.routes.js";
 import type { PriceDropService } from "../src/modules/notifications/priceDrops.service.js";
@@ -100,7 +103,8 @@ describe("openapi.yaml", () => {
       webhooksRouter({ orders: {} as OrderService, secret: undefined }),
       sellerRouter({ onboarding: {} as OnboardingService, products: {} as SellerProductService, orders: {} as SellerOrderService, dashboard: {} as DashboardService, payouts: {} as PayoutService, security: {} as SecurityService, guards, config }),
       notificationsRouter({ priceDrops: {} as PriceDropService, guards }),
-      adminRouter({ dashboard: {} as AdminDashboardService, applications: {} as ApplicationService, money: {} as MoneyService, users: {} as UserAdminService, stores: {} as StoreAdminService, auditLog: {} as AuditLogService, security: {} as SecurityService, guards })
+      reportsRouter({ reports: {} as ReportService, guards }),
+      adminRouter({ dashboard: {} as AdminDashboardService, applications: {} as ApplicationService, money: {} as MoneyService, users: {} as UserAdminService, stores: {} as StoreAdminService, auditLog: {} as AuditLogService, moderation: {} as ModerationService, security: {} as SecurityService, guards })
     ];
     const inCode = routers.flatMap((r) => routesOf(r, "/api/v1"));
     expect(documented("/api/v1/").sort()).toEqual(inCode.sort());

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Vendora API
-  version: 0.17.0
+  version: 0.18.0
   description: |
     Backend for Vendora, a multi-vendor marketplace (Philippines, prices in ₱).
     Platform basics (milestone 1): health checks, the error format, request IDs and rate limiting.
@@ -61,7 +61,7 @@ tags:
     description: |
       Admin pages (milestone 7). An ADMIN account with two-step verification on, checked in the database on
       every request, holding the role a page needs: SUPPORT (seller applications, payout accounts, users, stores), FINANCE
-      (payouts and refunds), MODERATION. Every action, and every look at sensitive data, is written to the audit
+      (payouts and refunds), MODERATION (reported listings, warnings). Every action, and every look at sensitive data, is written to the audit
       log; actions that move or decide where money goes also need "Confirm it's you".
 
 paths:
@@ -1018,6 +1018,45 @@ paths:
               schema: { $ref: "#/components/schemas/SearchResult" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/products/{productId}/report:
+    parameters:
+      - { name: productId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Report this listing
+      description: |
+        Any signed-in shopper, about a listing shoppers can see (never their own store's). A reason from the form, an
+        optional message, and optionally one of their own orders with this item (Moderation sees which reports come from
+        buyers). One open report per listing per shopper (409 `already_reported`), at most 10 a day (429).
+      operationId: reportListing
+      tags: [catalog]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason]
+              properties:
+                reason: { type: string, enum: [COUNTERFEIT, MISLEADING, PROHIBITED, MISSING_PERMIT, OFFENSIVE, OTHER] }
+                message: { type: string, maxLength: 1000 }
+                orderId: { type: string, format: uuid, description: One of your orders with this item. }
+      responses:
+        "201":
+          description: Reported. Moderation looks at it; the shopper isn't told the outcome.
+          content: { application/json: { schema: { type: object, required: [reported], properties: { reported: { const: true } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/CsrfInvalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: 'CONFLICT, with `details.reason`: already_reported, own_listing.'
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429":
+          description: RATE_LIMITED (`too_many_reports`, 10 a day) or the general rate limit.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
   /api/v1/products/{id}:
     get:
@@ -2700,6 +2739,113 @@ paths:
           description: 'CONFLICT, with `details.reason` (and field `name`): name_taken (also an old address of another store), name_reserved, same_name.'
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
+  /api/v1/admin/moderation:
+    get:
+      summary: Reported listings (Moderation)
+      description: Open reports grouped per listing, most reports first (then the oldest); or decided ones, newest decision first. 20 a page; search by title or store. `counts` ignore the search.
+      operationId: listModeration
+      tags: [admin]
+      security: [{ accessCookie: [] }]
+      parameters:
+        - { name: tab, in: query, schema: { type: string, enum: [open, resolved], default: open } }
+        - { name: q, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 1 } }
+      responses:
+        "200":
+          description: A page of reported listings.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ModerationQueue" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+
+  /api/v1/admin/moderation/{productId}:
+    parameters:
+      - { name: productId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: One reported listing (Moderation)
+      description: The listing as shoppers see it, the store's warnings, every report (reporters as "Maria S." and their order, never an email) and past decisions.
+      operationId: getModerationListing
+      tags: [admin]
+      security: [{ accessCookie: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/ModerationListing" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/admin/moderation/{productId}/keep:
+    parameters:
+      - { name: productId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Keep a listing (Moderation)
+      description: Closes its open reports. With `warning`, the store gets a warning (emailed); a second warning within 90 days suspends the store for 7 days.
+      operationId: keepListing
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, properties: { warning: { type: string, minLength: 10, maxLength: 500 } } }
+      responses:
+        "200": { $ref: "#/components/responses/ModerationListing" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT (`nothing_open`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/admin/moderation/{productId}/remove:
+    parameters:
+      - { name: productId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Remove a listing (Moderation)
+      description: |
+        Hidden from shoppers; the seller can't change it and sees the reason; orders already placed are untouched. Its open
+        reports close. With `warn`, it also counts as a warning: the second within 90 days suspends the store for 7 days at
+        once (a store already suspended by Support keeps that suspension). The seller is emailed.
+      operationId: removeListing
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [reason], properties: { reason: { type: string, minLength: 10, maxLength: 500 }, warn: { type: boolean, default: false } } }
+      responses:
+        "200": { $ref: "#/components/responses/ModerationListing" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT (`already_removed`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/v1/admin/moderation/{productId}/restore:
+    parameters:
+      - { name: productId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Restore a removed listing (Moderation)
+      description: Back as inactive (the seller turns it on). With `withdrawWarning`, the warning given with its removal no longer counts; if that leaves fewer than two in 90 days, a 7-day warning suspension ends now. The seller is emailed.
+      operationId: restoreListing
+      tags: [admin]
+      security: [{ accessCookie: [], csrfHeader: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, properties: { withdrawWarning: { type: boolean, default: false } } }
+      responses:
+        "200": { $ref: "#/components/responses/ModerationListing" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/AdminForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT (`not_removed`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
   /api/v1/admin/audit:
     get:
       summary: The audit log (every admin)
@@ -2711,7 +2857,7 @@ paths:
       tags: [admin]
       security: [{ accessCookie: [] }]
       parameters:
-        - { name: area, in: query, schema: { type: string, enum: [stores, users, payouts, refunds, admins] } }
+        - { name: area, in: query, schema: { type: string, enum: [stores, users, payouts, refunds, listings, admins] } }
         - { name: actor, in: query, schema: { type: string, format: uuid } }
         - { name: target, in: query, schema: { type: string, format: uuid } }
         - { name: from, in: query, schema: { type: string, format: date, example: 2026-11-27 } }
@@ -4055,6 +4201,7 @@ components:
         expressAvailable: { type: boolean }
         lowStockAlert: { type: boolean }
         visibleToShoppers: { type: boolean, description: Active, something on sale, and the store approved. }
+        removal: { type: [object, "null"], description: "Vendora removed it (7d): it can't be changed; Moderation may restore it.", properties: { at: { type: [string, "null"], format: date-time }, reason: { type: [string, "null"] } } }
         canDelete: { type: boolean, description: Only products that never sold. }
         publishedAt: { type: [string, "null"], format: date-time }
         createdAt: { type: string, format: date-time }
@@ -4286,6 +4433,73 @@ components:
             pageSize: { type: integer, const: 20 }
             totalItems: { type: integer }
             totalPages: { type: integer }
+    ModerationQueue:
+      type: object
+      required: [items, counts, page, pageSize, totalItems, totalPages]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              product: { type: object, properties: { id: { type: string, format: uuid }, title: { type: string }, slug: { type: string }, status: { type: string }, imageUrl: { type: [string, "null"] } } }
+              store: { type: object, properties: { id: { type: string, format: uuid }, name: { type: string }, slug: { type: string } } }
+              reports: { type: integer }
+              fromBuyers: { type: integer, description: Reports with the reporter's own order attached. }
+              reasons: { type: array, items: { type: object, properties: { reason: { type: string }, label: { type: string }, count: { type: integer } } } }
+              firstReportedAt: { type: [string, "null"], format: date-time }
+              decidedAt: { type: [string, "null"], format: date-time }
+        counts: { type: object, properties: { open: { type: integer }, resolved: { type: integer } } }
+        page: { type: integer }
+        pageSize: { type: integer, const: 20 }
+        totalItems: { type: integer }
+        totalPages: { type: integer }
+    ModerationListing:
+      type: object
+      properties:
+        product:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            title: { type: string }
+            slug: { type: string }
+            status: { type: string, enum: [DRAFT, ACTIVE, ARCHIVED, REMOVED] }
+            description: { type: string, description: The first 600 characters. }
+            imageUrl: { type: [string, "null"] }
+            priceCentavos: { type: [integer, "null"] }
+            removed: { type: [object, "null"], properties: { at: { type: [string, "null"], format: date-time }, reason: { type: [string, "null"] }, by: { type: [string, "null"] } } }
+        store:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            slug: { type: string }
+            status: { type: string }
+            suspendedForWarningsUntil: { type: [string, "null"], format: date-time }
+            approvedAt: { type: [string, "null"], format: date-time }
+            warningsIn90Days: { type: integer }
+            warnings: { type: array, items: { type: object, properties: { id: { type: string, format: uuid }, reason: { type: string }, at: { type: string, format: date-time }, thisListing: { type: boolean } } } }
+        reports:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              source: { type: string, enum: [BUYER_REPORT, AI] }
+              reason: { type: string }
+              label: { type: string }
+              message: { type: [string, "null"] }
+              reporter: { type: [string, "null"], example: Maria S. }
+              order: { type: [string, "null"], example: VD-21288 }
+              status: { type: string, enum: [OPEN, KEPT, REMOVED] }
+              at: { type: string, format: date-time }
+              decidedAt: { type: [string, "null"], format: date-time }
+              decidedBy: { type: [string, "null"] }
+        openReports: { type: integer }
+        canKeep: { type: boolean }
+        canRemove: { type: boolean }
+        canRestore: { type: boolean }
+        history: { type: array, items: { type: object, properties: { action: { type: string }, by: { type: string }, at: { type: string, format: date-time }, metadata: {} } } }
     AdminStoreList:
       type: object
       required: [items, counts, page, pageSize, totalItems, totalPages]
@@ -4779,6 +4993,9 @@ components:
                     accountName: { type: string }
                     last4: { type: string }
                     changedAt: { type: string, format: date-time }
+    ModerationListing:
+      description: The listing (after the decision).
+      content: { application/json: { schema: { type: object, required: [listing], properties: { listing: { $ref: "#/components/schemas/ModerationListing" } } } } }
     AdminStore:
       description: The store (after the change).
       content: { application/json: { schema: { type: object, required: [store], properties: { store: { $ref: "#/components/schemas/AdminStore" } } } } }

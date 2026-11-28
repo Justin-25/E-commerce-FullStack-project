@@ -8,6 +8,7 @@ const AREA_PREFIXES: Record<AuditArea, string[]> = {
   users: ["user."],
   payouts: ["payout.", "payout_account."],
   refunds: ["refund."],
+  listings: ["product."],
   admins: ["admin."]
 };
 /** "2026-11-27" (a Philippine day) → its first moment. */
@@ -31,9 +32,9 @@ function summary(action: string, label: string, m: Meta): string {
     case "store.view_document":
       return `Opened a document of ${it}`;
     case "store.suspend":
-      return `Suspended store ${it}`;
+      return m && m.cause === "WARNINGS" ? `Suspended store ${it} for 7 days (a second warning within 90 days)` : `Suspended store ${it}`;
     case "store.reactivate":
-      return `Reactivated store ${it}`;
+      return m && m.via === "automatic" ? `Store ${it} is live again (its 7-day suspension ended)` : `Reactivated store ${it}`;
     case "store.rename": {
       const from = m && typeof m.from === "object" && m.from ? str(m.from as Meta, "name") : "";
       return `Renamed store ${from || "?"} to ${str((m?.to as Meta) ?? null, "name") || it}`;
@@ -62,6 +63,12 @@ function summary(action: string, label: string, m: Meta): string {
       return `${it} confirmed the two-step reset`;
     case "user.export":
       return `Exported users (${m && typeof m.rows === "number" ? m.rows : "?"} rows)`;
+    case "product.keep":
+      return `Kept listing ${it}${m && m.warned ? " and warned the seller" : ""}`;
+    case "product.remove":
+      return `Removed listing ${it}${m && m.warned ? " and warned the seller" : ""}`;
+    case "product.restore":
+      return `Restored listing ${it}${m && m.warningWithdrawn ? " and withdrew the warning" : ""}`;
     case "admin.create":
       return `Made ${it} an admin`;
     case "admin.change_roles":
@@ -132,12 +139,13 @@ export class AuditLogService {
   private async labels(rows: { targetType: string; targetId: string | null }[]): Promise<Map<string, string>> {
     const { prisma } = this.deps;
     const ids = (type: string) => [...new Set(rows.filter((r) => r.targetType === type && r.targetId).map((r) => r.targetId as string))];
-    const [stores, users, payouts, refunds, accounts] = await Promise.all([
+    const [stores, users, payouts, refunds, accounts, products] = await Promise.all([
       prisma.store.findMany({ where: { id: { in: ids("store") } }, select: { id: true, name: true } }),
       prisma.user.findMany({ where: { id: { in: ids("user") } }, select: { id: true, name: true, email: true } }),
       prisma.payout.findMany({ where: { id: { in: ids("payout") } }, select: { id: true, reference: true } }),
       prisma.refund.findMany({ where: { id: { in: ids("refund") } }, select: { id: true, payment: { select: { order: { select: { orderNumber: true } } } } } }),
-      prisma.payoutAccount.findMany({ where: { id: { in: ids("payout_account") } }, select: { id: true, store: { select: { name: true } } } })
+      prisma.payoutAccount.findMany({ where: { id: { in: ids("payout_account") } }, select: { id: true, store: { select: { name: true } } } }),
+      prisma.product.findMany({ where: { id: { in: ids("product") } }, select: { id: true, title: true, store: { select: { name: true } } } })
     ]);
     const map = new Map<string, string>();
     for (const s of stores) map.set(`store:${s.id}`, s.name);
@@ -145,6 +153,7 @@ export class AuditLogService {
     for (const p of payouts) map.set(`payout:${p.id}`, p.reference);
     for (const r of refunds) map.set(`refund:${r.id}`, `order VD-${r.payment.order.orderNumber}`);
     for (const a of accounts) map.set(`payout_account:${a.id}`, a.store.name);
+    for (const p of products) map.set(`product:${p.id}`, `"${p.title}" (${p.store.name})`);
     return map;
   }
 }

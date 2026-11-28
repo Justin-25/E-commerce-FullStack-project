@@ -41,6 +41,9 @@ import { MoneyService } from "../../src/modules/admin/money.service.js";
 import { UserAdminService } from "../../src/modules/admin/users.service.js";
 import { StoreAdminService } from "../../src/modules/admin/stores.service.js";
 import { AuditLogService } from "../../src/modules/admin/auditLog.service.js";
+import { ModerationService } from "../../src/modules/admin/moderation.service.js";
+import { reportsRouter } from "../../src/modules/moderation/reports.routes.js";
+import { ReportService } from "../../src/modules/moderation/reports.service.js";
 
 /**
  * The real catalog, reviews and store routes on a fresh test database filled with the
@@ -61,6 +64,7 @@ export async function createCatalogHarness() {
     cancellation?: CancellationService;
     visits?: VisitService;
     payouts?: PayoutService;
+    moderation?: ModerationService;
   } = {};
   /** Moves the clock of the background jobs and Seller Center orders (a day, a week) without waiting. */
   const clock = { offsetMs: 0 };
@@ -98,6 +102,7 @@ export async function createCatalogHarness() {
       services.lowStock = new LowStockService({ prisma, email: deps.email, config: deps.config, logger, now });
       return [
         notificationsRouter({ priceDrops, guards }),
+        reportsRouter({ reports: new ReportService({ prisma, now }), guards }),
         adminRouter({
           dashboard: new AdminDashboardService({ prisma, now }),
           applications: new ApplicationService({ prisma, media, email: deps.email, config: deps.config, logger, now }),
@@ -105,6 +110,7 @@ export async function createCatalogHarness() {
           users: new UserAdminService({ prisma, kv, email: deps.email, config: deps.config, logger, now }),
           stores: new StoreAdminService({ prisma, email: deps.email, config: deps.config, logger, now }),
           auditLog: new AuditLogService({ prisma }),
+          moderation: (services.moderation = new ModerationService({ prisma, email: deps.email, config: deps.config, logger, now })),
           security: new SecurityService({ prisma, kv, email: deps.email, config: deps.config, logger }),
           guards
         }),
@@ -147,7 +153,7 @@ export async function createCatalogHarness() {
     if (!s) throw new Error(`no ${name} service yet`);
     return s as NonNullable<(typeof services)[K]>;
   };
-  return { ...h, demo, idOf, paymongo, media, orders, priceDrops, clock, delivery: service("delivery"), sellerOrders: service("sellerOrders"), lowStock: service("lowStock"), refunds: service("refunds"), cancellation: service("cancellation"), visits: service("visits"), payouts: service("payouts") };
+  return { ...h, demo, idOf, paymongo, media, orders, priceDrops, clock, delivery: service("delivery"), sellerOrders: service("sellerOrders"), lowStock: service("lowStock"), refunds: service("refunds"), cancellation: service("cancellation"), visits: service("visits"), payouts: service("payouts"), moderation: service("moderation") };
 }
 
 export type CatalogHarness = Awaited<ReturnType<typeof createCatalogHarness>>;

@@ -151,7 +151,7 @@ describe("GET /stores/:slug/reviews", () => {
       for (let page = 1; page <= archived.totalPages; page++) all.push(...((await storeReviews("soundcraft-audio", `page=${page}`)).body as ReviewPage).items);
       expect(all.filter((r) => r.product?.id === productId).every((r) => r.product?.available === false)).toBe(true);
 
-      await h.db.prisma.product.update({ where: { id: productId }, data: { status: "REMOVED" } });
+      await h.db.prisma.product.update({ where: { id: productId }, data: { status: "REMOVED", removedAt: new Date(), removedReason: "Test: removed" } });
       await recomputeRatings(h.db.prisma, { productIds: [productId] });
       const removed = (await storeReviews("soundcraft-audio")).body as ReviewPage;
       expect(removed.summary.count).toBe(before - reviewsOfIt);

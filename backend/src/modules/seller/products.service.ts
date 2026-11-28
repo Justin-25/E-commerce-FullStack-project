@@ -61,6 +61,8 @@ export interface SellerProductView {
   lowStockAlert: boolean;
   /** Shoppers can see it: active, something on sale, and the store approved. */
   visibleToShoppers: boolean;
+  /** Vendora removed it (7d): when and why. It can't be changed; Moderation may restore it. */
+  removal: { at: string | null; reason: string | null } | null;
   /** Only products that never sold can be deleted (orders keep pointing at them). */
   canDelete: boolean;
   publishedAt: string | null;
@@ -494,6 +496,7 @@ export class SellerProductService {
       expressAvailable: p.expressAvailable,
       lowStockAlert: p.lowStockAlert,
       visibleToShoppers: p.status === "ACTIVE" && store.status === "APPROVED" && p.variants.length > 0,
+      removal: p.status === "REMOVED" ? { at: p.removedAt?.toISOString() ?? null, reason: p.removedReason } : null,
       canDelete: sold === null && p.status !== "REMOVED",
       publishedAt: p.publishedAt?.toISOString() ?? null,
       createdAt: p.createdAt.toISOString(),
